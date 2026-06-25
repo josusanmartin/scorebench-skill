@@ -68,11 +68,62 @@ def codex_jsonl_total(path: Path) -> int:
     return total
 
 
+def claude_usage_total(usage: dict[str, Any]) -> int | None:
+    fields = (
+        "input_tokens",
+        "output_tokens",
+        "cache_creation_input_tokens",
+        "cache_read_input_tokens",
+        "cache_creation_tokens",
+        "cache_read_tokens",
+    )
+    values = [usage.get(field) for field in fields]
+    if any(isinstance(value, int) for value in values):
+        return sum(value for value in values if isinstance(value, int))
+    return usage_total(usage)
+
+
+def claude_jsonl_total(path: Path) -> int:
+    total = 0
+    seen = 0
+    with path.open("r", encoding="utf-8") as handle:
+        for line in handle:
+            line = line.strip()
+            if not line:
+                continue
+            try:
+                event = json.loads(line)
+            except json.JSONDecodeError:
+                continue
+            if not isinstance(event, dict):
+                continue
+            message = event.get("message")
+            usage = None
+            if isinstance(message, dict):
+                usage = message.get("usage")
+            if not isinstance(usage, dict):
+                usage = event.get("usage")
+            if not isinstance(usage, dict):
+                continue
+            value = claude_usage_total(usage)
+            if value is None:
+                continue
+            total += value
+            seen += 1
+    if seen == 0:
+        raise SystemExit(f"no Claude Code message.usage records found in {path}")
+    return total
+
+
 def read_total(args: argparse.Namespace) -> int:
+    if args.codex_jsonl and args.claude_jsonl:
+        raise SystemExit("provide only one of --codex-jsonl or --claude-jsonl")
     if args.codex_jsonl:
         return codex_jsonl_total(Path(args.codex_jsonl))
+    if args.claude_jsonl:
+        return claude_jsonl_total(Path(args.claude_jsonl))
     if args.total_tokens is None:
-        raise SystemExit("provide --total-tokens or --codex-jsonl")
+        raise SystemExit("provide --total-tokens, --codex-jsonl, or --claude-jsonl")
     if args.total_tokens < 0:
         raise SystemExit("--total-tokens cannot be negative")
     return args.total_tokens
@@ -83,12 +134,16 @@ def tokens_source_from_args(args: argparse.Namespace) -> str:
         return args.source
     if args.codex_jsonl:
         return "codex_exec_jsonl"
+    if args.claude_jsonl:
+        return "claude_code_jsonl"
     return "codex_goal"
 
 
 def usage_source_for(tokens_source: str) -> str:
     if tokens_source.startswith("codex_"):
         return "codex_usage"
+    if tokens_source.startswith("claude_"):
+        return "claude_code"
     if tokens_source in {"provider_usage", "api_meter"}:
         return "api_meter"
     if tokens_source in {"runner_measured", "launcher"}:
@@ -167,7 +222,8 @@ def add_total_args(parser: argparse.ArgumentParser) -> None:
     parser.add_argument("--state", default=DEFAULT_STATE, help=f"state file; default {DEFAULT_STATE}")
     parser.add_argument("--total-tokens", type=int, help="current exact cumulative token count from the runner")
     parser.add_argument("--codex-jsonl", help="Codex exec --json event log to parse")
-    parser.add_argument("--source", help="usage source, for example codex_goal, codex_exec_jsonl, provider_usage")
+    parser.add_argument("--claude-jsonl", help="current Claude Code session JSONL transcript to parse")
+    parser.add_argument("--source", help="usage source, for example codex_goal, codex_exec_jsonl, claude_code_jsonl, provider_usage")
     parser.add_argument("--confidence", default="exact", choices=["exact", "parsed", "estimated"])
 
 

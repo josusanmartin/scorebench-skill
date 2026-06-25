@@ -27,6 +27,11 @@ Agents then use the `harness` CLI provided by the server repository:
 `harness context`, `harness exercise`, `harness run start`, `harness run ping`,
 and `harness submit`. Connector credentials stay in the Harness middleware.
 
+The skill includes token-accounting helpers for Codex JSONL and Claude Code
+session JSONL. For Claude Code, agents should parse only the current session
+transcript and baseline it after the harness run is established; they should
+not scrape unrelated `~/.claude` history.
+
 If the solving environment does not already have `harness` on `PATH`, the skill
 includes a bootstrap helper that installs the CLI from the server repository:
 

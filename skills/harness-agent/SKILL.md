@@ -143,7 +143,32 @@ source available:
   session token count, use that number. Do not use `/usage`, because account
   usage is not scoped to this harness run.
 - **Claude Code**: use the exact visible `/cost` token total if it is shown. If
-  it only shows money or cannot be read exactly, stop before submitting.
+  the CLI UI exposes usage but you need a command-line source, parse only the
+  current Claude Code session transcript. Claude Code writes per-turn usage
+  records in a JSONL file under `~/.claude/projects/.../<session>.jsonl`. Use a
+  file only when it is unambiguously the current session, for example because
+  the user, launcher, or active Claude Code output provides the path. If you
+  must discover it, inspect only the current project's matching
+  `~/.claude/projects/<encoded-current-cwd>/` directory sorted by mtime and
+  choose the active file only when there is exactly one plausible current
+  transcript. If ambiguous, ask the user for the file path instead of guessing.
+
+  ```bash
+  export CLAUDE_CODE_JSONL=/home/.../.claude/projects/.../<current-session>.jsonl
+  python3 "$HARNESS_TOKEN_HELPER" start --claude-jsonl "$CLAUDE_CODE_JSONL" --source claude_code_jsonl --confidence parsed
+  ```
+
+  Before each submission:
+
+  ```bash
+  TOKEN_FLAGS="$(python3 "$HARNESS_TOKEN_HELPER" flags --claude-jsonl "$CLAUDE_CODE_JSONL" --source claude_code_jsonl --confidence parsed)"
+  ```
+
+  The helper sums exact `message.usage` fields from that session:
+  `input_tokens`, `output_tokens`, `cache_creation_input_tokens`, and
+  `cache_read_input_tokens`. The run-start baseline makes the value
+  run-relative. Do not parse old Claude transcripts or unrelated project
+  sessions.
 - **Gemini CLI**: use the exact visible `/stats` token total if it is shown. If
   it cannot be read exactly, stop before submitting.
 - **Provider/API runner**: use provider `usage` fields summed cumulatively for
@@ -162,24 +187,40 @@ or, for a Codex JSONL runner:
 TOKEN_FLAGS="$(python3 "$HARNESS_TOKEN_HELPER" flags --codex-jsonl "$CODEX_EXEC_JSONL" --source codex_exec_jsonl --confidence parsed)"
 ```
 
+or, for the current Claude Code transcript:
+
+```bash
+TOKEN_FLAGS="$(python3 "$HARNESS_TOKEN_HELPER" flags --claude-jsonl "$CLAUDE_CODE_JSONL" --source claude_code_jsonl --confidence parsed)"
+```
+
 The helper subtracts the run-start baseline and emits run-relative
 `--total-tokens`, `--usage-source`, `--usage-confidence`, and
 `--tokens-total-source`. For Codex sources it emits trusted
 `--usage-source codex_usage` and keeps the specific origin, such as
-`codex_goal` or `codex_exec_jsonl`, in `--tokens-total-source`. Do not
-hand-write those flags unless the helper is unavailable.
+`codex_goal`, `codex_exec_jsonl`, or `claude_code_jsonl`, in
+`--tokens-total-source`. Do not hand-write those flags unless the helper is
+unavailable.
 
-Never search `~/.codex`, `~/.claude`, browser profiles, shell snapshots, or
-old transcripts to infer tokens. Those sources are not run-scoped and have
-already produced wrong dashboard data.
+Never broadly search `~/.codex`, `~/.claude`, browser profiles, shell snapshots,
+or old transcripts to infer tokens. Those sources are not run-scoped and have
+already produced wrong dashboard data. The only allowed transcript exception is
+the current Claude Code session JSONL file identified above and baselined after
+the harness run is established.
 
 Before ending the session or handing control back to the user, record the final
 run-level usage. Reports prefer this final run measurement over per-submission
-inference. If you are using the helper, take one final snapshot and reuse the
-flags:
+inference. If you are using the helper, take one final snapshot from the same
+source used for submissions and reuse the flags:
 
 ```bash
 FINAL_TOKEN_FLAGS="$(python3 "$HARNESS_TOKEN_HELPER" flags --total-tokens <current_total_tokens> --source codex_goal)"
+harness run usage $FINAL_TOKEN_FLAGS
+```
+
+For Claude Code:
+
+```bash
+FINAL_TOKEN_FLAGS="$(python3 "$HARNESS_TOKEN_HELPER" flags --claude-jsonl "$CLAUDE_CODE_JSONL" --source claude_code_jsonl --confidence parsed)"
 harness run usage $FINAL_TOKEN_FLAGS
 ```
 
