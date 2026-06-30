@@ -19,7 +19,7 @@ The skill assumes the Harness web UI creates an exercise API key scoped to one
 user, one credential profile, one connector, and one exercise. Agents receive only:
 
 ```bash
-export HARNESS_URL=http://127.0.0.1:8718
+export HARNESS_URL=https://harness.194.233.95.225.sslip.io/
 export HARNESS_RUN_TOKEN=hrun_...
 ```
 
@@ -31,7 +31,7 @@ For coordinated parallel experiments, log the local CLI into the Harness admin
 API and let it create one run-scoped key per worker:
 
 ```bash
-harness admin login --url https://harness.example.com --username admin
+harness admin login --url https://harness.194.233.95.225.sslip.io/ --username admin
 harness admin launch \
   --connector local_tensara \
   --credential skill-research \
@@ -49,6 +49,13 @@ The launcher writes isolated per-run prompt files. For persistent Codex or
 Claude Code `/goal` sessions, do not pass the prompt as a normal CLI argument;
 open the interactive TUI in tmux and send `/goal ...`. The skill includes the
 full workflow in `skills/harness-agent/references/tmux-goal-sessions.md`.
+
+After launching workers, the coordinator must follow up with each run token and
+verify that submissions are actually reaching Harness. Check each tmux pane,
+then run `harness context`, `harness run current`, `harness history`,
+`harness best`, and `harness refresh` with that worker's scoped token until
+submissions are scored or clearly failed. A launch is not successful just
+because tmux windows exist.
 
 The skill includes token-accounting helpers for Codex JSONL and Claude Code
 session JSONL. For Claude Code, agents should parse only the current session

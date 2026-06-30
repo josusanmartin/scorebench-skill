@@ -26,7 +26,7 @@ creates an exercise API key for exactly one user, credential profile, connector,
 and exercise, then provides the agent with:
 
 ```bash
-export HARNESS_URL=http://127.0.0.1:8718
+export HARNESS_URL=https://harness.194.233.95.225.sslip.io/
 export HARNESS_RUN_TOKEN=hrun_...
 ```
 
@@ -101,7 +101,7 @@ Do not use it from inside a worker agent that already has `HARNESS_RUN_TOKEN`.
 The coordinator logs the local CLI into the Harness admin API once:
 
 ```bash
-harness admin login --url https://harness.example.com --username admin
+harness admin login --url https://harness.194.233.95.225.sslip.io/ --username admin
 harness admin whoami
 ```
 
@@ -132,6 +132,45 @@ Use `--dry-run --json` first when validating a new launch shape. Each worker
 must receive only its own `HARNESS_RUN_TOKEN`, verify context, read the
 exercise, run `harness run current`, and ping before submitting. Workers cannot
 list or read sibling runs through their scoped token.
+
+Launching workers is not the end of the coordinator job. After creating goals,
+the coordinator must follow up until every worker is visibly connected to the
+harness and submissions are actually being recorded.
+
+Post-launch checks:
+
+1. Save the `harness admin launch --json` output or
+   `.harness/agent-runs/.../manifest.json`; it contains each run id, prompt
+   file, workspace, and scoped run token.
+2. Inspect each tmux pane with `tmux capture-pane -t <window> -p -S -160` and
+   verify the interactive agent accepted the `/goal`, loaded this skill, and ran
+   `harness context`, `harness exercise`, `harness run current`, and
+   `harness run ping`.
+3. For each manifest job, query the harness with that job's token from the
+   coordinator shell:
+
+   ```bash
+   HARNESS_URL=<manifest harness_url> HARNESS_RUN_TOKEN=<job token> harness context
+   HARNESS_URL=<manifest harness_url> HARNESS_RUN_TOKEN=<job token> harness run current
+   HARNESS_URL=<manifest harness_url> HARNESS_RUN_TOKEN=<job token> harness history
+   HARNESS_URL=<manifest harness_url> HARNESS_RUN_TOKEN=<job token> harness best
+   ```
+
+4. If `history` is empty after the expected bootstrap period, inspect the pane
+   and nudge that worker; do not report the launch as successful merely because
+   tmux windows exist.
+5. When `history` shows pending/submitted/checking candidates, run
+   `harness refresh` with that worker's token until each candidate reaches a
+   terminal scored or failed state. Some connectors take several minutes.
+6. If any submission is `failed`, `error`, `rejected`, missing a score after
+   refresh, or returning repeated harness errors, preserve the exact error and
+   `trace_id` and fix or report that run as blocked. Do not let a worker keep
+   optimizing under the false assumption that submissions are landing.
+
+For long parallel goals, repeat this follow-up loop periodically and near the
+end of the requested time budget. The coordinator's final report must state
+which runs submitted candidates, which candidates scored, which runs are still
+pending, and which runs are blocked or erroring.
 
 Never hand the coordinator admin CLI profile or admin password to worker agents.
 Workers should receive only their generated `HARNESS_RUN_TOKEN`.

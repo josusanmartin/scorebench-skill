@@ -132,7 +132,7 @@ Codex `/model` or `claude --help`.
 Log the coordinator CLI into Harness first:
 
 ```bash
-harness admin login --url https://harness.example.com --username admin
+harness admin login --url https://harness.194.233.95.225.sslip.io/ --username admin
 harness admin whoami
 ```
 
@@ -167,7 +167,7 @@ the environment:
 ```bash
 WINDOW="codex-run001"
 PROJECT_DIR="/path/to/worker/run001"
-HARNESS_URL="https://harness.example.com"
+HARNESS_URL="https://harness.194.233.95.225.sslip.io/"
 HARNESS_RUN_TOKEN="hrun_..."
 EFFORT="xhigh"
 AGENT_CMD="export HARNESS_URL=$HARNESS_URL; export HARNESS_RUN_TOKEN=$HARNESS_RUN_TOKEN; exec $CODEX_BIN -c 'model_reasoning_effort=\"$EFFORT\"'"
@@ -194,7 +194,7 @@ token in the environment:
 ```bash
 WINDOW="claude-run001"
 PROJECT_DIR="/path/to/worker/run001"
-HARNESS_URL="https://harness.example.com"
+HARNESS_URL="https://harness.194.233.95.225.sslip.io/"
 HARNESS_RUN_TOKEN="hrun_..."
 EFFORT="max"
 AGENT_CMD="export HARNESS_URL=$HARNESS_URL; export HARNESS_RUN_TOKEN=$HARNESS_RUN_TOKEN; exec $CLAUDE_BIN --effort $EFFORT --name $WINDOW"
@@ -256,6 +256,67 @@ Every worker should show:
 - active `/goal` confirmation,
 - `HARNESS_URL` and its own `HARNESS_RUN_TOKEN` in the process environment,
 - no access to sibling run tokens or connector credentials.
+
+## Post-launch Harness Follow-up
+
+Do not stop after tmux windows are created. The coordinator is responsible for
+making sure each worker is actually submitting through Harness and not silently
+erroring.
+
+Keep the manifest from `harness admin launch --json` or from the generated
+`manifest.json`. For each job, use only that job's scoped token when checking
+its run:
+
+```bash
+HARNESS_URL="<manifest harness_url>"
+HARNESS_RUN_TOKEN="<job token>"
+
+env HARNESS_URL="$HARNESS_URL" HARNESS_RUN_TOKEN="$HARNESS_RUN_TOKEN" harness context
+env HARNESS_URL="$HARNESS_URL" HARNESS_RUN_TOKEN="$HARNESS_RUN_TOKEN" harness run current
+env HARNESS_URL="$HARNESS_URL" HARNESS_RUN_TOKEN="$HARNESS_RUN_TOKEN" harness history
+env HARNESS_URL="$HARNESS_URL" HARNESS_RUN_TOKEN="$HARNESS_RUN_TOKEN" harness best
+```
+
+Expected healthy signs:
+
+- `harness context` shows the intended connector, exercise, credential profile,
+  and run id.
+- `harness run current` shows the active run and recent ping/activity.
+- `harness history` eventually shows candidate rows for that run.
+- `harness best` updates after scored submissions.
+
+If a candidate is pending/submitted/checking, refresh it with the same scoped
+token instead of resubmitting:
+
+```bash
+env HARNESS_URL="$HARNESS_URL" HARNESS_RUN_TOKEN="$HARNESS_RUN_TOKEN" harness refresh
+```
+
+Repeat refresh until the candidate reaches a terminal scored or failed state.
+Some connectors take 5-10 minutes; this is a reason to keep following up, not a
+reason to drop the run.
+
+Investigate immediately when:
+
+- a worker has no `history` rows after the expected bootstrap period,
+- `history` shows failed, errored, or rejected submissions,
+- `refresh` keeps returning missing connector ids, stale pending state, or
+  harness errors,
+- the pane output shows token-accounting, CLI bootstrap, login, scope, or
+  connector errors.
+
+For each issue, capture both sides:
+
+```bash
+tmux capture-pane -t "$WINDOW" -p -S -240
+env HARNESS_URL="$HARNESS_URL" HARNESS_RUN_TOKEN="$HARNESS_RUN_TOKEN" harness history
+env HARNESS_URL="$HARNESS_URL" HARNESS_RUN_TOKEN="$HARNESS_RUN_TOKEN" harness refresh
+```
+
+Preserve exact error text and any `trace_id`. A coordinator report should say
+which runs submitted, which scored, which are pending, and which are blocked or
+erroring. Never report a parallel launch as successful based only on tmux window
+creation.
 
 ## Safety
 
