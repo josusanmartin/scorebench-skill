@@ -1,7 +1,8 @@
 # tmux `/goal` Sessions
 
-Use this reference when coordinating persistent Harness runs in separate tmux
-windows for Codex or Claude Code.
+Use this reference when launching persistent `/goal` sessions in separate tmux
+windows for Codex or Claude Code. It covers both generic project sessions and
+Harness-scoped worker sessions with per-run tokens.
 
 ## Core Rule
 
@@ -25,16 +26,21 @@ Expected Claude Code signs:
 
 ```text
 Goal set: ...
-/goal active
+◎ /goal active
 ```
 
 ## Prerequisites
 
 ```bash
 command -v tmux
-command -v harness
 command -v codex
 command -v claude
+```
+
+For Harness-scoped runs, also verify:
+
+```bash
+command -v harness
 ```
 
 If you are not already inside tmux:
@@ -42,6 +48,86 @@ If you are not already inside tmux:
 ```bash
 tmux new -s harness-goals
 ```
+
+Generic project setup:
+
+```bash
+PROJECT_DIR="$(pwd)"
+CODEX_BIN="$(command -v codex)"
+CLAUDE_BIN="$(command -v claude)"
+GOAL_TEXT="Read this repository, summarize the current state, and propose one safe next step. Do not modify files or read secrets."
+```
+
+For a Harness worker, use a Harness-specific goal:
+
+```bash
+GOAL_TEXT="Use the harness-agent skill. Solve the assigned Harness exercise. Submit only through Harness. Do not read run_state.json, connector credentials, .env, or unrelated transcripts."
+```
+
+## Generic Goal Windows
+
+Use this when the user wants a standalone Codex or Claude Code goal session
+without Harness run tokens.
+
+Codex medium:
+
+```bash
+WINDOW="codex-goal-medium"
+EFFORT="medium"
+
+tmux new-window -n "$WINDOW" -c "$PROJECT_DIR" \
+  "$CODEX_BIN -c 'model_reasoning_effort=\"'$EFFORT'\"'"
+
+tmux send-keys -t "$WINDOW" "/goal $GOAL_TEXT" Enter
+tmux send-keys -t "$WINDOW" Enter
+```
+
+Codex with an explicit model:
+
+```bash
+WINDOW="codex-goal-xhigh"
+EFFORT="xhigh"
+MODEL="<your-codex-model>"
+
+tmux new-window -n "$WINDOW" -c "$PROJECT_DIR" \
+  "$CODEX_BIN -m $MODEL -c 'model_reasoning_effort=\"'$EFFORT'\"'"
+
+tmux send-keys -t "$WINDOW" "/goal $GOAL_TEXT" Enter
+tmux send-keys -t "$WINDOW" Enter
+```
+
+Claude Code medium:
+
+```bash
+WINDOW="claude-goal-medium"
+EFFORT="medium"
+
+tmux new-window -n "$WINDOW" -c "$PROJECT_DIR" \
+  "$CLAUDE_BIN --effort $EFFORT --name $WINDOW"
+
+tmux send-keys -t "$WINDOW" "/goal $GOAL_TEXT" Enter
+tmux send-keys -t "$WINDOW" Enter
+```
+
+Claude Code max with permission prompts bypassed in a trusted workspace:
+
+```bash
+WINDOW="claude-goal-max"
+EFFORT="max"
+
+tmux new-window -n "$WINDOW" -c "$PROJECT_DIR" \
+  "$CLAUDE_BIN --dangerously-skip-permissions --effort $EFFORT --name $WINDOW"
+
+tmux send-keys -t "$WINDOW" "/goal $GOAL_TEXT" Enter
+tmux send-keys -t "$WINDOW" Enter
+```
+
+Codex commonly supports `low`, `medium`, `high`, and `xhigh` through
+`model_reasoning_effort`. Claude Code commonly supports `low`, `medium`,
+`high`, `xhigh`, and `max` through `--effort`. Confirm current support with
+Codex `/model` or `claude --help`.
+
+## Harness Coordinator Setup
 
 Log the coordinator CLI into Harness first:
 
@@ -84,7 +170,7 @@ PROJECT_DIR="/path/to/worker/run001"
 HARNESS_URL="https://harness.example.com"
 HARNESS_RUN_TOKEN="hrun_..."
 EFFORT="xhigh"
-AGENT_CMD="export HARNESS_URL=$HARNESS_URL; export HARNESS_RUN_TOKEN=$HARNESS_RUN_TOKEN; exec codex -c 'model_reasoning_effort=\"$EFFORT\"'"
+AGENT_CMD="export HARNESS_URL=$HARNESS_URL; export HARNESS_RUN_TOKEN=$HARNESS_RUN_TOKEN; exec $CODEX_BIN -c 'model_reasoning_effort=\"$EFFORT\"'"
 
 tmux new-window -n "$WINDOW" -c "$PROJECT_DIR" "$AGENT_CMD"
 ```
@@ -111,7 +197,7 @@ PROJECT_DIR="/path/to/worker/run001"
 HARNESS_URL="https://harness.example.com"
 HARNESS_RUN_TOKEN="hrun_..."
 EFFORT="max"
-AGENT_CMD="export HARNESS_URL=$HARNESS_URL; export HARNESS_RUN_TOKEN=$HARNESS_RUN_TOKEN; exec claude --effort $EFFORT --name $WINDOW"
+AGENT_CMD="export HARNESS_URL=$HARNESS_URL; export HARNESS_RUN_TOKEN=$HARNESS_RUN_TOKEN; exec $CLAUDE_BIN --effort $EFFORT --name $WINDOW"
 
 tmux new-window -n "$WINDOW" -c "$PROJECT_DIR" "$AGENT_CMD"
 ```
@@ -120,7 +206,7 @@ If the workspace is trusted and the user explicitly wants no permission prompts,
 add the bypass flag to the Claude command:
 
 ```bash
-AGENT_CMD="export HARNESS_URL=$HARNESS_URL; export HARNESS_RUN_TOKEN=$HARNESS_RUN_TOKEN; exec claude --dangerously-skip-permissions --effort $EFFORT --name $WINDOW"
+AGENT_CMD="export HARNESS_URL=$HARNESS_URL; export HARNESS_RUN_TOKEN=$HARNESS_RUN_TOKEN; exec $CLAUDE_BIN --dangerously-skip-permissions --effort $EFFORT --name $WINDOW"
 ```
 
 Then send the goal:
