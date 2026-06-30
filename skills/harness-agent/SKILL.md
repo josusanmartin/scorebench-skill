@@ -1,6 +1,6 @@
 ---
 name: harness-agent
-description: "Use when solving an exercise through the local Harness middleware. The harness owns connector credentials and submissions; agents use harness context, exercise, run start/current/ping, submit, refresh, solution, best, and history without reading run_state.json or connector secrets."
+description: "Use when solving an exercise through the local Harness middleware, or when coordinating multiple parallel Harness-scoped agent runs. The harness owns connector credentials and submissions; agents use harness context, exercise, run start/current/ping, submit, refresh, solution, best, and history without reading run_state.json or connector secrets. Coordinators use harness admin login/create-run-token/launch to create scoped run keys and tmux workers."
 ---
 
 # Harness Agent
@@ -91,6 +91,45 @@ Only after the CLI is available should you validate the run token:
 ```bash
 harness context
 ```
+
+## Coordinator Parallel Runs
+
+Use this section only when the user asks to create or launch multiple Harness
+runs, for example "create 4 runs in parallel" or "start separate tmux agents".
+Do not use it from inside a worker agent that already has `HARNESS_RUN_TOKEN`.
+
+The coordinator logs the local CLI into the Harness admin API once:
+
+```bash
+harness admin login --url https://harness.example.com --username admin
+harness admin whoami
+```
+
+For parallel work, prefer the built-in launcher. It creates one scoped run key
+per worker, writes an isolated prompt file per run, and starts one tmux window
+per worker. By default it targets the current tmux session. Use
+`--new-tmux-session --tmux-session <name>` to create a detached session instead.
+
+```bash
+harness admin launch \
+  --connector local_tensara \
+  --credential skill-research \
+  --exercise leaky-relu \
+  --count 4 \
+  --run-prefix no-skill- \
+  --goal 'Without using the problem agnostic skill I want you to solve this problem http://220.135.0.171.sslip.io:45656/problems/leaky-relu and run for 3 hours trying to get the best score. You need to get a score lower than 100us. Only run for 3 hours. Do not use any exploits. Use the harness skill to submit to local tensara.' \
+  --agent-command codex
+```
+
+The launcher wraps `--goal` as `/goal ...` if it is not already a slash-command
+goal. Each worker prompt tells the agent to use this skill, exports only its own
+`HARNESS_RUN_TOKEN`, verifies context, reads the exercise, runs
+`harness run current`, and pings before submitting. Use `--dry-run --json` first
+when validating a new launch shape. Workers cannot list or read sibling runs
+through their scoped token.
+
+Never hand the coordinator admin CLI profile or admin password to worker agents.
+Workers should receive only their generated `HARNESS_RUN_TOKEN`.
 
 Connector credentials are stored on the middleware side.
 The Harness UI can store many named credential profiles per connector, but the

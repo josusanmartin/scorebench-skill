@@ -27,6 +27,24 @@ Agents then use the `harness` CLI provided by the server repository:
 `harness context`, `harness exercise`, `harness run start`, `harness run ping`,
 and `harness submit`. Connector credentials stay in the Harness middleware.
 
+For coordinated parallel experiments, log the local CLI into the Harness admin
+API and let it create one run-scoped key per worker:
+
+```bash
+harness admin login --url https://harness.example.com --username admin
+harness admin launch \
+  --connector local_tensara \
+  --credential skill-research \
+  --exercise leaky-relu \
+  --count 4 \
+  --run-prefix no-skill- \
+  --goal 'Without using the problem agnostic skill, solve leaky-relu for 3 hours and target <100us. Do not use exploits. Use the harness skill to submit.'
+```
+
+The launcher writes isolated per-run prompt files and starts tmux windows in the
+current tmux session by default. Add `--new-tmux-session --tmux-session <name>`
+to create a detached session instead.
+
 The skill includes token-accounting helpers for Codex JSONL and Claude Code
 session JSONL. For Claude Code, agents should parse only the current session
 transcript and baseline it after the harness run is established; they should
