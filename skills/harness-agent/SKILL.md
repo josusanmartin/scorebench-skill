@@ -110,10 +110,12 @@ already signed in to the Harness UI, click `Authorize CLI`; otherwise log in on
 the web page first and it returns to authorization. Use `--password-stdin` only
 for supervised automation.
 
-For parallel work, prefer the built-in launcher. It creates one scoped run key
-per worker, writes an isolated prompt file per run, and starts one tmux window
-per worker. By default it targets the current tmux session. Use
-`--new-tmux-session --tmux-session <name>` to create a detached session instead.
+For parallel work, first create one scoped run key per worker. `harness admin
+launch` can also start tmux windows, but passing a prompt to `codex` or
+`claude` is not the same as starting persistent `/goal` mode. When the user asks
+for long-running goal sessions, read
+`references/tmux-goal-sessions.md` and launch interactive TUIs in tmux, then
+send `/goal ...` with `tmux send-keys`.
 
 ```bash
 harness admin launch \
@@ -126,12 +128,10 @@ harness admin launch \
   --agent-command codex
 ```
 
-The launcher wraps `--goal` as `/goal ...` if it is not already a slash-command
-goal. Each worker prompt tells the agent to use this skill, exports only its own
-`HARNESS_RUN_TOKEN`, verifies context, reads the exercise, runs
-`harness run current`, and pings before submitting. Use `--dry-run --json` first
-when validating a new launch shape. Workers cannot list or read sibling runs
-through their scoped token.
+Use `--dry-run --json` first when validating a new launch shape. Each worker
+must receive only its own `HARNESS_RUN_TOKEN`, verify context, read the
+exercise, run `harness run current`, and ping before submitting. Workers cannot
+list or read sibling runs through their scoped token.
 
 Never hand the coordinator admin CLI profile or admin password to worker agents.
 Workers should receive only their generated `HARNESS_RUN_TOKEN`.

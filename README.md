@@ -45,9 +45,10 @@ harness admin launch \
 coordinator is already signed in to the Harness UI, click `Authorize CLI`;
 otherwise log in on the web page first and it returns to authorization.
 
-The launcher writes isolated per-run prompt files and starts tmux windows in the
-current tmux session by default. Add `--new-tmux-session --tmux-session <name>`
-to create a detached session instead.
+The launcher writes isolated per-run prompt files. For persistent Codex or
+Claude Code `/goal` sessions, do not pass the prompt as a normal CLI argument;
+open the interactive TUI in tmux and send `/goal ...`. The skill includes the
+full workflow in `skills/harness-agent/references/tmux-goal-sessions.md`.
 
 The skill includes token-accounting helpers for Codex JSONL and Claude Code
 session JSONL. For Claude Code, agents should parse only the current session
