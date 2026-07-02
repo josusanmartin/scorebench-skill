@@ -92,6 +92,80 @@ Only after the CLI is available should you validate the run token:
 harness context
 ```
 
+## Admin Login And Session Auth
+
+Use this section only as a coordinator or human operator. Do not use admin
+login from inside a worker agent that already has `HARNESS_RUN_TOKEN`.
+
+Browser admin login:
+
+```text
+https://harness.194.233.95.225.sslip.io/ui/login
+```
+
+Log in as `admin` with the current Harness admin password. Verify browser and
+CLI sessions in:
+
+```text
+https://harness.194.233.95.225.sslip.io/ui/account
+```
+
+Admin sessions are long lived, currently one year, and can be revoked from the
+Account page. Tokens are never shown in the session table.
+
+CLI admin login:
+
+```bash
+harness admin login --url https://harness.194.233.95.225.sslip.io/ --username admin
+harness admin whoami
+```
+
+`harness admin login` opens or prints a browser authorization link. If already
+signed in to the Harness UI, click `Authorize CLI`. Otherwise log in on the
+browser page first, then authorize the CLI request. Use `--no-browser` when
+working over SSH and copy the printed link into a local browser:
+
+```bash
+harness admin login \
+  --url https://harness.194.233.95.225.sslip.io/ \
+  --username admin \
+  --no-browser
+```
+
+For supervised automation only, use password stdin instead of putting the
+password in shell history:
+
+```bash
+printf '%s\n' "$HARNESS_ADMIN_PASSWORD" | harness admin login \
+  --url https://harness.194.233.95.225.sslip.io/ \
+  --username admin \
+  --password-stdin
+```
+
+The CLI stores its admin session locally in:
+
+```text
+~/.config/harness/cli.json
+```
+
+Use separate profiles if needed:
+
+```bash
+harness admin login --profile prod --url https://harness.194.233.95.225.sslip.io/ --username admin
+harness admin whoami --profile prod
+harness admin logout --profile prod
+```
+
+Never give the admin CLI profile, admin password, browser cookie, or
+`~/.config/harness/cli.json` to solving agents. Give workers only a scoped run
+token created from the Runs page or from `harness admin create-run-token` /
+`harness admin launch`:
+
+```bash
+export HARNESS_URL=https://harness.194.233.95.225.sslip.io/
+export HARNESS_RUN_TOKEN=hrun_...
+```
+
 ## Coordinator Parallel Runs
 
 Use this section only when the user asks to create or launch multiple Harness
@@ -499,6 +573,14 @@ connector or the content/semantics truly changed.
 
 If the connector exposes source retrieval through the harness, use
 `harness solution <solution_id>` rather than calling the connector directly.
+For GPU Mode / Popcorn specifically, treat Harness as the Popcorn proxy:
+`harness submit` and `harness refresh` include the visible Popcorn CLI payload
+under `connector_response.raw.popcorn` (`command`, `stdout`, `stderr`,
+`output`, `text`, and parsed fields). To inspect the same run report that
+`popcorn submissions show <id> --no-code` would show, run
+`harness solution <submission_id> --no-code`. Use `harness solution
+<submission_id>` only when the source-including Popcorn view is needed. Do not
+call `popcorn` directly from a scoped Harness run.
 
 For PR-backed connectors, this is still the full workflow. The middleware decides
 whether the candidate becomes a local harness run, an API submission, or a
