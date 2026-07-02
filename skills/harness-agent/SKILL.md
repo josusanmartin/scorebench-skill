@@ -207,6 +207,15 @@ must receive only its own `HARNESS_RUN_TOKEN`, verify context, read the
 exercise, run `harness run current`, and ping before submitting. Workers cannot
 list or read sibling runs through their scoped token.
 
+Name run prefixes, tmux windows, strategy, and notes after the experimental
+condition being compared, such as model family, reasoning effort, skill use, or
+no-skill baseline. If the user specifies an agent model or effort, pass it to
+the interactive TUI command, not to `harness admin launch`; the harness records
+it through honest run metadata. For example, Claude Code Fable with max effort
+should use a run prefix like `fable-pao-mm`, a strategy like
+`problem-agnostic-optimization-claude-fable-max`, and a TUI command containing
+`claude --model fable --effort max`.
+
 Launching workers is not the end of the coordinator job. After creating goals,
 the coordinator must follow up until every worker is visibly connected to the
 harness and submissions are actually being recorded.

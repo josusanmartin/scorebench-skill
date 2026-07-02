@@ -144,6 +144,9 @@ signed in to the Harness UI, authorize the CLI from that page.
 Create scoped run keys and worker prompt files before launching agent TUIs:
 
 ```bash
+MANIFEST="$PWD/.harness/agent-runs/leaky-relu-no-skill-manifest.json"
+WORKROOT="$PWD/.harness/agent-runs/leaky-relu-no-skill"
+
 harness admin launch \
   --connector local_tensara \
   --credential skill-research \
@@ -151,13 +154,118 @@ harness admin launch \
   --count 4 \
   --run-prefix no-skill- \
   --goal 'Without using the problem agnostic skill, solve leaky-relu for 3 hours and target <100us. Do not use exploits. Use the harness skill to submit.' \
-  --workspace-root "$PWD/.harness/agent-runs/leaky-relu-no-skill" \
+  --workspace-root "$WORKROOT" \
   --dry-run \
-  --json
+  --json > "$MANIFEST"
 ```
 
 Use the generated manifest to get each worker's `cwd`, `HARNESS_RUN_TOKEN`, and
-prompt file. The worker must receive only its own run token.
+prompt file. The worker must receive only its own run token. Do not print raw
+manifests in user-visible output; they contain scoped run tokens. For summaries,
+redact the token:
+
+```bash
+jq '{harness_url, connector, credential_name, exercise,
+     jobs: [.jobs[] | {run_id, cwd, prompt_file, window}]}' "$MANIFEST"
+```
+
+For local Tensara URLs, pass the exercise slug, not the URL path. For example,
+`http://host/problems/matrix-multiplication` becomes
+`--exercise matrix-multiplication`, not `--exercise /problems/matrix-multiplication`.
+
+## Batch Launcher From Manifest
+
+Use this pattern when launching several long-lived goal sessions. It starts
+interactive TUIs with per-worker Harness tokens and keeps the raw token inside
+the process environment.
+
+Claude Code, with optional model and effort:
+
+```bash
+MANIFEST="$PWD/.harness/agent-runs/matmul-fable-manifest.json"
+CLAUDE_BIN="$(command -v claude)"
+SKILL_DIR="${CODEX_HOME:-$HOME/.codex}/skills"
+HARNESS_URL="$(jq -r '.harness_url' "$MANIFEST")"
+MODEL_ARG="--model fable"       # leave empty for the default model
+EFFORT="max"                    # low, medium, high, xhigh, or max
+BYPASS="--dangerously-skip-permissions"  # only in a trusted workspace
+
+jq -r '.jobs[] | @base64' "$MANIFEST" | while read -r job; do
+  field() { printf '%s' "$job" | base64 -d | jq -r "$1"; }
+  run_id="$(field '.run_id')"
+  cwd="$(field '.cwd')"
+  token="$(field '.token')"
+
+  tmux new-window -n "$run_id" -c "$cwd" \
+    "HARNESS_URL='$HARNESS_URL' HARNESS_RUN_TOKEN='$token' exec '$CLAUDE_BIN' $BYPASS $MODEL_ARG --effort '$EFFORT' --name '$run_id' --add-dir '$SKILL_DIR'"
+done
+```
+
+Codex, with optional model and effort:
+
+```bash
+MANIFEST="$PWD/.harness/agent-runs/matmul-codex-manifest.json"
+CODEX_BIN="$(command -v codex)"
+HARNESS_URL="$(jq -r '.harness_url' "$MANIFEST")"
+MODEL_ARG="-m gpt-5.5"          # leave empty for the default model
+EFFORT="xhigh"
+
+jq -r '.jobs[] | @base64' "$MANIFEST" | while read -r job; do
+  field() { printf '%s' "$job" | base64 -d | jq -r "$1"; }
+  run_id="$(field '.run_id')"
+  cwd="$(field '.cwd')"
+  token="$(field '.token')"
+
+  tmux new-window -n "$run_id" -c "$cwd" \
+    "HARNESS_URL='$HARNESS_URL' HARNESS_RUN_TOKEN='$token' exec '$CODEX_BIN' $MODEL_ARG -c 'model_reasoning_effort=\"'$EFFORT'\"'"
+done
+```
+
+Name the run prefix, tmux window, strategy, and notes after the experimental
+condition. Examples:
+
+- `claude-pao-med-mm` with `problem-agnostic-optimization-claude-medium`
+- `claude-pao-mm` with `problem-agnostic-optimization-claude-max`
+- `fable-pao-mm` with `problem-agnostic-optimization-claude-fable-max`
+- `codex-pao-xhigh-mm` with `problem-agnostic-optimization-codex-xhigh`
+
+After launch, capture each pane before sending the goal. Claude should show the
+requested model and effort, for example `Fable 5 with max effort` or
+`medium · /effort`.
+
+## Send Goals To A Batch
+
+For long goals, prefer tmux buffers over `send-keys -l`; this preserves
+newlines and avoids shell history issues. Do not paste token-bearing manifest
+contents into the TUI.
+
+```bash
+GOAL_TEXT='/goal Objective: Solve the assigned Harness exercise.
+
+Use the harness-agent skill. Submit only through Harness.
+Use problem-agnostic-optimization when the experiment calls for it.
+Progress chart: off when Harness is handling progress.
+If uncertain, keep iterating with best judgment toward a better score.'
+
+jq -r '.jobs[] | @base64' "$MANIFEST" | while read -r job; do
+  field() { printf '%s' "$job" | base64 -d | jq -r "$1"; }
+  run_id="$(field '.run_id')"
+  tmux set-buffer -b "goal_$run_id" "$GOAL_TEXT"
+  tmux paste-buffer -t "$run_id" -b "goal_$run_id"
+  tmux send-keys -t "$run_id" Enter
+done
+```
+
+If each worker needs run-specific text, construct `GOAL_TEXT` inside the loop
+from non-secret fields such as `run_id`, `exercise`, and the strategy name. Keep
+these constraints in every worker goal:
+
+- submit only through Harness,
+- read only the assigned exercise and current run,
+- do not read `run_state.json`, connector credentials, `.env`, sibling tokens,
+  or unrelated transcripts,
+- initialize exact token accounting before the first submission,
+- run autonomously for the requested wall-clock budget.
 
 ## Codex Goal Window
 
@@ -197,7 +305,8 @@ PROJECT_DIR="/path/to/worker/run001"
 HARNESS_URL="https://harness.194.233.95.225.sslip.io/"
 HARNESS_RUN_TOKEN="hrun_..."
 EFFORT="max"
-AGENT_CMD="export HARNESS_URL=$HARNESS_URL; export HARNESS_RUN_TOKEN=$HARNESS_RUN_TOKEN; exec $CLAUDE_BIN --effort $EFFORT --name $WINDOW"
+MODEL_ARG=""  # for example: --model fable
+AGENT_CMD="export HARNESS_URL=$HARNESS_URL; export HARNESS_RUN_TOKEN=$HARNESS_RUN_TOKEN; exec $CLAUDE_BIN $MODEL_ARG --effort $EFFORT --name $WINDOW"
 
 tmux new-window -n "$WINDOW" -c "$PROJECT_DIR" "$AGENT_CMD"
 ```
@@ -206,7 +315,7 @@ If the workspace is trusted and the user explicitly wants no permission prompts,
 add the bypass flag to the Claude command:
 
 ```bash
-AGENT_CMD="export HARNESS_URL=$HARNESS_URL; export HARNESS_RUN_TOKEN=$HARNESS_RUN_TOKEN; exec $CLAUDE_BIN --dangerously-skip-permissions --effort $EFFORT --name $WINDOW"
+AGENT_CMD="export HARNESS_URL=$HARNESS_URL; export HARNESS_RUN_TOKEN=$HARNESS_RUN_TOKEN; exec $CLAUDE_BIN --dangerously-skip-permissions $MODEL_ARG --effort $EFFORT --name $WINDOW"
 ```
 
 Then send the goal:
@@ -218,7 +327,8 @@ tmux send-keys -t "$WINDOW" Enter
 ```
 
 Use `low`, `medium`, `high`, `xhigh`, or `max` for Claude Code effort when
-supported. Confirm supported values with `claude --help`.
+supported. Use `--model fable` for Claude Fable when requested. Confirm current
+model aliases and effort values with `claude --help`.
 
 ## Why Send Enter Twice
 
