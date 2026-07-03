@@ -198,6 +198,10 @@ harness admin launch \
   --exercise leaky-relu \
   --count 4 \
   --run-prefix no-skill- \
+  --skills harness-agent \
+  --model gpt-5-codex \
+  --effort high \
+  --autonomy autonomous \
   --goal 'Without using the problem agnostic skill I want you to solve this problem http://220.135.0.171.sslip.io:45656/problems/leaky-relu and run for 3 hours trying to get the best score. You need to get a score lower than 100us. Only run for 3 hours. Do not use any exploits. Use the harness skill to submit to local tensara.' \
   --agent-command codex
 ```
@@ -209,12 +213,28 @@ list or read sibling runs through their scoped token.
 
 Name run prefixes, tmux windows, strategy, and notes after the experimental
 condition being compared, such as model family, reasoning effort, skill use, or
-no-skill baseline. If the user specifies an agent model or effort, pass it to
-the interactive TUI command, not to `harness admin launch`; the harness records
-it through honest run metadata. For example, Claude Code Fable with max effort
-should use a run prefix like `fable-pao-mm`, a strategy like
-`problem-agnostic-optimization-claude-fable-max`, and a TUI command containing
-`claude --model fable --effort max`.
+no-skill baseline. If the user specifies an agent model or effort, pass it both
+to `harness admin launch` as run metadata and to the interactive TUI command as
+runtime configuration. For example, Claude Code Fable with max effort should
+use a run prefix like `fable-pao-mm`, a strategy like
+`problem-agnostic-optimization-claude-fable-max`, `--model claude-fable-5`,
+`--effort max`, and a TUI command containing `claude --model fable --effort
+max`.
+
+Run identity metadata is run-level, not submission-level. Set it once when the
+run is created or first started:
+
+- `--skills`: comma-separated skills actually used for solving. Always include
+  `harness-agent`; add other solving skills such as
+  `problem-agnostic-optimization` only when they are genuinely used.
+- `--model`: the actual model or model family for this worker.
+- `--effort`: the actual reasoning/effort setting for this worker.
+- `--autonomy`: `autonomous`, `steered`, or `mixed`. Use `autonomous` when the
+  run proceeds from the initial goal without human steering, `steered` when the
+  user is directing candidate choices, and `mixed` when the mode changes.
+
+Do not repeat these fields on every `harness submit`; the harness copies the
+active run metadata onto each submission automatically.
 
 Launching workers is not the end of the coordinator job. After creating goals,
 the coordinator must follow up until every worker is visibly connected to the
@@ -444,7 +464,11 @@ Do not try to switch a pre-bound run token to another run id. If the token needs
 a run name, choose and start one:
 
 ```bash
-harness run start --id run001
+harness run start --id run001 \
+  --skills harness-agent \
+  --model <actual-model> \
+  --effort <actual-effort> \
+  --autonomy autonomous
 ```
 
 Use a stable, human-readable run id such as `run001`,
@@ -455,8 +479,20 @@ metadata can be supplied when it is useful:
 harness run start --id run001 \
   --label "skill-research run001" \
   --strategy "progress logging skill with perf access" \
-  --hypothesis "perf-guided changes should reduce score faster"
+  --hypothesis "perf-guided changes should reduce score faster" \
+  --skills harness-agent,problem-agnostic-optimization \
+  --model gpt-5-codex \
+  --effort high \
+  --autonomy autonomous
 ```
+
+The run-start metadata is optional but strongly encouraged. Supply it once per
+run, before the first submission, so iteration submissions do not carry extra
+bookkeeping overhead. If the token is already bound to a run, inspect
+`harness run current`; if the metadata is missing and there have been no
+submissions yet, update the same run id with `harness run start --id
+<current-run-id> --skills ... --model ... --effort ... --autonomy ...`. Do not
+start a new run just to fix metadata.
 
 If the harness says a previous run already exists for this user/profile/exercise,
 continue it with the exact `harness run start --id <previous-run>` command from
@@ -615,7 +651,10 @@ GitHub pull request.
   materially changes, ask whether this is a continuation or start a new run only
   with explicit confirmation from the harness/user.
 - The token-bound run metadata must be honest and specific: strategy,
-  hypothesis, and notes are used for deterministic strategy comparison reports.
+  hypothesis, notes, skills, model, effort, and autonomy are used for
+  deterministic strategy comparison reports.
+- Set skills/model/effort/autonomy once with `harness run start` or coordinator
+  run-token creation. Do not repeat that run metadata on every `harness submit`.
 - Keep `--notes` factual: hypothesis, result, important failure, or connector id.
 - Use `--label` to make deterministic progress logs readable.
 - Use `--idempotency-key` for retries of the same candidate.

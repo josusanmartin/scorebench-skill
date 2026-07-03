@@ -44,7 +44,11 @@ Then use the Harness CLI:
 ```bash
 harness context
 harness exercise
-harness run start --id run001
+harness run start --id run001 \
+  --skills harness-agent \
+  --model <actual-model> \
+  --effort <actual-effort> \
+  --autonomy autonomous
 harness run ping --event start
 harness submit submission.py --total-tokens 25000 --tokens-total-source agent_claim
 harness refresh
@@ -97,6 +101,10 @@ harness admin launch \
   --exercise leaky-relu \
   --count 4 \
   --run-prefix no-skill- \
+  --skills harness-agent \
+  --model gpt-5-codex \
+  --effort high \
+  --autonomy autonomous \
   --goal 'Solve leaky-relu for 3 hours. Do not use exploits. Use the harness skill to submit.'
 ```
 
@@ -124,6 +132,10 @@ Agents should baseline usage after the Harness run is established and submit
 honest cumulative totals. Claude Code cache-read tokens are excluded from the
 submitted total because they are repeated cached context reads, not distinct run
 expenditure.
+
+Run identity metadata such as skills, model, effort, and autonomy is set once
+when the run starts. Do not repeat it on every submission; Harness copies the
+active run metadata onto candidate records automatically.
 
 ## More Detail
 

@@ -153,6 +153,10 @@ harness admin launch \
   --exercise leaky-relu \
   --count 4 \
   --run-prefix no-skill- \
+  --skills harness-agent \
+  --model gpt-5-codex \
+  --effort high \
+  --autonomy autonomous \
   --goal 'Without using the problem agnostic skill, solve leaky-relu for 3 hours and target <100us. Do not use exploits. Use the harness skill to submit.' \
   --workspace-root "$WORKROOT" \
   --dry-run \
@@ -220,6 +224,10 @@ jq -r '.jobs[] | @base64' "$MANIFEST" | while read -r job; do
     "HARNESS_URL='$HARNESS_URL' HARNESS_RUN_TOKEN='$token' exec '$CODEX_BIN' $MODEL_ARG -c 'model_reasoning_effort=\"'$EFFORT'\"'"
 done
 ```
+
+Pass run identity metadata to `harness admin launch` once, matching the actual
+worker command you start from the manifest. The worker should not repeat
+skills/model/effort/autonomy on every submission.
 
 Name the run prefix, tmux window, strategy, and notes after the experimental
 condition. Examples:
