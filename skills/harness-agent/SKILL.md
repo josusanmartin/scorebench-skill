@@ -1,6 +1,6 @@
 ---
 name: harness-agent
-description: "Use when solving an exercise through the local Harness middleware, or when coordinating multiple parallel Harness-scoped agent runs. The harness owns connector credentials and submissions; agents use harness context, exercise, run start/current/ping, submit, refresh, solution, best, and history without reading run_state.json or connector secrets. Coordinators use harness admin login/create-run-token/launch to create scoped run keys and tmux workers."
+description: "Use when solving an exercise through the local Harness middleware, or when coordinating multiple parallel Harness-scoped agent runs. The harness owns connector credentials and submissions; agents use harness context, exercise, run start/current/ping, submit, refresh, solution, leaderboard, solutions, solve-form, best, and history without reading run_state.json or connector secrets. Coordinators use harness admin login/create-run-token/launch to create scoped run keys and tmux workers."
 ---
 
 # Harness Agent
@@ -265,7 +265,11 @@ Post-launch checks:
 5. When `history` shows pending/submitted/checking candidates, run
    `harness refresh` with that worker's token until each candidate reaches a
    terminal scored or failed state. Some connectors take several minutes.
-6. If any submission is `failed`, `error`, `rejected`, missing a score after
+6. For connector-visible external context, use Harness read-only commands such
+   as `harness leaderboard`, `harness solutions`, `harness inspect-solution`,
+   `harness challenge-page`, and `harness solve-form`; never call the external
+   website/API/CLI directly from a scoped run.
+7. If any submission is `failed`, `error`, `rejected`, missing a score after
    refresh, or returning repeated harness errors, preserve the exact error and
    `trace_id` and fix or report that run as blocked. Do not let a worker keep
    optimizing under the false assumption that submissions are landing.
@@ -275,7 +279,7 @@ end of the requested time budget. The coordinator's final report must state
 which runs submitted candidates, which candidates scored, which runs are still
 pending, and which runs are blocked or erroring.
 
-Never hand the coordinator admin CLI profile or admin password to worker agents.
+Never hand the coordinator CLI profile or web UI password to worker agents.
 Workers should receive only their generated `HARNESS_RUN_TOKEN`.
 
 Connector credentials are stored on the middleware side.
@@ -554,14 +558,14 @@ Connector-specific overrides are allowed when they are part of the exercise
 setup or user request. Examples:
 
 ```bash
-# HighLoad C++ example
+# HighLoad example
 harness submit path/to/solution \
   --label short-name \
   --notes "what changed" \
   --idempotency-key short-name-v1 \
-  --language CPP \
-  --compiler g++14.2.0 \
-  --compiler-options "-O3 -march=native" \
+  --language <LANG> \
+  --compiler <compiler-id> \
+  --compiler-options "<compiler-args>" \
   $TOKEN_FLAGS
 
 # CPU.mode example
@@ -579,13 +583,35 @@ harness submit path/to/solution-dir \
   --label short-name \
   --notes "what changed" \
   --idempotency-key short-name-v1 \
-  --solution-file src/main.cpp \
+  --solution-file src/main.ext \
   $TOKEN_FLAGS
 ```
 
 Use only relevant overrides. Do not invent connector options, and do not use
 `--exercise` to escape the scoped exercise in the run token. If the user asks
 for a different exercise than the token scope, ask for a new exercise API key.
+
+For HighLoad, compiler and compiler flags are part of the optimization surface.
+Before assuming the default toolchain, inspect the redacted solve form and the
+visible solution list through Harness:
+
+```bash
+harness solve-form --language <LANG>
+harness solutions --lang <LANG>
+harness leaderboard
+harness inspect-solution <solution_id>
+harness challenge-page generators
+```
+
+Use the language for the current candidate, for example `CPP`, `RUST`, `GO`,
+`CSHARP`, or `ZIG`; do not assume C++. Use the returned `compiler` and
+`compilerArgs` defaults as the baseline. It is valid to submit a candidate that
+only changes `--compiler` or `--compiler-options`, but treat it as a real
+candidate: use a new `--idempotency-key`, mention the flags in `--notes`, and
+inspect the returned connector response to confirm which language,
+compiler, and flags were sent. `harness solution <solution_id>` remains scoped
+to solution ids submitted by the current run; use `harness inspect-solution`
+for other players' website-visible solution metadata.
 
 Do not pass `--tokens-delta` manually; the harness computes deltas from the
 run-relative cumulative total. Do not pass any timing fields; the harness
@@ -616,8 +642,30 @@ harness until the candidate reaches a terminal scored or failed state. If
 only create a new submission if the previous attempt failed before reaching the
 connector or the content/semantics truly changed.
 
+If you later discover that one of your own submitted candidates is invalid,
+exploity, or based on a false assumption, mark it invalid through Harness
+instead of hiding it, editing logs, or continuing to cite it as best:
+
+```bash
+harness invalidate <candidate_id> \
+  --reason "exploit: memoizes exact matrix inputs instead of general multiplication" \
+  --meta class=exploit
+```
+
+If `<candidate_id>` is omitted, Harness invalidates the latest candidate visible
+to the current run token. Only omit it when that is definitely the intended
+candidate. Invalidation keeps the immutable bundle, score payload, connector
+response, usage metadata, and audit trail, but removes the candidate from
+`best`, best-so-far curves, promotion decisions, and winner calculations. The
+candidate remains visible in `harness history` with status `invalidated`.
+Scoped tokens can only invalidate candidates in their own run scope.
+
 If the connector exposes source retrieval through the harness, use
 `harness solution <solution_id>` rather than calling the connector directly.
+For website-visible connector context that is not one of your run's own
+submissions, use read-only commands such as `harness leaderboard`, `harness
+solutions`, or `harness inspect-solution`; these are scoped to the run token's
+exercise and credential profile.
 For GPU Mode / Popcorn specifically, treat Harness as the Popcorn proxy:
 `harness submit` and `harness refresh` include the visible Popcorn CLI payload
 under `connector_response.raw.popcorn` (`command`, `stdout`, `stderr`,
@@ -658,6 +706,9 @@ GitHub pull request.
 - Keep `--notes` factual: hypothesis, result, important failure, or connector id.
 - Use `--label` to make deterministic progress logs readable.
 - Use `--idempotency-key` for retries of the same candidate.
+- Use `harness invalidate` with a concrete reason when your own candidate
+  should no longer count because of an exploit, correctness bug, invalid
+  assumption, or user/operator review.
 - When a harness command fails, preserve the exact error message and
   `trace_id` if present. Fix the harness-facing issue instead of bypassing the
   harness with an external connector CLI/API.
