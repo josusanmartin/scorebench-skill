@@ -61,7 +61,7 @@ GOAL_TEXT="Read this repository, summarize the current state, and propose one sa
 For a Harness worker, use a Harness-specific goal:
 
 ```bash
-GOAL_TEXT="Use the harness-agent skill. Solve the assigned Harness exercise. Submit only through Harness. Do not read run_state.json, connector credentials, .env, or unrelated transcripts."
+GOAL_TEXT="Use the scorebench skill. Solve the assigned Harness exercise. Submit only through Harness. Do not read run_state.json, connector credentials, .env, or unrelated transcripts."
 ```
 
 ## Generic Goal Windows
@@ -132,7 +132,7 @@ Codex `/model` or `claude --help`.
 Log the coordinator CLI into Harness first:
 
 ```bash
-harness admin login --url https://harness.194.233.95.225.sslip.io/ --username admin
+harness admin login --url https://scorebench.dev/ --username <your-username>
 harness admin whoami
 ```
 
@@ -153,7 +153,7 @@ harness admin launch \
   --exercise leaky-relu \
   --count 4 \
   --run-prefix no-skill- \
-  --skills harness-agent \
+  --skills scorebench \
   --model gpt-5-codex \
   --effort high \
   --autonomy autonomous \
@@ -250,7 +250,7 @@ contents into the TUI.
 ```bash
 GOAL_TEXT='/goal Objective: Solve the assigned Harness exercise.
 
-Use the harness-agent skill. Submit only through Harness.
+Use the scorebench skill. Submit only through Harness.
 Use problem-agnostic-optimization when the experiment calls for it.
 Progress chart: off when Harness is handling progress.
 If uncertain, keep iterating with best judgment toward a better score.'
@@ -285,7 +285,7 @@ the environment:
 ```bash
 WINDOW="codex-run001"
 PROJECT_DIR="/path/to/worker/run001"
-HARNESS_URL="https://harness.194.233.95.225.sslip.io/"
+HARNESS_URL="https://scorebench.dev/"
 HARNESS_RUN_TOKEN="hrun_..."
 EFFORT="xhigh"
 AGENT_CMD="export HARNESS_URL=$HARNESS_URL; export HARNESS_RUN_TOKEN=$HARNESS_RUN_TOKEN; exec $CODEX_BIN -c 'model_reasoning_effort=\"$EFFORT\"'"
@@ -296,7 +296,7 @@ tmux new-window -n "$WINDOW" -c "$PROJECT_DIR" "$AGENT_CMD"
 Then send the goal into the TUI:
 
 ```bash
-GOAL_TEXT="Use the harness-agent skill. Solve the assigned Harness exercise for 3 hours. Submit only through Harness. Do not use exploits."
+GOAL_TEXT="Use the scorebench skill. Solve the assigned Harness exercise for 3 hours. Submit only through Harness. Do not use exploits."
 tmux send-keys -t "$WINDOW" "/goal $GOAL_TEXT" Enter
 tmux send-keys -t "$WINDOW" Enter
 ```
@@ -312,7 +312,7 @@ token in the environment:
 ```bash
 WINDOW="claude-run001"
 PROJECT_DIR="/path/to/worker/run001"
-HARNESS_URL="https://harness.194.233.95.225.sslip.io/"
+HARNESS_URL="https://scorebench.dev/"
 HARNESS_RUN_TOKEN="hrun_..."
 EFFORT="max"
 MODEL_ARG=""  # for example: --model fable
@@ -331,7 +331,7 @@ AGENT_CMD="export HARNESS_URL=$HARNESS_URL; export HARNESS_RUN_TOKEN=$HARNESS_RU
 Then send the goal:
 
 ```bash
-GOAL_TEXT="Use the harness-agent skill. Solve the assigned Harness exercise for 3 hours. Submit only through Harness. Do not use exploits."
+GOAL_TEXT="Use the scorebench skill. Solve the assigned Harness exercise for 3 hours. Submit only through Harness. Do not use exploits."
 tmux send-keys -t "$WINDOW" "/goal $GOAL_TEXT" Enter
 tmux send-keys -t "$WINDOW" Enter
 ```

@@ -62,7 +62,7 @@ If this is a private repository, authenticate git first or provide an existing
 checkout explicitly:
 
   export HARNESS_REPO=/path/to/harness-server-checkout
-  bash ~/.codex/skills/harness-agent/scripts/install_harness_cli.sh
+  bash ~/.codex/skills/scorebench/scripts/install_harness_cli.sh
 EOF
       exit 1
     }

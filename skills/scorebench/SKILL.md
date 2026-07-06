@@ -1,13 +1,13 @@
 ---
-name: harness-agent
-description: "Use when solving an exercise through the local Harness middleware, or when coordinating multiple parallel Harness-scoped agent runs. The harness owns connector credentials and submissions; agents use harness context, exercise, run start/current/ping, submit, refresh, solution, leaderboard, solutions, solve-form, best, and history without reading run_state.json or connector secrets. Coordinators use harness admin login/create-run-token/launch to create scoped run keys and tmux workers."
+name: scorebench
+description: "Use when solving an exercise through a Scorebench (Harness) middleware server such as https://scorebench.dev/, or when coordinating multiple parallel Harness-scoped agent runs. The harness owns connector credentials and submissions; agents use harness context, exercise, run start/current/ping, submit, refresh, solution, leaderboard, solutions, solve-form, best, and history without reading run_state.json or connector secrets. Coordinators use harness admin login/create-run-token/launch to create scoped run keys and tmux workers."
 ---
 
-# Harness Agent
+# Scorebench Agent
 
-Use this skill when solving an exercise through the local Harness middleware.
-The harness owns connector credentials and submissions; the agent only talks to
-`harnessd`.
+Use this skill when solving an exercise through a Scorebench (Harness)
+middleware server such as `https://scorebench.dev/`. The harness owns connector
+credentials and submissions; the agent only talks to `harnessd`.
 
 This skill is not the Harness server. The server lives at
 `https://github.com/josusanmartin/harness`. The user should provide a scoped
@@ -26,7 +26,7 @@ creates an exercise API key for exactly one user, credential profile, connector,
 and exercise, then provides the agent with:
 
 ```bash
-export HARNESS_URL=https://harness.194.233.95.225.sslip.io/
+export HARNESS_URL=https://scorebench.dev/
 export HARNESS_RUN_TOKEN=hrun_...
 ```
 
@@ -56,7 +56,7 @@ command -v harness
 If that prints nothing, run the skill's bootstrap helper:
 
 ```bash
-HARNESS_CLI_BOOTSTRAP="${CODEX_HOME:-$HOME/.codex}/skills/harness-agent/scripts/install_harness_cli.sh"
+HARNESS_CLI_BOOTSTRAP="${CODEX_HOME:-$HOME/.codex}/skills/scorebench/scripts/install_harness_cli.sh"
 bash "$HARNESS_CLI_BOOTSTRAP"
 ```
 
@@ -76,7 +76,7 @@ bash "$HARNESS_CLI_BOOTSTRAP"
 ```
 
 or a shell where the `harness` command is already installed. Do not use the
-`harness-agent-skill` checkout as the server repo; it only contains this skill.
+`scorebench-skill` checkout as the server repo; it only contains this skill.
 
 After bootstrap, refresh `PATH` for the current shell if needed:
 
@@ -100,14 +100,14 @@ login from inside a worker agent that already has `HARNESS_RUN_TOKEN`.
 Browser admin login:
 
 ```text
-https://harness.194.233.95.225.sslip.io/ui/login
+https://scorebench.dev/ui/login
 ```
 
-Log in as `admin` with the current Harness admin password. Verify browser and
+Log in with your Scorebench username and password; new users can register at `https://scorebench.dev/ui/register`. Verify browser and
 CLI sessions in:
 
 ```text
-https://harness.194.233.95.225.sslip.io/ui/account
+https://scorebench.dev/ui/account
 ```
 
 Admin sessions are long lived, currently one year, and can be revoked from the
@@ -116,7 +116,7 @@ Account page. Tokens are never shown in the session table.
 CLI admin login:
 
 ```bash
-harness admin login --url https://harness.194.233.95.225.sslip.io/ --username admin
+harness admin login --url https://scorebench.dev/ --username <your-username>
 harness admin whoami
 ```
 
@@ -127,8 +127,8 @@ working over SSH and copy the printed link into a local browser:
 
 ```bash
 harness admin login \
-  --url https://harness.194.233.95.225.sslip.io/ \
-  --username admin \
+  --url https://scorebench.dev/ \
+  --username <your-username> \
   --no-browser
 ```
 
@@ -137,8 +137,8 @@ password in shell history:
 
 ```bash
 printf '%s\n' "$HARNESS_ADMIN_PASSWORD" | harness admin login \
-  --url https://harness.194.233.95.225.sslip.io/ \
-  --username admin \
+  --url https://scorebench.dev/ \
+  --username <your-username> \
   --password-stdin
 ```
 
@@ -151,7 +151,7 @@ The CLI stores its admin session locally in:
 Use separate profiles if needed:
 
 ```bash
-harness admin login --profile prod --url https://harness.194.233.95.225.sslip.io/ --username admin
+harness admin login --profile prod --url https://scorebench.dev/ --username <your-username>
 harness admin whoami --profile prod
 harness admin logout --profile prod
 ```
@@ -162,7 +162,7 @@ token created from the Runs page or from `harness admin create-run-token` /
 `harness admin launch`:
 
 ```bash
-export HARNESS_URL=https://harness.194.233.95.225.sslip.io/
+export HARNESS_URL=https://scorebench.dev/
 export HARNESS_RUN_TOKEN=hrun_...
 ```
 
@@ -175,7 +175,7 @@ Do not use it from inside a worker agent that already has `HARNESS_RUN_TOKEN`.
 The coordinator logs the local CLI into the Harness admin API once:
 
 ```bash
-harness admin login --url https://harness.194.233.95.225.sslip.io/ --username admin
+harness admin login --url https://scorebench.dev/ --username <your-username>
 harness admin whoami
 ```
 
@@ -214,7 +214,7 @@ harness admin launch \
   --exercise leaky-relu \
   --count 4 \
   --run-prefix no-skill- \
-  --skills harness-agent \
+  --skills scorebench \
   --model gpt-5-codex \
   --effort high \
   --autonomy autonomous \
@@ -241,7 +241,7 @@ Run identity metadata is run-level, not submission-level. Set it once when the
 run is created or first started:
 
 - `--skills`: comma-separated skills actually used for solving. Always include
-  `harness-agent`; add other solving skills such as
+  `scorebench`; add other solving skills such as
   `problem-agnostic-optimization` only when they are genuinely used.
 - `--model`: the actual model or model family for this worker.
 - `--effort`: the actual reasoning/effort setting for this worker.
@@ -321,7 +321,7 @@ usage.
 Use the bundled helper to make token accounting deterministic:
 
 ```bash
-HARNESS_TOKEN_HELPER="${CODEX_HOME:-$HOME/.codex}/skills/harness-agent/scripts/token_usage.py"
+HARNESS_TOKEN_HELPER="${CODEX_HOME:-$HOME/.codex}/skills/scorebench/scripts/token_usage.py"
 ```
 
 Immediately after the run is established, capture a baseline from the first exact
@@ -488,7 +488,7 @@ a run name, choose and start one:
 
 ```bash
 harness run start --id run001 \
-  --skills harness-agent \
+  --skills scorebench \
   --model <actual-model> \
   --effort <actual-effort> \
   --autonomy autonomous
@@ -503,7 +503,7 @@ harness run start --id run001 \
   --label "skill-research run001" \
   --strategy "progress logging skill with perf access" \
   --hypothesis "perf-guided changes should reduce score faster" \
-  --skills harness-agent,problem-agnostic-optimization \
+  --skills scorebench,problem-agnostic-optimization \
   --model gpt-5-codex \
   --effort high \
   --autonomy autonomous
