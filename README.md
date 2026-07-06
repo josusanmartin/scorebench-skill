@@ -59,6 +59,12 @@ harness history
 Connector credentials stay in Harness. Workers must not call Tensara,
 HighLoad, CPU.mode, GPU Mode/Popcorn, or GitHub directly.
 
+`harness run ping --event start` is mandatory even when the run token is already
+bound to a run name by the web UI or coordinator. For resumed sessions, use
+`harness run ping --event resume`. Do not submit before the ping succeeds: the
+dashboard uses that server timestamp as the trusted run-time origin, and without
+it the report can only fall back to first-submission time zero.
+
 For GPU Mode, Harness is the Popcorn proxy. Use:
 
 ```bash
@@ -122,8 +128,10 @@ harness best
 harness refresh
 ```
 
-A tmux window or launched agent is not success by itself. Keep checking until
-each worker has terminal scored or failed submissions.
+A tmux window or launched agent is not success by itself. Inspect each pane and
+verify the worker itself ran `harness run ping --event start` or
+`harness run ping --event resume` before submitting. Keep checking until each
+worker has terminal scored or failed submissions.
 
 ## Token Accounting
 

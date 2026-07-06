@@ -272,6 +272,8 @@ these constraints in every worker goal:
 - read only the assigned exercise and current run,
 - do not read `run_state.json`, connector credentials, `.env`, sibling tokens,
   or unrelated transcripts,
+- send `harness run ping --event start` or `harness run ping --event resume`
+  before optimization work and before the first submission,
 - initialize exact token accounting before the first submission,
 - run autonomously for the requested wall-clock budget.
 
@@ -399,7 +401,9 @@ Expected healthy signs:
 
 - `harness context` shows the intended connector, exercise, credential profile,
   and run id.
-- `harness run current` shows the active run and recent ping/activity.
+- the worker pane shows a successful `harness run ping --event start` or
+  `harness run ping --event resume` before the first `harness submit`.
+- `harness run current` shows the active run.
 - `harness history` eventually shows candidate rows for that run.
 - `harness best` updates after scored submissions.
 

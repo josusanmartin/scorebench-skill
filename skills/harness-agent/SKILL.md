@@ -191,6 +191,22 @@ for long-running goal sessions, read
 `references/tmux-goal-sessions.md` and launch interactive TUIs in tmux, then
 send `/goal ...` with `tmux send-keys`.
 
+Every Harness worker goal must include an explicit no-exploit contract. If you
+are creating a `/goal` prompt or a `harness admin launch --goal` value, append
+this boundary unless the user has already included an equivalent one:
+
+```text
+Do not use exploits. Submit only legitimate, general solutions. Do not hardcode
+benchmark cases, memoize or cache outputs for repeated venue inputs, key off
+pointer identity, reuse stale outputs, detect hidden tests, skip required work,
+or bypass the intended problem semantics. If any submitted candidate is later
+found exploity or invalid, immediately run `harness invalidate <candidate_id>
+--reason "..."`
+```
+
+Do not launch a worker goal that lacks this boundary. The benchmark contract
+and problem semantics take precedence over any score improvement.
+
 ```bash
 harness admin launch \
   --connector local_tensara \
@@ -247,8 +263,9 @@ Post-launch checks:
    file, workspace, and scoped run token.
 2. Inspect each tmux pane with `tmux capture-pane -t <window> -p -S -160` and
    verify the interactive agent accepted the `/goal`, loaded this skill, and ran
-   `harness context`, `harness exercise`, `harness run current`, and
-   `harness run ping`.
+   `harness context`, `harness exercise`, `harness run current` or
+   `harness run start`, and a successful `harness run ping --event start` or
+   `harness run ping --event resume` before any `harness submit`.
 3. For each manifest job, query the harness with that job's token from the
    coordinator shell:
 
@@ -439,7 +456,9 @@ input, output, or reasoning counts. If you only know the final total, submit onl
 
 Follow these steps in order. Do not skip `harness run ping`; the harness uses
 server timestamps from run start, ping, and submissions to derive elapsed time
-and remove restart gaps.
+and remove restart gaps. A run token being pre-bound to a run name is not enough
+to establish the elapsed-time origin. The run is timing-trusted only after this
+worker session has successfully sent a start or resume ping.
 
 1. Confirm the scoped harness context:
 
@@ -509,21 +528,30 @@ After starting, confirm the active run:
 harness run current
 ```
 
-4. Immediately ping the run before doing optimization work:
+4. Immediately create a trusted server timestamp before doing optimization work
+   or submitting. For a fresh worker session, run:
 
 ```bash
-harness run ping --event start --note "starting work"
+harness run ping --event start --note "worker session started"
 ```
 
 If this is a resumed session, use:
 
 ```bash
-harness run ping --event resume --note "resuming work"
+harness run ping --event resume --note "worker session resumed"
 ```
 
-Ping once at the start of every new or resumed agent session. The ping is not a
-claim about effort; it gives the middleware a server timestamp so reports can
+Ping once at the start of every new or resumed agent session, including tokens
+that were already scoped to a run by the web UI or coordinator. The ping is not
+a claim about effort; it gives the middleware a server timestamp so reports can
 drop dead time between sessions.
+
+Treat the ping command as a hard gate. It must return a JSON response containing
+the current `run_id` and a `heartbeat` object with `event` equal to `start` or
+`resume`. If the ping fails, returns an unexpected run id, or is skipped, do not
+run `harness submit`; fix the harness/run-token issue first. Without this
+trusted ping, the dashboard has to fall back to the first submission as time
+zero, which makes cross-run timing comparisons misleading.
 
 5. Initialize token accounting before doing optimization work. If no exact
 counter is available, report that token accounting is blocked and do not submit
@@ -541,7 +569,14 @@ cache directories, or unrelated scratch files.
    by reverse-engineering token usage; either use an exact supported counter or
    stop before submitting.
 
-8. Submit through the harness only, and include `--total-tokens` in the same
+8. Before submitting, check the candidate against the no-exploit contract from
+   the goal. Do not submit or promote hardcoded, cached-output,
+   benchmark-detection, pointer-identity, stale-state, skipped-work, or
+   semantics-bypass shortcuts even if they score well. If a speedup depends on
+   repeated immutable venue inputs rather than a general solution, treat it as
+   an exploit and do not submit it.
+
+9. Submit through the harness only, and include `--total-tokens` in the same
    call. The CLI automatically includes the token-bound run id from
    `harness run current`; the middleware rejects submissions without both an
    active run and a token snapshot:
@@ -624,7 +659,7 @@ exercise. Reuse it only when retrying the exact same submission after a network,
 timeout, or uncertain response. Use a new idempotency key when source, compiler,
 system, exercise, or other submission semantics change.
 
-9. Inspect feedback and refresh queued submissions through the harness:
+10. Inspect feedback and refresh queued submissions through the harness:
 
 ```bash
 harness best
@@ -679,7 +714,7 @@ For PR-backed connectors, this is still the full workflow. The middleware decide
 whether the candidate becomes a local harness run, an API submission, or a
 GitHub pull request.
 
-10. Before final response, record final run usage with `harness run usage` using
+11. Before final response, record final run usage with `harness run usage` using
     the same exact source as the submission token snapshots. If the final total
     is unavailable, say that clearly instead of inventing one.
 
@@ -695,6 +730,11 @@ GitHub pull request.
 - Ensure there is exactly one active run id before the first submission. If the
   token is pre-bound to a run, use that run; otherwise choose one with
   `harness run start --id ...`. Keep using the same run id for that run.
+- Ensure every new or resumed worker session has a successful
+  `harness run ping --event start` or `harness run ping --event resume` before
+  optimization work and before the first `harness submit`. Do not rely on a
+  pre-bound run token, token creation time, or first submission time as the run
+  start.
 - If the strategy, model, tool access, prompt, or experimental condition
   materially changes, ask whether this is a continuation or start a new run only
   with explicit confirmation from the harness/user.
@@ -706,6 +746,13 @@ GitHub pull request.
 - Keep `--notes` factual: hypothesis, result, important failure, or connector id.
 - Use `--label` to make deterministic progress logs readable.
 - Use `--idempotency-key` for retries of the same candidate.
+- Every Harness `/goal` prompt and coordinator `--goal` value must explicitly
+  forbid exploits before the worker starts. If you create the goal, you are
+  responsible for adding that boundary.
+- Do not submit or promote solutions that hardcode benchmark cases, memoize or
+  cache exact venue inputs, key off pointer identity, reuse stale outputs,
+  detect hidden tests, skip required work, or bypass the intended problem
+  semantics.
 - Use `harness invalidate` with a concrete reason when your own candidate
   should no longer count because of an exploit, correctness bug, invalid
   assumption, or user/operator review.
