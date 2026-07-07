@@ -94,6 +94,7 @@ for name in scorebench harness; do
   cat >"$bin_dir/$name" <<EOF
 #!/usr/bin/env bash
 export PYTHONPATH="$repo:\${PYTHONPATH:-}"
+export PYTHONSAFEPATH=1
 exec "$venv/bin/python" -m challenge_harness.cli "\$@"
 EOF
   chmod +x "$bin_dir/$name"
