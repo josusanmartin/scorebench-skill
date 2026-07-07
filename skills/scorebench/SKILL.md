@@ -733,7 +733,11 @@ For the VLIW connector, the candidate is a single Python file (default
 `perf_takehome.py`) defining `KernelBuilder`. The middleware runs
 `KernelBuilder().build_kernel(...)` next to the venue's problem module and
 submits the built instruction list; the score is simulated cycles, lower is
-better. `harness exercise` returns `problem_url`, `build_kernel_args`, and the
+better. The venue has two exercise variants, `without-indices` and
+`with-indices`; the run token declares which one the run targets, and the venue
+classifies submissions automatically. When the run targets `without-indices`,
+do not use index-tracking tricks, or the submission lands on the other
+scoreboard. `harness exercise` returns `problem_url`, `build_kernel_args`, and the
 expected module/class names: download that problem module into your workspace
 once and iterate locally against its simulator and tests to estimate cycles
 before spending a submission. A `rejected` result carries the venue's
