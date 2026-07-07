@@ -218,9 +218,15 @@ harness admin launch \
   --model gpt-5-codex \
   --effort high \
   --autonomy autonomous \
+  --gpu RTX5090 \
   --goal 'Without using the problem agnostic skill I want you to solve this problem http://220.135.0.171.sslip.io:45656/problems/leaky-relu and run for 3 hours trying to get the best score. You need to get a score lower than 100us. Only run for 3 hours. Do not use any exploits. Use the harness skill to submit to local tensara.' \
   --agent-command codex
 ```
+
+For GPU-backed connectors (tensara, GPU Mode) pass `--gpu` so every worker run
+is pinned to one GPU; ask the harness UI or operator which GPUs the deployment
+exposes (local tensara currently exposes `RTX5090`). Omit `--gpu` for
+connectors without a GPU concept.
 
 Use `--dry-run --json` first when validating a new launch shape. Each worker
 must receive only its own `HARNESS_RUN_TOKEN`, verify context, read the
@@ -509,6 +515,12 @@ harness run start --id run001 \
   --autonomy autonomous
 ```
 
+On GPU-backed connectors (tensara, GPU Mode) the run can also be pinned to one
+GPU with `--gpu <gpu>` (for example `--gpu H100`). If the assignment block or
+token metadata names a GPU, pass exactly that value at run start; every
+submission in the run then targets it and a conflicting `harness submit --gpu`
+is rejected. Never mix two GPUs in one run; start a separate run instead.
+
 The run-start metadata is optional but strongly encouraged. Supply it once per
 run, before the first submission, so iteration submissions do not carry extra
 bookkeeping overhead. If the token is already bound to a run, inspect
@@ -613,6 +625,13 @@ harness submit path/to/solution \
   --system raptor_cove_p \
   $TOKEN_FLAGS
 
+# VLIW example: one Python file defining KernelBuilder; no language/gpu flags
+harness submit perf_takehome.py \
+  --label short-name \
+  --notes "what changed" \
+  --idempotency-key short-name-v1 \
+  $TOKEN_FLAGS
+
 # Multi-file bundle example
 harness submit path/to/solution-dir \
   --label short-name \
@@ -710,6 +729,17 @@ under `connector_response.raw.popcorn` (`command`, `stdout`, `stderr`,
 <submission_id>` only when the source-including Popcorn view is needed. Do not
 call `popcorn` directly from a scoped Harness run.
 
+For the VLIW connector, the candidate is a single Python file (default
+`perf_takehome.py`) defining `KernelBuilder`. The middleware runs
+`KernelBuilder().build_kernel(...)` next to the venue's problem module and
+submits the built instruction list; the score is simulated cycles, lower is
+better. `harness exercise` returns `problem_url`, `build_kernel_args`, and the
+expected module/class names: download that problem module into your workspace
+once and iterate locally against its simulator and tests to estimate cycles
+before spending a submission. A `rejected` result carries the venue's
+correctness error; keep the file importable with no side effects at import
+time.
+
 For PR-backed connectors, this is still the full workflow. The middleware decides
 whether the candidate becomes a local harness run, an API submission, or a
 GitHub pull request.
@@ -743,6 +773,9 @@ GitHub pull request.
   deterministic strategy comparison reports.
 - Set skills/model/effort/autonomy once with `harness run start` or coordinator
   run-token creation. Do not repeat that run metadata on every `harness submit`.
+- On GPU-backed connectors, keep one GPU per run: declare it once (token
+  metadata or `harness run start --gpu`) and never pass a different
+  `harness submit --gpu` mid-run; the harness rejects the mismatch.
 - Keep `--notes` factual: hypothesis, result, important failure, or connector id.
 - Use `--label` to make deterministic progress logs readable.
 - Use `--idempotency-key` for retries of the same candidate.
