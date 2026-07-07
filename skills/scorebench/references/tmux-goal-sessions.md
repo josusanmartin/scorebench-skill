@@ -40,7 +40,7 @@ command -v claude
 For Harness-scoped runs, also verify:
 
 ```bash
-command -v harness
+command -v scorebench
 ```
 
 If you are not already inside tmux:
@@ -132,8 +132,8 @@ Codex `/model` or `claude --help`.
 Log the coordinator CLI into Harness first:
 
 ```bash
-harness admin login --url https://scorebench.dev/ --username <your-username>
-harness admin whoami
+scorebench admin login --url https://scorebench.dev/ --username <your-username>
+scorebench admin whoami
 ```
 
 The login command opens or prints a browser authorization link. If already
@@ -147,7 +147,7 @@ Create scoped run keys and worker prompt files before launching agent TUIs:
 MANIFEST="$PWD/.harness/agent-runs/leaky-relu-no-skill-manifest.json"
 WORKROOT="$PWD/.harness/agent-runs/leaky-relu-no-skill"
 
-harness admin launch \
+scorebench admin launch \
   --connector local_tensara \
   --credential skill-research \
   --exercise leaky-relu \
@@ -225,7 +225,7 @@ jq -r '.jobs[] | @base64' "$MANIFEST" | while read -r job; do
 done
 ```
 
-Pass run identity metadata to `harness admin launch` once, matching the actual
+Pass run identity metadata to `scorebench admin launch` once, matching the actual
 worker command you start from the manifest. The worker should not repeat
 skills/model/effort/autonomy on every submission.
 
@@ -272,7 +272,7 @@ these constraints in every worker goal:
 - read only the assigned exercise and current run,
 - do not read `run_state.json`, connector credentials, `.env`, sibling tokens,
   or unrelated transcripts,
-- send `harness run ping --event start` or `harness run ping --event resume`
+- send `scorebench run ping --event start` or `scorebench run ping --event resume`
   before optimization work and before the first submission,
 - initialize exact token accounting before the first submission,
 - run autonomously for the requested wall-clock budget.
@@ -288,7 +288,7 @@ PROJECT_DIR="/path/to/worker/run001"
 HARNESS_URL="https://scorebench.dev/"
 HARNESS_RUN_TOKEN="hrun_..."
 EFFORT="xhigh"
-AGENT_CMD="export HARNESS_URL=$HARNESS_URL; export HARNESS_RUN_TOKEN=$HARNESS_RUN_TOKEN; exec $CODEX_BIN -c 'model_reasoning_effort=\"$EFFORT\"'"
+AGENT_CMD="export SCOREBENCH_URL=$HARNESS_URL; export SCOREBENCH_RUN_TOKEN=$HARNESS_RUN_TOKEN; exec $CODEX_BIN -c 'model_reasoning_effort=\"$EFFORT\"'"
 
 tmux new-window -n "$WINDOW" -c "$PROJECT_DIR" "$AGENT_CMD"
 ```
@@ -316,7 +316,7 @@ HARNESS_URL="https://scorebench.dev/"
 HARNESS_RUN_TOKEN="hrun_..."
 EFFORT="max"
 MODEL_ARG=""  # for example: --model fable
-AGENT_CMD="export HARNESS_URL=$HARNESS_URL; export HARNESS_RUN_TOKEN=$HARNESS_RUN_TOKEN; exec $CLAUDE_BIN $MODEL_ARG --effort $EFFORT --name $WINDOW"
+AGENT_CMD="export SCOREBENCH_URL=$HARNESS_URL; export SCOREBENCH_RUN_TOKEN=$HARNESS_RUN_TOKEN; exec $CLAUDE_BIN $MODEL_ARG --effort $EFFORT --name $WINDOW"
 
 tmux new-window -n "$WINDOW" -c "$PROJECT_DIR" "$AGENT_CMD"
 ```
@@ -325,7 +325,7 @@ If the workspace is trusted and the user explicitly wants no permission prompts,
 add the bypass flag to the Claude command:
 
 ```bash
-AGENT_CMD="export HARNESS_URL=$HARNESS_URL; export HARNESS_RUN_TOKEN=$HARNESS_RUN_TOKEN; exec $CLAUDE_BIN --dangerously-skip-permissions $MODEL_ARG --effort $EFFORT --name $WINDOW"
+AGENT_CMD="export SCOREBENCH_URL=$HARNESS_URL; export SCOREBENCH_RUN_TOKEN=$HARNESS_RUN_TOKEN; exec $CLAUDE_BIN --dangerously-skip-permissions $MODEL_ARG --effort $EFFORT --name $WINDOW"
 ```
 
 Then send the goal:
@@ -383,7 +383,7 @@ Do not stop after tmux windows are created. The coordinator is responsible for
 making sure each worker is actually submitting through Harness and not silently
 erroring.
 
-Keep the manifest from `harness admin launch --json` or from the generated
+Keep the manifest from `scorebench admin launch --json` or from the generated
 `manifest.json`. For each job, use only that job's scoped token when checking
 its run:
 
@@ -391,27 +391,27 @@ its run:
 HARNESS_URL="<manifest harness_url>"
 HARNESS_RUN_TOKEN="<job token>"
 
-env HARNESS_URL="$HARNESS_URL" HARNESS_RUN_TOKEN="$HARNESS_RUN_TOKEN" harness context
-env HARNESS_URL="$HARNESS_URL" HARNESS_RUN_TOKEN="$HARNESS_RUN_TOKEN" harness run current
-env HARNESS_URL="$HARNESS_URL" HARNESS_RUN_TOKEN="$HARNESS_RUN_TOKEN" harness history
-env HARNESS_URL="$HARNESS_URL" HARNESS_RUN_TOKEN="$HARNESS_RUN_TOKEN" harness best
+env HARNESS_URL="$HARNESS_URL" HARNESS_RUN_TOKEN="$HARNESS_RUN_TOKEN" scorebench context
+env HARNESS_URL="$HARNESS_URL" HARNESS_RUN_TOKEN="$HARNESS_RUN_TOKEN" scorebench run current
+env HARNESS_URL="$HARNESS_URL" HARNESS_RUN_TOKEN="$HARNESS_RUN_TOKEN" scorebench history
+env HARNESS_URL="$HARNESS_URL" HARNESS_RUN_TOKEN="$HARNESS_RUN_TOKEN" scorebench best
 ```
 
 Expected healthy signs:
 
-- `harness context` shows the intended connector, exercise, credential profile,
+- `scorebench context` shows the intended connector, exercise, credential profile,
   and run id.
-- the worker pane shows a successful `harness run ping --event start` or
-  `harness run ping --event resume` before the first `harness submit`.
-- `harness run current` shows the active run.
-- `harness history` eventually shows candidate rows for that run.
-- `harness best` updates after scored submissions.
+- the worker pane shows a successful `scorebench run ping --event start` or
+  `scorebench run ping --event resume` before the first `scorebench submit`.
+- `scorebench run current` shows the active run.
+- `scorebench history` eventually shows candidate rows for that run.
+- `scorebench best` updates after scored submissions.
 
 If a candidate is pending/submitted/checking, refresh it with the same scoped
 token instead of resubmitting:
 
 ```bash
-env HARNESS_URL="$HARNESS_URL" HARNESS_RUN_TOKEN="$HARNESS_RUN_TOKEN" harness refresh
+env HARNESS_URL="$HARNESS_URL" HARNESS_RUN_TOKEN="$HARNESS_RUN_TOKEN" scorebench refresh
 ```
 
 Repeat refresh until the candidate reaches a terminal scored or failed state.
@@ -431,8 +431,8 @@ For each issue, capture both sides:
 
 ```bash
 tmux capture-pane -t "$WINDOW" -p -S -240
-env HARNESS_URL="$HARNESS_URL" HARNESS_RUN_TOKEN="$HARNESS_RUN_TOKEN" harness history
-env HARNESS_URL="$HARNESS_URL" HARNESS_RUN_TOKEN="$HARNESS_RUN_TOKEN" harness refresh
+env HARNESS_URL="$HARNESS_URL" HARNESS_RUN_TOKEN="$HARNESS_RUN_TOKEN" scorebench history
+env HARNESS_URL="$HARNESS_URL" HARNESS_RUN_TOKEN="$HARNESS_RUN_TOKEN" scorebench refresh
 ```
 
 Preserve exact error text and any `trace_id`. A coordinator report should say
