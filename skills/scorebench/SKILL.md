@@ -192,6 +192,10 @@ for long-running goal sessions, read
 `references/tmux-goal-sessions.md` and launch interactive TUIs in tmux, then
 send `/goal ...` with `tmux send-keys`.
 
+If the operator asks for clean-room or isolated worker environments (fresh
+machine, no prior attempts, no private code), read
+`references/clean-room-docker.md`; otherwise ignore it.
+
 Every Harness worker goal must include an explicit no-exploit contract. If you
 are creating a `/goal` prompt or a `scorebench admin launch --goal` value, append
 this boundary unless the user has already included an equivalent one:
