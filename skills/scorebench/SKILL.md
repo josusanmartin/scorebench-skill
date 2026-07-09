@@ -249,7 +249,11 @@ use a run prefix like `fable-pao-mm`, a strategy like
 max`.
 
 Run identity metadata is run-level, not submission-level. Set it once when the
-run is created or first started:
+run is created or first started. `--model` and `--effort` are required at run
+start, so either pre-bind them into the exercise API key with
+`scorebench admin create-run-token --model ... --effort ...` (and pass them on
+`scorebench admin launch`) or make sure each worker supplies them; otherwise
+`scorebench run start` is rejected.
 
 - `--skills`: comma-separated skills actually used for solving. Always include
   `scorebench`; add other solving skills such as
@@ -495,7 +499,9 @@ scorebench run current
 ```
 
 Do not try to switch a pre-bound run token to another run id. If the token needs
-a run name, choose and start one:
+a run name, choose and start one. `--model` and `--effort` are **required** —
+`scorebench run start` is rejected without them (unless the exercise API key was
+pre-bound with them) — so always pass the actual values you are running with:
 
 ```bash
 scorebench run start --id run001 \
@@ -526,13 +532,15 @@ token metadata names a GPU, pass exactly that value at run start; every
 submission in the run then targets it and a conflicting `scorebench submit --gpu`
 is rejected. Never mix two GPUs in one run; start a separate run instead.
 
-The run-start metadata is optional but strongly encouraged. Supply it once per
-run, before the first submission, so iteration submissions do not carry extra
-bookkeeping overhead. If the token is already bound to a run, inspect
-`scorebench run current`; if the metadata is missing and there have been no
-submissions yet, update the same run id with `scorebench run start --id
-<current-run-id> --skills ... --model ... --effort ... --autonomy ...`. Do not
-start a new run just to fix metadata.
+`--model` and `--effort` are required at run start; the rest of the run-start
+metadata (`--skills`, `--autonomy`, `--strategy`, `--hypothesis`, `--label`) is
+optional but strongly encouraged. Supply it once per run, before the first
+submission, so iteration submissions do not carry extra bookkeeping overhead. If
+the token is already bound to a run, inspect `scorebench run current`; if
+optional metadata is missing and there have been no submissions yet, update the
+same run id with `scorebench run start --id <current-run-id> --skills ...
+--model ... --effort ... --autonomy ...`. Do not start a new run just to fix
+metadata.
 
 If the harness says a previous run already exists for this user/profile/exercise,
 continue it with the exact `scorebench run start --id <previous-run>` command from
