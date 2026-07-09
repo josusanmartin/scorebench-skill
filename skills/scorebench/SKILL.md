@@ -62,10 +62,13 @@ repository access is needed):
 curl -fsSL https://scorebench.dev/install.sh | bash
 ```
 
-For a self-hosted deployment, use its own installer:
-`curl -fsSL "$SCOREBENCH_URL/install.sh" | bash`. The skill also bundles the
-same logic as a helper, which falls back to building wrappers from a local
-server checkout (`HARNESS_REPO`) when no deployment is reachable:
+The bundled helper installs the public CLI package from
+`https://github.com/josusanmartin/scorebench-cli` into a private venv and links
+`scorebench` (plus the legacy `harness` alias) into `$HOME/.local/bin`; no
+private repository access is needed. A self-hosted deployment's own installer
+(`curl -fsSL "$SCOREBENCH_URL/install.sh" | bash`) also works. If GitHub is
+unreachable, set `SCOREBENCH_CLI_CHECKOUT=/path/to/scorebench-cli` and rerun
+the helper:
 
 ```bash
 SCOREBENCH_CLI_BOOTSTRAP="${CODEX_HOME:-$HOME/.codex}/skills/scorebench/scripts/install_scorebench_cli.sh"
