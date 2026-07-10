@@ -105,8 +105,11 @@ Two hard rules for workers:
 
 For GPU Mode, the harness is the Popcorn proxy: `scorebench submit` and
 `scorebench refresh` return the Popcorn payload under
-`connector_response.raw.popcorn`, and `scorebench solution <submission_id>
---no-code` shows the same report as `popcorn submissions show <id> --no-code`.
+`connector_response.raw.popcorn`. Public benchmark/test cases are normalized
+under `connector_response.case_results` with a `case_summary`; benchmark timing
+fields use nanoseconds. Secret case bodies are never returned. Use
+`scorebench refresh <candidate_id>` to enrich an older candidate, and
+`scorebench solution <submission_id> --no-code` for the human Popcorn report.
 
 ## CLI bootstrap
 

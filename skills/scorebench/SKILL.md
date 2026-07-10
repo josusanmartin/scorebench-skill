@@ -736,7 +736,14 @@ exercise and credential profile.
 For GPU Mode / Popcorn specifically, treat Harness as the Popcorn proxy:
 `scorebench submit` and `scorebench refresh` include the visible Popcorn CLI payload
 under `connector_response.raw.popcorn` (`command`, `stdout`, `stderr`,
-`output`, `text`, and parsed fields). To inspect the same run report that
+`output`, `text`, and parsed fields). They also expose normalized public
+benchmark/test details under `connector_response.case_results` and
+`connector_response.case_summary`; benchmark timing fields (`mean_ns`,
+`error_ns`, `best_ns`, and `worst_ns`) are nanoseconds, and semicolon-delimited
+case specs are available as typed `parameters`. Prefer these structured fields
+over parsing the rendered Popcorn text. Detailed secret-run case bodies are
+never returned. Run `scorebench refresh <candidate_id>` to enrich an older
+candidate when Popcorn still retains it. To inspect the same run report that
 `popcorn submissions show <id> --no-code` would show, run
 `scorebench solution <submission_id> --no-code`. Use `scorebench solution
 <submission_id>` only when the source-including Popcorn view is needed. Do not
