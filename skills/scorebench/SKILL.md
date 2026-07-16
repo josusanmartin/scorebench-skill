@@ -192,6 +192,14 @@ for long-running goal sessions, read
 `references/tmux-goal-sessions.md` and launch interactive TUIs in tmux, then
 send `/goal ...` with `tmux send-keys`.
 
+When long-running workers must recover from process/capacity interruptions or
+must continue to a ScoreBench active-time target, also read
+`references/tmux-watchers.md`. Run its recovery and active-time/token monitors
+in separate coordinator-owned tmux windows. Active-time completion must use
+submitted ScoreBench `wall_seconds`, never report `run_elapsed_seconds` or
+ordinary elapsed clock time. Keep every nudge scoped to the matching worker's
+run ID and metrics.
+
 If the operator asks for clean-room or isolated worker environments (fresh
 machine, no prior attempts, no private code), read
 `references/clean-room-docker.md`; otherwise ignore it.
