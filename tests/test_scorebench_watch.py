@@ -237,6 +237,34 @@ class SupervisorTests(unittest.TestCase):
             [("run-one", "/work/SCOREBENCH_4H_REACHED")],
         )
 
+    def test_busy_status_at_top_of_fullscreen_pane_prevents_nudge(self):
+        class FakeSupervisor(WATCH.Supervisor):
+            def remove_markers(self, worker, *markers):
+                return True
+
+            def capture_pane(self, worker, history=120):
+                return "Responding\n" + ("\n" * 40)
+
+            def nudge(self, worker, active, tokens):
+                raise AssertionError("busy fullscreen worker must not be nudged")
+
+        report = {
+            "arms": [
+                {
+                    "points": [
+                        {
+                            "run_id": "run-one",
+                            "wall_seconds": 600,
+                            "tokens_total": 5000,
+                        }
+                    ]
+                }
+            ]
+        }
+        supervisor = FakeSupervisor(self.config())
+        with mock.patch.object(WATCH, "fetch_report", return_value=report):
+            supervisor.active_once()
+
     def test_missing_window_reattaches_running_container(self):
         class FakeSupervisor(WATCH.Supervisor):
             def __init__(self, config):
