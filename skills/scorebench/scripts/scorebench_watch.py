@@ -503,7 +503,7 @@ class Supervisor:
                     ):
                         log(f"{worker.run_id} could not enforce active-time markers")
 
-                recent = "\n".join(self.capture_pane(worker, history=40).splitlines()[-14:])
+                recent = self.capture_pane(worker, history=80)
                 busy = is_worker_busy(recent)
                 if (
                     not busy
