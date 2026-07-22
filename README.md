@@ -5,7 +5,7 @@ Agent skill for solving optimization exercises through a running
 
 Scorebench is a middleware and dashboard for benchmarking coding agents on
 competitive optimization venues (Tensara, HighLoad.fun, CPU.mode, GPU Mode /
-Popcorn, GitHub PRs). The server holds the connector credentials, records every
+Popcorn, Paradigm Puzzles, GitHub PRs). The server holds the connector credentials, records every
 submission with trusted timestamps and token usage, and renders strategy
 comparison dashboards. Agents never talk to the venues directly — they talk to
 the harness, and the harness talks to the venue.
@@ -99,7 +99,7 @@ Two hard rules for workers:
   time zero and cross-run timing comparisons become misleading.
 - **Never call the venue directly.** Connector credentials stay in the
   harness. Workers must not call Tensara, HighLoad, CPU.mode, GPU Mode /
-  Popcorn, or GitHub themselves — use `scorebench leaderboard`,
+  Popcorn, Paradigm Puzzles, or GitHub themselves — use `scorebench leaderboard`,
   `scorebench solutions`, `scorebench inspect-solution`, `scorebench solve-form`, and
   `scorebench challenge-page` for read-only venue context.
 
@@ -191,6 +191,7 @@ active run metadata onto each candidate automatically.
 
 ```text
 skills/scorebench/SKILL.md                         # the complete agent workflow
+skills/scorebench/references/paradigm-puzzles.md   # Paradigm exercise file and status contracts
 skills/scorebench/references/tmux-goal-sessions.md # long-running tmux /goal sessions
 skills/scorebench/scripts/install_scorebench_cli.sh # CLI bootstrap (hosted installer + fallback)
 skills/scorebench/scripts/token_usage.py           # run-relative token accounting

@@ -1,6 +1,6 @@
 ---
 name: scorebench
-description: "Use when solving an exercise through a Scorebench (Harness) middleware server such as https://scorebench.dev/, or when coordinating multiple parallel Harness-scoped agent runs. The harness owns connector credentials and submissions; agents use scorebench context, exercise, run start/current/ping, submit, refresh, solution, leaderboard, solutions, solve-form, best, and history without reading run_state.json or connector secrets. Coordinators use scorebench admin login/create-run-token/launch to create scoped run keys and tmux workers."
+description: "Use when solving an exercise through a Scorebench (Harness) middleware server such as https://scorebench.dev/, including Paradigm Puzzles runs, or when coordinating multiple parallel Harness-scoped agent runs. The harness owns connector credentials and submissions; agents use scorebench context, exercise, run start/current/ping, submit, refresh, solution, leaderboard, solutions, solve-form, best, and history without reading run_state.json or connector secrets. Coordinators use scorebench admin login/create-run-token/launch to create scoped run keys and tmux workers."
 ---
 
 # Scorebench Agent
@@ -645,6 +645,13 @@ scorebench submit perf_takehome.py \
   --idempotency-key short-name-v1 \
   $TOKEN_FLAGS
 
+# Paradigm Puzzles example: use the exact file shape from scorebench exercise
+scorebench submit decoder.py \
+  --label qec-targeted-v1 \
+  --notes "targeted correlated-noise decoder" \
+  --idempotency-key qec-targeted-v1 \
+  $TOKEN_FLAGS
+
 # Multi-file bundle example
 scorebench submit path/to/solution-dir \
   --label short-name \
@@ -763,6 +770,17 @@ once and iterate locally against its simulator and tests to estimate cycles
 before spending a submission. A `rejected` result carries the venue's
 correctness error; keep the file importable with no side effects at import
 time.
+
+For the `paradigm_puzzles` connector, read
+`references/paradigm-puzzles.md` before creating or submitting a candidate. The
+scoped exercise determines whether the bundle must contain Solidity, Rust,
+Python, plain text, packing JSON, or an ONNX model. Never ask for, read, or use
+the Paradigm `pp_...` key; ScoreBench owns it. Use `scorebench leaderboard`,
+`scorebench solutions`, and `scorebench inspect-solution` for public venue
+context. Validation rejection means fix the candidate. A cooldown response means
+wait until `nextSubmissionAt`; do not evade it with a new idempotency key. Lean
+Semantics is asynchronous: refresh the existing ScoreBench candidate until it
+is terminal instead of submitting it again.
 
 For PR-backed connectors, this is still the full workflow. The middleware decides
 whether the candidate becomes a local scorebench run, an API submission, or a
