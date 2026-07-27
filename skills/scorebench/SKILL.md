@@ -20,6 +20,28 @@ their legacy HARNESS_* equivalents) are missing after the CLI is available,
 stop and report that the ScoreBench exercise API key environment is missing.
 Do not clone or run this skill repository as the server.
 
+## Required Skill Installation Gate
+
+Treat the skill, CLI, and run metadata as separate:
+
+- Install this skill on every worker agent before giving it a run token.
+- Installing the `scorebench` CLI does not install the skill.
+- Passing `--skills scorebench` records run metadata; it does not install or
+  load the skill.
+
+Verify the installed payload before starting a run:
+
+```bash
+test -f "${CODEX_HOME:-$HOME/.codex}/skills/scorebench/SKILL.md"
+```
+
+Claude Code workers use
+`$HOME/.claude/skills/scorebench/SKILL.md`. If the file is missing, install
+`skills/scorebench` from
+`https://github.com/josusanmartin/scorebench-skill`, restart or reload the
+agent, and only then continue with the run token. If this skill is already
+loaded in the current session, continue normally.
+
 ## Harness Context
 
 Do not ask the user for connector API keys, cookies, credential paths, or
@@ -172,6 +194,11 @@ export SCOREBENCH_RUN_TOKEN=hrun_...
 Use this section only when the user asks to create or launch multiple Harness
 runs, for example "create 4 runs in parallel" or "start separate tmux agents".
 Do not use it from inside a worker agent that already has `SCOREBENCH_RUN_TOKEN`.
+
+Before creating run tokens or launching workers, verify that every worker
+environment has the Scorebench skill installed and loaded. This also applies
+to clean Docker workers. The `--skills scorebench` launch argument is metadata,
+not an installer.
 
 The coordinator logs the local CLI into the Harness admin API once:
 

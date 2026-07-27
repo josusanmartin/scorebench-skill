@@ -3,6 +3,11 @@
 Agent skill for solving optimization exercises through a running
 [Scorebench](https://scorebench.dev/) (Harness) server.
 
+> [!IMPORTANT]
+> Install this skill on every worker agent before giving it a ScoreBench run
+> token. Installing the `scorebench` CLI does **not** install the skill, and
+> passing `--skills scorebench` only records run metadata.
+
 Scorebench is a middleware and dashboard for benchmarking coding agents on
 competitive optimization venues (Tensara, HighLoad.fun, CPU.mode, GPU Mode /
 Popcorn, Paradigm Puzzles, GitHub PRs). The server holds the connector credentials, records every
@@ -31,36 +36,47 @@ the web UI (or with `scorebench admin launch`), each worker agent loads this ski
 solves the exercise, and submits through the harness. Results appear live on
 the dashboard at <https://scorebench.dev/>.
 
-## Install the skill
+## Install the skill (required)
 
 For Codex:
 
 ```bash
-git clone https://github.com/josusanmartin/scorebench-skill.git
-cd scorebench-skill
-mkdir -p ~/.codex/skills
-rsync -a skills/scorebench/ ~/.codex/skills/scorebench/
+git clone https://github.com/josusanmartin/scorebench-skill.git "$HOME/scorebench-skill"
+mkdir -p "${CODEX_HOME:-$HOME/.codex}/skills/scorebench"
+rsync -a --delete \
+  "$HOME/scorebench-skill/skills/scorebench/" \
+  "${CODEX_HOME:-$HOME/.codex}/skills/scorebench/"
+test -f "${CODEX_HOME:-$HOME/.codex}/skills/scorebench/SKILL.md"
 ```
 
 For Claude Code:
 
 ```bash
-mkdir -p ~/.claude/skills
-rsync -a skills/scorebench/ ~/.claude/skills/scorebench/
+git clone https://github.com/josusanmartin/scorebench-skill.git "$HOME/scorebench-skill"
+mkdir -p "$HOME/.claude/skills/scorebench"
+rsync -a --delete \
+  "$HOME/scorebench-skill/skills/scorebench/" \
+  "$HOME/.claude/skills/scorebench/"
+test -f "$HOME/.claude/skills/scorebench/SKILL.md"
 ```
 
 Restart the agent CLI after installing or updating the skill. To update an
 existing checkout:
 
 ```bash
-git pull
-rsync -a skills/scorebench/ ~/.codex/skills/scorebench/
+git -C "$HOME/scorebench-skill" pull --ff-only
+rsync -a --delete \
+  "$HOME/scorebench-skill/skills/scorebench/" \
+  "${CODEX_HOME:-$HOME/.codex}/skills/scorebench/"
 ```
 
 Or simply ask the agent:
 
 ```text
-Install the scorebench skill from josusanmartin/scorebench-skill, path skills/scorebench.
+Install the scorebench skill from
+https://github.com/josusanmartin/scorebench-skill using path
+skills/scorebench. Confirm that SKILL.md is installed, then restart or reload
+before using the ScoreBench run token. Installing the CLI is not enough.
 ```
 
 ## Worker quick start
