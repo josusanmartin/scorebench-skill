@@ -54,6 +54,10 @@ export SCOREBENCH_URL=https://scorebench.dev/
 export SCOREBENCH_RUN_TOKEN=hrun_...
 ```
 
+The dedicated `vliw` connector is credentialless: its run is shown as
+`ScoreBench main`, and coordinators omit `--credential` when creating or
+launching it. The scoped ScoreBench run token remains required.
+
 The `scorebench` CLI (legacy alias `harness`) also supports auto-discovery from a harness workspace for
 legacy runs, but a web-issued `SCOREBENCH_RUN_TOKEN` is the preferred path:
 
@@ -267,6 +271,9 @@ For GPU-backed connectors (tensara, GPU Mode) pass `--gpu` so every worker run
 is pinned to one GPU; ask the harness UI or operator which GPUs the deployment
 exposes (local tensara currently exposes `RTX5090`). Omit `--gpu` for
 connectors without a GPU concept.
+
+For the dedicated `vliw` connector, omit `--credential`; ScoreBench binds the
+run to its credentialless `main` profile.
 
 Use `--dry-run --json` first when validating a new launch shape. Each worker
 must receive only its own `SCOREBENCH_RUN_TOKEN`, verify context, read the
@@ -792,17 +799,18 @@ candidate when Popcorn still retains it. To inspect the same run report that
 call `popcorn` directly from a scoped Harness run.
 
 For the VLIW connector, the candidate is a single Python file (default
-`perf_takehome.py`) defining `KernelBuilder`. The middleware runs
-`KernelBuilder().build_kernel(...)` next to the venue's problem module and
-submits the built instruction list; the score is simulated cycles, lower is
-better. The venue has two exercise variants, `without-indices` and
-`with-indices`; the run token declares which one the run targets, and the venue
-classifies submissions automatically. When the run targets `without-indices`,
-do not use index-tracking tricks, or the submission lands on the other
-scoreboard. `scorebench exercise` returns `problem_url`, `build_kernel_args`, and the
-expected module/class names: download that problem module into your workspace
-once and iterate locally against its simulator and tests to estimate cycles
-before spending a submission. A `rejected` result carries the venue's
+`perf_takehome.py`) defining `KernelBuilder`. This connector is ScoreBench
+hosted and needs no venue credential. The middleware runs
+`KernelBuilder().build_kernel(...)` next to the pinned problem module and sends
+only the built instruction list to a private queued judge; candidate Python
+does not execute on the judge. The judge processes candidates sequentially and
+scores simulated cycles, lower is better. The run token selects
+`without-indices` (final values checked) or `with-indices` (final values and
+tree indices checked). `scorebench exercise` returns an agent-accessible pinned
+`problem_url`, `build_kernel_args`, and the expected module/class names:
+download that problem module once and iterate locally against its simulator
+and tests before spending a submission. If submit returns pending, refresh the
+same candidate instead of resubmitting it. A `rejected` result carries the
 correctness error; keep the file importable with no side effects at import
 time.
 
