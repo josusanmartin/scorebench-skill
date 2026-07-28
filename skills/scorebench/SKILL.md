@@ -1,6 +1,6 @@
 ---
 name: scorebench
-description: "Use when solving an exercise through a Scorebench (Harness) middleware server such as https://scorebench.dev/, including Paradigm Puzzles runs, or when coordinating multiple parallel Harness-scoped agent runs. The harness owns connector credentials and submissions; agents use scorebench context, exercise, run start/current/ping, submit, refresh, solution, leaderboard, solutions, solve-form, best, and history without reading run_state.json or connector secrets. Coordinators use scorebench admin login/create-run-token/launch to create scoped run keys and tmux workers."
+description: "Use when solving an exercise through a Scorebench (Harness) middleware server such as https://scorebench.dev/, including Paradigm Puzzles runs, or when coordinating multiple parallel Harness-scoped agent runs. The harness owns connector credentials and submissions; agents use scorebench context, exercise, run start/current/ping, submit, refresh, invalidate/reinstate, solution, leaderboard, solutions, solve-form, best, and history without reading run_state.json or connector secrets. Coordinators use scorebench admin login/create-run-token/launch to create scoped run keys and tmux workers."
 ---
 
 # Scorebench Agent
@@ -240,16 +240,20 @@ are creating a `/goal` prompt or a `scorebench admin launch --goal` value, appen
 this boundary unless the user has already included an equivalent one:
 
 ```text
-Do not use exploits. Submit only legitimate, general solutions. Do not hardcode
-benchmark cases, memoize or cache outputs for repeated venue inputs, key off
-pointer identity, reuse stale outputs, detect hidden tests, skip required work,
-or bypass the intended problem semantics. If any submitted candidate is later
-found exploity or invalid, immediately run `scorebench invalidate <candidate_id>
---reason "..."`
+Do not use exploits. Solve the full input domain documented by the exercise and
+pinned generator. Specialization to explicitly guaranteed domain properties is
+allowed unless this run's prompt adds a stricter requirement. Do not hardcode
+exact benchmark instances, memoize or cache outputs for repeated venue inputs,
+key off pointer identity, reuse stale outputs, detect hidden tests, skip required
+work, or bypass the intended problem semantics. If any submitted candidate is
+later found exploity or invalid, immediately run `scorebench invalidate
+<candidate_id> --reason "..."`
 ```
 
-Do not launch a worker goal that lacks this boundary. The benchmark contract
-and problem semantics take precedence over any score improvement.
+Do not launch a worker goal that lacks this boundary. The published exercise,
+pinned generator, and original run prompt together define the contract. A
+documented fixed property is not an exploit; an extra condition in the run
+prompt remains binding even when the base exercise is less strict.
 
 ```bash
 scorebench admin launch \
@@ -637,11 +641,12 @@ cache directories, or unrelated scratch files.
    stop before submitting.
 
 8. Before submitting, check the candidate against the no-exploit contract from
-   the goal. Do not submit or promote hardcoded, cached-output,
-   benchmark-detection, pointer-identity, stale-state, skipped-work, or
-   semantics-bypass shortcuts even if they score well. If a speedup depends on
-   repeated immutable venue inputs rather than a general solution, treat it as
-   an exploit and do not submit it.
+   the goal. Solve every input allowed by the documented exercise domain and any
+   stricter condition in the original run prompt. Specialization to an explicit
+   pinned-generator guarantee is valid; hardcoding exact generated instances or
+   caching their outputs is not. Do not submit or promote benchmark-detection,
+   pointer-identity, stale-state, skipped-work, or semantics-bypass shortcuts
+   even if they score well.
 
 9. Submit through the harness only, and include `--total-tokens` in the same
    call. The CLI automatically includes the token-bound run id from
@@ -776,6 +781,22 @@ response, usage metadata, and audit trail, but removes the candidate from
 candidate remains visible in `scorebench history` with status `invalidated`.
 Scoped tokens can only invalidate candidates in their own run scope.
 
+When `scorebench history` contains an invalidated candidate, inspect its
+`audit.invalidation.reason`, actor, timestamp, and metadata before changing or
+resubmitting descendants. Do not assume an invalidated status is a venue error.
+If a contract review proves the invalidation itself was wrong, preserve both
+decisions with an audited reinstatement:
+
+```bash
+scorebench reinstate <candidate_id> \
+  --reason "contract correction: the documented input domain permits this specialization" \
+  --meta class=contract_correction
+```
+
+Use reinstatement only with concrete contract evidence. It restores the
+captured prior status and appends a linked event; it does not erase the original
+invalidation.
+
 If the connector exposes source retrieval through the harness, use
 `scorebench solution <solution_id>` rather than calling the connector directly.
 For website-visible connector context that is not one of your run's own
@@ -806,13 +827,17 @@ only the built instruction list to a private queued judge; candidate Python
 does not execute on the judge. The judge processes candidates sequentially and
 scores simulated cycles, lower is better. The run token selects
 `without-indices` (final values checked) or `with-indices` (final values and
-tree indices checked). `scorebench exercise` returns an agent-accessible pinned
-`problem_url`, `build_kernel_args`, and the expected module/class names:
-download that problem module once and iterate locally against its simulator
-and tests before spending a submission. If submit returns pending, refresh the
-same candidate instead of resubmitting it. A `rejected` result carries the
-correctness error; keep the file importable with no side effects at import
-time.
+tree indices checked). The pinned `Input.generate` contract initializes every
+lane's tree index to zero, so specializing to that zero-start domain is valid.
+Arbitrary nonzero initial indices are outside the base exercise unless the
+original run prompt explicitly requires index-agnostic behavior; if it does,
+that stricter run condition is binding. This does not permit caching outputs for
+exact generated inputs. `scorebench exercise` returns an agent-accessible
+pinned `problem_url`, `build_kernel_args`, and the expected module/class names:
+download that problem module once and iterate locally against its simulator and
+tests before spending a submission. If submit returns pending, refresh the same
+candidate instead of resubmitting it. A `rejected` result carries the
+correctness error; keep the file importable with no side effects at import time.
 
 For the `paradigm_puzzles` connector, read
 `references/paradigm-puzzles.md` before creating or submitting a candidate. The
@@ -871,9 +896,15 @@ GitHub pull request.
   cache exact venue inputs, key off pointer identity, reuse stale outputs,
   detect hidden tests, skip required work, or bypass the intended problem
   semantics.
+- Treat the published exercise, pinned generator, and original run prompt as the
+  contract. Explicit generator guarantees may be specialized to; stricter run
+  conditions must still be honored.
 - Use `scorebench invalidate` with a concrete reason when your own candidate
   should no longer count because of an exploit, correctness bug, invalid
   assumption, or user/operator review.
+- Read invalidation audit details in `scorebench history`. Use `scorebench
+  reinstate` only when concrete contract evidence reverses the decision, and
+  record that evidence in the reason.
 - When a harness command fails, preserve the exact error message and
   `trace_id` if present. Fix the harness-facing issue instead of bypassing the
   harness with an external connector CLI/API.
