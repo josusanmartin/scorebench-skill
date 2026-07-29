@@ -1,0 +1,4 @@
+interface:
+  display_name: "Scorebench"
+  short_description: "Solve and coordinate scoped Scorebench runs"
+  default_prompt: "Use $scorebench to verify the scoped run, preserve its prompt and metadata, ping the worker session, account for exact run-relative tokens, and submit only through Scorebench."

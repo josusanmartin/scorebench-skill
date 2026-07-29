@@ -132,14 +132,14 @@ def read_total(args: argparse.Namespace) -> int:
     return args.total_tokens
 
 
-def tokens_source_from_args(args: argparse.Namespace) -> str:
+def tokens_source_from_args(args: argparse.Namespace) -> str | None:
     if args.source:
         return args.source
     if args.codex_jsonl:
         return "codex_exec_jsonl"
     if args.claude_jsonl:
         return "claude_code_jsonl"
-    return "codex_goal"
+    return None
 
 
 def usage_source_for(tokens_source: str) -> str:
@@ -156,10 +156,13 @@ def usage_source_for(tokens_source: str) -> str:
 
 def cmd_start(args: argparse.Namespace) -> int:
     total = read_total(args)
-    tokens_source = tokens_source_from_args(args)
+    tokens_source = tokens_source_from_args(args) or "codex_goal"
+    confidence = args.confidence or (
+        "parsed" if args.codex_jsonl or args.claude_jsonl else "exact"
+    )
     state = {
         "baseline_total_tokens": total,
-        "confidence": args.confidence,
+        "confidence": confidence,
         "tokens_total_source": tokens_source,
         "usage_source": usage_source_for(tokens_source),
     }
@@ -183,18 +186,43 @@ def current_run_total(args: argparse.Namespace) -> tuple[dict[str, Any], int, in
     return state, absolute_total, run_total
 
 
+def current_provenance(
+    args: argparse.Namespace, state: dict[str, Any]
+) -> tuple[str, str, str]:
+    stored_source = str(state.get("tokens_total_source") or "codex_goal")
+    requested_source = tokens_source_from_args(args)
+    if requested_source and requested_source != stored_source:
+        raise SystemExit(
+            "token usage source changed after the run baseline; do not submit. "
+            f"Expected {stored_source}, received {requested_source}."
+        )
+
+    stored_confidence = str(state.get("confidence") or "exact")
+    if args.confidence and args.confidence != stored_confidence:
+        raise SystemExit(
+            "token usage confidence changed after the run baseline; do not submit. "
+            f"Expected {stored_confidence}, received {args.confidence}."
+        )
+
+    source = requested_source or stored_source
+    usage_source = usage_source_for(source) or str(
+        state.get("usage_source") or "codex_usage"
+    )
+    return source, usage_source, args.confidence or stored_confidence
+
+
 def cmd_status(args: argparse.Namespace) -> int:
     state, absolute_total, run_total = current_run_total(args)
+    tokens_source, usage_source, confidence = current_provenance(args, state)
     print(
         json.dumps(
             {
                 "absolute_total_tokens": absolute_total,
                 "baseline_total_tokens": state["baseline_total_tokens"],
                 "run_total_tokens": run_total,
-                "tokens_total_source": tokens_source_from_args(args) or state.get("tokens_total_source"),
-                "usage_source": usage_source_for(tokens_source_from_args(args))
-                or state.get("usage_source"),
-                "confidence": args.confidence or state.get("confidence"),
+                "tokens_total_source": tokens_source,
+                "usage_source": usage_source,
+                "confidence": confidence,
             },
             indent=2,
             sort_keys=True,
@@ -205,9 +233,7 @@ def cmd_status(args: argparse.Namespace) -> int:
 
 def cmd_flags(args: argparse.Namespace) -> int:
     state, _absolute_total, run_total = current_run_total(args)
-    tokens_source = tokens_source_from_args(args) or str(state.get("tokens_total_source") or "codex_goal")
-    usage_source = usage_source_for(tokens_source) or str(state.get("usage_source") or "codex_usage")
-    confidence = args.confidence or str(state.get("confidence") or "exact")
+    tokens_source, usage_source, confidence = current_provenance(args, state)
     print(
         " ".join(
             [
@@ -227,7 +253,7 @@ def add_total_args(parser: argparse.ArgumentParser) -> None:
     parser.add_argument("--codex-jsonl", help="Codex exec --json event log to parse")
     parser.add_argument("--claude-jsonl", help="current Claude Code session JSONL transcript to parse")
     parser.add_argument("--source", help="usage source, for example codex_goal, codex_exec_jsonl, claude_code_jsonl, provider_usage")
-    parser.add_argument("--confidence", default="exact", choices=["exact", "parsed", "estimated"])
+    parser.add_argument("--confidence", choices=["exact", "parsed", "estimated"])
 
 
 def main() -> int:

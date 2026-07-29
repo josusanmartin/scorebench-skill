@@ -4,6 +4,8 @@ import tempfile
 import unittest
 from pathlib import Path
 from unittest import mock
+from urllib.error import HTTPError
+from urllib.parse import parse_qs, urlsplit
 
 
 SCRIPT = (
@@ -66,6 +68,19 @@ class ConfigTests(unittest.TestCase):
 
 
 class ReportTests(unittest.TestCase):
+    class Response:
+        def __init__(self, body):
+            self.body = body.encode("utf-8")
+
+        def __enter__(self):
+            return self
+
+        def __exit__(self, *_args):
+            return None
+
+        def read(self):
+            return self.body
+
     def test_parses_embedded_report_data(self):
         payload = {"arms": [{"points": [{"run_id": "run-one"}]}]}
         html = (
@@ -74,6 +89,87 @@ class ReportTests(unittest.TestCase):
             + "</script></html>"
         )
         self.assertEqual(WATCH.parse_report_html(html), payload)
+
+    @mock.patch.object(WATCH.urllib.request, "urlopen")
+    def test_fetch_prefers_filtered_json_and_preserves_query(self, urlopen):
+        payload = {"arms": [{"run_id": "run-one", "points": []}]}
+        urlopen.return_value = self.Response(json.dumps(payload))
+
+        result = WATCH.fetch_report(
+            "https://scorebench.dev/ui/reports/strategy-compare-vliw.html"
+            "?profiles=main&hours=4#saved-view",
+            run_ids=("run-one", "run-two"),
+        )
+
+        self.assertEqual(result, payload)
+        self.assertEqual(urlopen.call_count, 1)
+        request_url = urlopen.call_args.args[0].full_url
+        parsed = urlsplit(request_url)
+        self.assertEqual(parsed.path, "/ui/reports/strategy-compare-vliw.json")
+        self.assertEqual(parsed.fragment, "saved-view")
+        self.assertEqual(
+            parse_qs(parsed.query),
+            {
+                "profiles": ["main"],
+                "hours": ["4"],
+                "runs": ["run-one", "run-two"],
+                "_filter": ["1"],
+            },
+        )
+
+    @mock.patch.object(WATCH.urllib.request, "urlopen")
+    def test_fetch_accepts_json_url_with_query(self, urlopen):
+        payload = {"arms": []}
+        urlopen.return_value = self.Response(json.dumps(payload))
+
+        result = WATCH.fetch_report(
+            "https://scorebench.dev/ui/reports/strategy-compare.json?models=opus"
+        )
+
+        self.assertEqual(result, payload)
+        request_url = urlopen.call_args.args[0].full_url
+        self.assertEqual(
+            parse_qs(urlsplit(request_url).query),
+            {"models": ["opus"], "_filter": ["1"]},
+        )
+
+    @mock.patch.object(WATCH.urllib.request, "urlopen")
+    def test_fetch_falls_back_to_legacy_embedded_payload(self, urlopen):
+        payload = {"arms": [{"points": [{"run_id": "run-one"}]}]}
+        html = (
+            '<html><script id="report-data" type="application/json">'
+            + json.dumps(payload)
+            + "</script></html>"
+        )
+        urlopen.side_effect = [
+            HTTPError("https://scorebench.dev/report.json", 404, "missing", {}, None),
+            self.Response(html),
+        ]
+
+        self.assertEqual(
+            WATCH.fetch_report("https://scorebench.dev/report.html"), payload
+        )
+        self.assertEqual(urlopen.call_count, 2)
+
+    @mock.patch.object(WATCH.urllib.request, "urlopen")
+    def test_fetch_reports_both_json_and_html_failures(self, urlopen):
+        urlopen.side_effect = [
+            self.Response("not json"),
+            self.Response("<html>no embedded payload</html>"),
+        ]
+
+        with self.assertRaisesRegex(
+            ValueError, "report JSON fetch failed.*HTML fallback failed"
+        ):
+            WATCH.fetch_report("https://scorebench.dev/report.html")
+
+    @mock.patch.object(WATCH.urllib.request, "urlopen")
+    def test_direct_json_rejects_invalid_payload_without_html_fallback(self, urlopen):
+        urlopen.return_value = self.Response('{"status": "generating"}')
+
+        with self.assertRaisesRegex(ValueError, "does not contain an arms array"):
+            WATCH.fetch_report("https://scorebench.dev/report.json")
+        self.assertEqual(urlopen.call_count, 1)
 
     def test_selects_latest_active_point_and_ignores_elapsed(self):
         data = {
@@ -188,9 +284,14 @@ class SupervisorTests(unittest.TestCase):
             ]
         }
         supervisor = FakeSupervisor(self.config())
-        with mock.patch.object(WATCH, "fetch_report", return_value=report):
+        with mock.patch.object(
+            WATCH, "fetch_report", return_value=report
+        ) as fetch_report:
             supervisor.active_once()
 
+        fetch_report.assert_called_once_with(
+            "https://scorebench.dev/report.html", run_ids=("run-one",)
+        )
         self.assertEqual(
             supervisor.removed,
             [
