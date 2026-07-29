@@ -1,6 +1,6 @@
 ---
 name: scorebench
-description: "Use when solving an exercise through a Scorebench (Harness) middleware server such as https://scorebench.dev/, including Paradigm Puzzles runs, or when coordinating parallel Harness-scoped agent runs. Scorebench owns connector credentials and submissions; workers use scorebench context, exercise, run start/current/ping/usage, submit, refresh, invalidate/reinstate, solution, leaderboard, solutions, solve-form, best, and history without reading connector secrets. Coordinators use scorebench admin login/create-run-token/launch to create scoped run keys and workers."
+description: "Use when solving an exercise through a Scorebench (Harness) middleware server such as https://scorebench.dev/, including Paradigm Puzzles runs, or when coordinating parallel Harness-scoped agent runs. Scorebench owns connector credentials and submissions; workers use scorebench context, exercise, run start/current/progress/ping/usage, submit, refresh, invalidate/reinstate, solution, leaderboard, solutions, solve-form, best, and history without reading connector secrets. Coordinators use scorebench admin login/create-run-token/launch to create scoped run keys and workers."
 ---
 
 # Scorebench Agent
@@ -222,6 +222,7 @@ Confirm:
 
 ```bash
 scorebench run current
+scorebench run progress
 ```
 
 ### 3. Create A Trusted Session Timestamp
@@ -245,6 +246,13 @@ another run ID, or is skipped, do not optimize or submit until fixed.
 Scorebench derives elapsed and active time from server timestamps, pings, and
 submissions. Without a trusted start/resume ping, reports may use the first
 submission as time zero and undercount the run.
+
+`scorebench run progress` is the authoritative run-scoped accounting read for
+active time, elapsed time, tokens, sources, and measurement timestamps. It
+reports timing at the latest submitted candidate and does not create an
+activity heartbeat when polled. Use it for supervisors and progress checks;
+never parse dashboard HTML or use `scorebench best` as latest-run timing,
+because the best candidate can be older than the latest submission.
 
 ### 4. Baseline Exact Tokens
 

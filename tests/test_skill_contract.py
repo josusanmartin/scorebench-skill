@@ -90,6 +90,20 @@ class SkillContractTests(unittest.TestCase):
         self.assertEqual(text.count("token=\"$(field '.token.token')\""), 2)
         self.assertNotIn("--add-dir '$SKILL_DIR'", text)
 
+    def test_watcher_uses_scoped_progress_and_never_deletes_completion_evidence(self):
+        script = (SKILL_DIR / "scripts" / "scorebench_watch.py").read_text(
+            encoding="utf-8"
+        )
+        reference = (SKILL_DIR / "references" / "tmux-watchers.md").read_text(
+            encoding="utf-8"
+        )
+        self.assertIn('"scorebench",\n            "run",\n            "progress"', script)
+        self.assertNotIn("fetch_report", script)
+        self.assertNotIn("remove_markers", script)
+        self.assertNotIn('"rm"', script)
+        self.assertNotIn('"/best"', script)
+        self.assertIn("the watcher never\ndeletes either file", reference)
+
 
 if __name__ == "__main__":
     unittest.main()

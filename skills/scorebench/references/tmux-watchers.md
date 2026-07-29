@@ -13,15 +13,19 @@ other.
 
 ## Timing Rule
 
-Use ScoreBench point `wall_seconds` as the active-time clock. Never stop a
-worker based on report `run_elapsed_seconds`, tmux window age, container age, or
-ordinary wall-clock elapsed time. `wall_seconds` is updated by ScoreBench run
-activity and submissions; the monitor therefore reports the latest submitted
-active time and may lag work that has not yet been submitted.
+Use `scorebench run progress` field `progress.active_seconds` as the
+active-time clock. Never stop a worker based on
+`progress.elapsed_seconds`, tmux window age, container age, ordinary wall-clock
+elapsed time, dashboard HTML, or `scorebench best`. The progress API uses the
+same canonical idle-gap heuristic as reports and measures active time at the
+latest submitted candidate, so it may lag work that has not yet been
+submitted.
 
 The active watcher creates an in-container marker after the target is reached.
-While below target, its default completion gate removes both that marker and a
-premature `GOAL_COMPLETE`. Put the marker contract in every worker goal:
+Both that marker and `GOAL_COMPLETE` are monotonic evidence: the watcher never
+deletes either file. If it observes a premature `GOAL_COMPLETE`, it logs
+`premature_complete=1 action=preserved` for operator review and does not mutate
+the worker. Put the marker contract in every worker goal:
 
 ```text
 Continue until /work/SCOREBENCH_ACTIVE_TARGET_REACHED exists. Do not create
@@ -39,7 +43,6 @@ this file.
 ```json
 {
   "tmux_session": "ant",
-  "report_url": "https://scorebench.dev/ui/reports/strategy-compare-vliw-without-indices.html",
   "docker_command": ["sudo", "-n", "docker"],
   "recovery_poll_seconds": 30,
   "active_poll_seconds": 120,
@@ -48,7 +51,6 @@ this file.
   "resume_cooldown_seconds": 300,
   "completion_marker": "/work/GOAL_COMPLETE",
   "active_marker": "/work/SCOREBENCH_ACTIVE_TARGET_REACHED",
-  "enforce_active_gate": true,
   "workers": [
     {
       "run_id": "vliw-clean-codex-max-20260713-001",
@@ -67,6 +69,22 @@ Each worker needs a unique exact ScoreBench `run_id`, tmux `window`, Docker
 `container`, and `restart_command`. Supported client values are `claude`,
 `codex`, `gemini`, `grok`, and `other`. The client only controls small TUI input
 differences; it does not grant cross-run access.
+
+Every container must have a current `scorebench` CLI and its own scoped run
+token. Verify this before launching the watcher:
+
+```bash
+docker exec sb-vliw-sol56-max-001 scorebench run progress
+```
+
+The returned `scope.run_id` and `progress.run_id` must both exactly match the
+configured worker `run_id`. Refresh an old CLI with the skill bootstrap helper
+and `SCOREBENCH_CLI_FORCE=1` before starting the watcher. The coordinator never
+reads or stores worker run tokens; the command executes inside each container.
+
+Legacy configs may still contain `report_url` and `enforce_active_gate`. They
+remain accepted for compatibility but are not used. In particular,
+`enforce_active_gate` never authorizes marker deletion.
 
 The marker path is configurable. For an existing four-hour goal that already
 uses `/work/SCOREBENCH_4H_REACHED`, set `active_marker` to that exact path in
@@ -123,24 +141,27 @@ workspace.
 
 ## Active-Time Behavior
 
-The `active` mode derives the sibling `.json` endpoint from the configured
-report URL, preserves dashboard filters, adds the exact configured run IDs, and
-requests server-side filtering. This keeps large reports from downloading
-unrelated runs. Legacy deployments that still inline `report-data` in HTML are
-supported as a fallback.
+For each worker, `active` mode runs `scorebench run progress` inside that exact
+container. ScoreBench authenticates with the container's own run token and
+returns active time, elapsed time, working tokens, their sources, and
+measurement timestamps. The watcher rejects a response whose scope or run ID
+does not exactly match the configured worker.
 
-For each exact `run_id`, the watcher selects the point with the greatest
-`wall_seconds` and logs that active value plus `tokens_total`.
+The watcher retains per-run high-water values for active time, elapsed time,
+and tokens. A transient regression is logged and cannot reverse a target
+decision. An existing `active_marker` remains authoritative across watcher
+restarts.
 
-Below the target it removes premature completion markers when
-`enforce_active_gate` is true. If the matching TUI appears idle, it sends a
-throttled prompt containing only that worker's run ID, active time, token total,
-and target. It does not include sibling metrics, code, or solution details.
+Below the target, an idle worker without either marker receives a throttled
+prompt containing only its own run ID, active time, token total, and target. A
+premature `GOAL_COMPLETE` is preserved and reported rather than deleted. The
+watcher does not include sibling metrics, code, or solution details.
 
 At or above the target it creates `active_marker`. The worker remains
 responsible for finishing its current safe operation, recording final exact run
 usage with `scorebench run usage`, and exiting cleanly. A report fetch or parse
-failure changes no worker state.
+is not part of this workflow. A progress-command failure changes no worker
+state and does not block sibling checks.
 
 ## Verification
 
@@ -153,4 +174,7 @@ python3 "$WATCHER" active --config "$CONFIG" --once
 
 Then inspect both watcher panes and the exact worker panes. Confirm that active
 logs contain `active=...s tokens=...`, no message references an unassigned run,
-and no stop decision uses elapsed time.
+no stop decision uses elapsed time, and each container's
+`scorebench run progress` reports its exact configured run ID. Treat any
+`premature_complete=1` or progress regression log as an operator-review event;
+the watcher deliberately preserves the evidence.

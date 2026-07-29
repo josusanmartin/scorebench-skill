@@ -118,6 +118,7 @@ Then ping, establish exact token accounting, and submit:
 
 ```bash
 scorebench run ping --event start  # mandatory before the first submission
+scorebench run progress            # canonical submitted timing and token progress
 SCOREBENCH_TOKEN_HELPER="${CODEX_HOME:-$HOME/.codex}/skills/scorebench/scripts/token_usage.py"
 python3 "$SCOREBENCH_TOKEN_HELPER" start \
   --total-tokens <exact-session-total-at-run-start> \
@@ -210,6 +211,7 @@ worker actually connected and submitted:
 ```bash
 scorebench context
 scorebench run current
+scorebench run progress
 scorebench history
 scorebench best
 scorebench refresh
@@ -220,6 +222,11 @@ Inspect each pane and confirm the worker ran `scorebench run ping --event start`
 has terminal scored or failed submissions. The full follow-up checklist is in
 `skills/scorebench/SKILL.md`; long-running tmux `/goal` sessions are covered in
 `skills/scorebench/references/tmux-goal-sessions.md`.
+
+Long-running supervisors must use each container's scoped `scorebench run
+progress` response. They must not parse dashboard HTML, use `scorebench best`
+as latest timing, or delete completion markers. The durable watcher contract is
+in `skills/scorebench/references/tmux-watchers.md`.
 
 ## Token accounting
 

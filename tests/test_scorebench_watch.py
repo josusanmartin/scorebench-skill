@@ -4,8 +4,6 @@ import tempfile
 import unittest
 from pathlib import Path
 from unittest import mock
-from urllib.error import HTTPError
-from urllib.parse import parse_qs, urlsplit
 
 
 SCRIPT = (
@@ -24,7 +22,6 @@ SPEC.loader.exec_module(WATCH)
 def valid_config():
     return {
         "tmux_session": "ant",
-        "report_url": "https://scorebench.dev/report.html",
         "workers": [
             {
                 "run_id": "run-one",
@@ -35,6 +32,10 @@ def valid_config():
             }
         ],
     }
+
+
+def subprocess_result(returncode=0, stdout="", stderr=""):
+    return mock.Mock(returncode=returncode, stdout=stdout, stderr=stderr)
 
 
 class ConfigTests(unittest.TestCase):
@@ -49,7 +50,14 @@ class ConfigTests(unittest.TestCase):
         self.assertEqual(config.target_active_seconds, 14400)
         self.assertEqual(config.docker_command, ("docker",))
         self.assertTrue(config.enforce_active_gate)
+        self.assertIsNone(config.report_url)
         self.assertEqual(config.workers[0].run_id, "run-one")
+
+    def test_accepts_legacy_report_url_without_using_it(self):
+        data = valid_config()
+        data["report_url"] = "https://scorebench.dev/report.html"
+        config = self.load(data)
+        self.assertEqual(config.report_url, data["report_url"])
 
     def test_rejects_duplicate_worker_identity(self):
         data = valid_config()
@@ -67,148 +75,78 @@ class ConfigTests(unittest.TestCase):
             self.load(data)
 
 
-class ReportTests(unittest.TestCase):
-    class Response:
-        def __init__(self, body):
-            self.body = body.encode("utf-8")
-
-        def __enter__(self):
-            return self
-
-        def __exit__(self, *_args):
-            return None
-
-        def read(self):
-            return self.body
-
-    def test_parses_embedded_report_data(self):
-        payload = {"arms": [{"points": [{"run_id": "run-one"}]}]}
-        html = (
-            '<html><script id="report-data" type="application/json">'
-            + json.dumps(payload)
-            + "</script></html>"
-        )
-        self.assertEqual(WATCH.parse_report_html(html), payload)
-
-    @mock.patch.object(WATCH.urllib.request, "urlopen")
-    def test_fetch_prefers_filtered_json_and_preserves_query(self, urlopen):
-        payload = {"arms": [{"run_id": "run-one", "points": []}]}
-        urlopen.return_value = self.Response(json.dumps(payload))
-
-        result = WATCH.fetch_report(
-            "https://scorebench.dev/ui/reports/strategy-compare-vliw.html"
-            "?profiles=main&hours=4#saved-view",
-            run_ids=("run-one", "run-two"),
-        )
-
-        self.assertEqual(result, payload)
-        self.assertEqual(urlopen.call_count, 1)
-        request_url = urlopen.call_args.args[0].full_url
-        parsed = urlsplit(request_url)
-        self.assertEqual(parsed.path, "/ui/reports/strategy-compare-vliw.json")
-        self.assertEqual(parsed.fragment, "saved-view")
-        self.assertEqual(
-            parse_qs(parsed.query),
-            {
-                "profiles": ["main"],
-                "hours": ["4"],
-                "runs": ["run-one", "run-two"],
-                "_filter": ["1"],
-            },
-        )
-
-    @mock.patch.object(WATCH.urllib.request, "urlopen")
-    def test_fetch_accepts_json_url_with_query(self, urlopen):
-        payload = {"arms": []}
-        urlopen.return_value = self.Response(json.dumps(payload))
-
-        result = WATCH.fetch_report(
-            "https://scorebench.dev/ui/reports/strategy-compare.json?models=opus"
-        )
-
-        self.assertEqual(result, payload)
-        request_url = urlopen.call_args.args[0].full_url
-        self.assertEqual(
-            parse_qs(urlsplit(request_url).query),
-            {"models": ["opus"], "_filter": ["1"]},
-        )
-
-    @mock.patch.object(WATCH.urllib.request, "urlopen")
-    def test_fetch_falls_back_to_legacy_embedded_payload(self, urlopen):
-        payload = {"arms": [{"points": [{"run_id": "run-one"}]}]}
-        html = (
-            '<html><script id="report-data" type="application/json">'
-            + json.dumps(payload)
-            + "</script></html>"
-        )
-        urlopen.side_effect = [
-            HTTPError("https://scorebench.dev/report.json", 404, "missing", {}, None),
-            self.Response(html),
-        ]
-
-        self.assertEqual(
-            WATCH.fetch_report("https://scorebench.dev/report.html"), payload
-        )
-        self.assertEqual(urlopen.call_count, 2)
-
-    @mock.patch.object(WATCH.urllib.request, "urlopen")
-    def test_fetch_reports_both_json_and_html_failures(self, urlopen):
-        urlopen.side_effect = [
-            self.Response("not json"),
-            self.Response("<html>no embedded payload</html>"),
-        ]
-
-        with self.assertRaisesRegex(
-            ValueError, "report JSON fetch failed.*HTML fallback failed"
-        ):
-            WATCH.fetch_report("https://scorebench.dev/report.html")
-
-    @mock.patch.object(WATCH.urllib.request, "urlopen")
-    def test_direct_json_rejects_invalid_payload_without_html_fallback(self, urlopen):
-        urlopen.return_value = self.Response('{"status": "generating"}')
-
-        with self.assertRaisesRegex(ValueError, "does not contain an arms array"):
-            WATCH.fetch_report("https://scorebench.dev/report.json")
-        self.assertEqual(urlopen.call_count, 1)
-
-    def test_selects_latest_active_point_and_ignores_elapsed(self):
-        data = {
-            "arms": [
-                {
-                    "points": [
-                        {
-                            "run_id": "run-one",
-                            "wall_seconds": 120,
-                            "run_elapsed_seconds": 999999,
-                            "tokens_total": 1000,
-                        },
-                        {
-                            "run_id": "run-one",
-                            "wall_seconds": 480,
-                            "run_elapsed_seconds": 500,
-                            "tokens_total": 4200,
-                        },
-                    ]
-                }
-            ]
+class ProgressTests(unittest.TestCase):
+    @staticmethod
+    def payload(**updates):
+        progress = {
+            "schema_version": 1,
+            "run_id": "run-one",
+            "active_seconds": 480,
+            "elapsed_seconds": 500,
+            "tokens_total": 4200,
+            "active_seconds_source": "server_timestamps_with_run_pings",
+            "elapsed_seconds_source": "server_timestamps",
+            "tokens_total_source": "claude_code_jsonl",
+            "measured_at": "2026-07-29T10:00:00Z",
+            "tokens_measured_at": "2026-07-29T10:01:00Z",
+            "candidate_count": 2,
         }
-        self.assertEqual(WATCH.latest_run_metrics(data, "run-one"), (480, 4200))
-
-    def test_exact_run_id_only(self):
-        data = {
-            "arms": [
-                {
-                    "points": [
-                        {
-                            "run_id": "run-one-copy",
-                            "wall_seconds": 900,
-                            "tokens_total": 9000,
-                        }
-                    ]
-                }
-            ]
+        progress.update(updates)
+        return {
+            "scope": {"kind": "run_token", "run_id": "run-one"},
+            "progress": progress,
         }
-        self.assertEqual(WATCH.latest_run_metrics(data, "run-one"), (0, 0))
+
+    def test_parses_scoped_authoritative_progress(self):
+        progress = WATCH.parse_run_progress(
+            json.dumps(self.payload()), "run-one"
+        )
+        self.assertEqual(progress.run_id, "run-one")
+        self.assertEqual(progress.active_seconds, 480)
+        self.assertEqual(progress.elapsed_seconds, 500)
+        self.assertEqual(progress.tokens_total, 4200)
+        self.assertEqual(
+            progress.active_seconds_source, "server_timestamps_with_run_pings"
+        )
+        self.assertEqual(progress.measured_at, "2026-07-29T10:00:00Z")
+
+    def test_rejects_scope_mismatch(self):
+        payload = self.payload()
+        payload["scope"]["run_id"] = "run-two"
+        with self.assertRaisesRegex(ValueError, "progress scope mismatch"):
+            WATCH.parse_run_progress(json.dumps(payload), "run-one")
+
+    def test_rejects_active_time_above_elapsed_time(self):
+        with self.assertRaisesRegex(ValueError, "cannot exceed"):
+            WATCH.parse_run_progress(
+                json.dumps(self.payload(active_seconds=501)), "run-one"
+            )
+
+    def test_requires_measurement_timestamp_for_candidates(self):
+        with self.assertRaisesRegex(ValueError, "measured_at is required"):
+            WATCH.parse_run_progress(
+                json.dumps(self.payload(measured_at=None)), "run-one"
+            )
+
+    def test_accepts_empty_run_with_null_measurements(self):
+        progress = WATCH.parse_run_progress(
+            json.dumps(
+                self.payload(
+                    active_seconds=0,
+                    elapsed_seconds=0,
+                    tokens_total=None,
+                    active_seconds_source="no_submitted_candidates",
+                    elapsed_seconds_source="no_submitted_candidates",
+                    tokens_total_source=None,
+                    measured_at=None,
+                    tokens_measured_at=None,
+                    candidate_count=0,
+                )
+            ),
+            "run-one",
+        )
+        self.assertEqual(progress.tokens_total, 0)
+        self.assertIsNone(progress.measured_at)
 
 
 class PromptTests(unittest.TestCase):
@@ -234,13 +172,20 @@ class PromptTests(unittest.TestCase):
 
 
 class SupervisorTests(unittest.TestCase):
-    def config(self):
-        worker = WATCH.Worker(
-            "run-one", "worker-one", "container-one", "codex", ("start",)
-        )
+    def config(self, workers=None):
+        if workers is None:
+            workers = (
+                WATCH.Worker(
+                    "run-one",
+                    "worker-one",
+                    "container-one",
+                    "codex",
+                    ("start",),
+                ),
+            )
         return WATCH.Config(
             tmux_session="ant",
-            report_url="https://scorebench.dev/report.html",
+            report_url=None,
             docker_command=("docker",),
             recovery_poll_seconds=30,
             active_poll_seconds=120,
@@ -250,19 +195,88 @@ class SupervisorTests(unittest.TestCase):
             completion_marker="/work/GOAL_COMPLETE",
             active_marker="/work/SCOREBENCH_4H_REACHED",
             enforce_active_gate=True,
-            workers=(worker,),
+            workers=workers,
         )
 
-    def test_active_gate_removes_premature_completion_and_nudges_idle_worker(self):
+    @staticmethod
+    def progress(
+        run_id="run-one", active=600, elapsed=700, tokens=5000
+    ):
+        return WATCH.RunProgress(
+            run_id=run_id,
+            active_seconds=float(active),
+            elapsed_seconds=float(elapsed),
+            tokens_total=float(tokens),
+            active_seconds_source="server_timestamps_with_run_pings",
+            elapsed_seconds_source="server_timestamps",
+            tokens_total_source="claude_code_jsonl",
+            measured_at="2026-07-29T10:00:00Z",
+            tokens_measured_at="2026-07-29T10:01:00Z",
+            candidate_count=2,
+        )
+
+    def test_worker_progress_uses_scoped_cli_inside_exact_container(self):
         class FakeSupervisor(WATCH.Supervisor):
             def __init__(self, config):
                 super().__init__(config)
-                self.removed = []
+                self.commands = []
+
+            def docker(self, *args):
+                self.commands.append(args)
+                payload = ProgressTests.payload()
+                return subprocess_result(stdout=json.dumps(payload))
+
+        supervisor = FakeSupervisor(self.config())
+        progress = supervisor.worker_progress(supervisor.config.workers[0])
+        self.assertEqual(progress.run_id, "run-one")
+        self.assertEqual(
+            supervisor.commands,
+            [
+                (
+                    "exec",
+                    "container-one",
+                    "scorebench",
+                    "run",
+                    "progress",
+                )
+            ],
+        )
+
+    def test_premature_completion_is_preserved_and_not_nudged(self):
+        class FakeSupervisor(WATCH.Supervisor):
+            def worker_progress(self, worker):
+                return SupervisorTests.progress()
+
+            def marker_exists(self, worker, marker):
+                return marker == self.config.completion_marker
+
+            def set_marker(self, worker, marker):
+                raise AssertionError("below-target worker must not set target marker")
+
+            def capture_pane(self, worker, history=120):
+                raise AssertionError("completed worker must not be nudged")
+
+            def nudge(self, worker, active, tokens):
+                raise AssertionError("completed worker must not be nudged")
+
+        supervisor = FakeSupervisor(self.config())
+        with mock.patch.object(WATCH, "log") as watcher_log:
+            supervisor.active_once()
+        messages = "\n".join(call.args[0] for call in watcher_log.call_args_list)
+        self.assertIn("premature_complete=1", messages)
+        self.assertIn("action=preserved", messages)
+
+    def test_below_target_idle_worker_is_nudged_without_deleting_markers(self):
+        class FakeSupervisor(WATCH.Supervisor):
+            def __init__(self, config):
+                super().__init__(config)
                 self.nudged = []
 
-            def remove_markers(self, worker, *markers):
-                self.removed.append((worker.run_id, markers))
-                return True
+            def worker_progress(self, worker):
+                return SupervisorTests.progress()
+
+            def marker_exists(self, worker, marker):
+                return False
 
             def capture_pane(self, worker, history=120):
                 return "Ready for another prompt"
@@ -270,37 +284,8 @@ class SupervisorTests(unittest.TestCase):
             def nudge(self, worker, active, tokens):
                 self.nudged.append((worker.run_id, active, tokens))
 
-        report = {
-            "arms": [
-                {
-                    "points": [
-                        {
-                            "run_id": "run-one",
-                            "wall_seconds": 600,
-                            "tokens_total": 5000,
-                        }
-                    ]
-                }
-            ]
-        }
         supervisor = FakeSupervisor(self.config())
-        with mock.patch.object(
-            WATCH, "fetch_report", return_value=report
-        ) as fetch_report:
-            supervisor.active_once()
-
-        fetch_report.assert_called_once_with(
-            "https://scorebench.dev/report.html", run_ids=("run-one",)
-        )
-        self.assertEqual(
-            supervisor.removed,
-            [
-                (
-                    "run-one",
-                    ("/work/SCOREBENCH_4H_REACHED", "/work/GOAL_COMPLETE"),
-                )
-            ],
-        )
+        supervisor.active_once()
         self.assertEqual(supervisor.nudged, [("run-one", 600, 5000)])
 
     def test_active_target_sets_marker_without_nudging(self):
@@ -309,6 +294,14 @@ class SupervisorTests(unittest.TestCase):
                 super().__init__(config)
                 self.markers = []
 
+            def worker_progress(self, worker):
+                return SupervisorTests.progress(
+                    active=14400, elapsed=15000, tokens=9000
+                )
+
+            def marker_exists(self, worker, marker):
+                return False
+
             def set_marker(self, worker, marker):
                 self.markers.append((worker.run_id, marker))
                 return True
@@ -316,32 +309,79 @@ class SupervisorTests(unittest.TestCase):
             def nudge(self, worker, active, tokens):
                 raise AssertionError("target-reached worker must not be nudged")
 
-        report = {
-            "arms": [
-                {
-                    "points": [
-                        {
-                            "run_id": "run-one",
-                            "wall_seconds": 14400,
-                            "tokens_total": 9000,
-                        }
-                    ]
-                }
-            ]
-        }
         supervisor = FakeSupervisor(self.config())
-        with mock.patch.object(WATCH, "fetch_report", return_value=report):
-            supervisor.active_once()
+        supervisor.active_once()
 
         self.assertEqual(
             supervisor.markers,
             [("run-one", "/work/SCOREBENCH_4H_REACHED")],
         )
 
+    def test_existing_target_marker_survives_metric_regression(self):
+        class FakeSupervisor(WATCH.Supervisor):
+            def worker_progress(self, worker):
+                return SupervisorTests.progress(active=100, elapsed=200, tokens=50)
+
+            def marker_exists(self, worker, marker):
+                return marker == self.config.active_marker
+
+            def nudge(self, worker, active, tokens):
+                raise AssertionError("marked worker must not be nudged")
+
+        supervisor = FakeSupervisor(self.config())
+        supervisor.high_water_active["run-one"] = 14400
+        supervisor.high_water_elapsed["run-one"] = 15000
+        supervisor.high_water_tokens["run-one"] = 9000
+        supervisor.active_once()
+        self.assertEqual(supervisor.high_water_active["run-one"], 14400)
+        self.assertEqual(supervisor.high_water_tokens["run-one"], 9000)
+
+    def test_progress_failure_for_one_worker_does_not_block_siblings(self):
+        workers = (
+            WATCH.Worker(
+                "run-one", "worker-one", "container-one", "codex", ("start",)
+            ),
+            WATCH.Worker(
+                "run-two", "worker-two", "container-two", "claude", ("start",)
+            ),
+        )
+
+        class FakeSupervisor(WATCH.Supervisor):
+            def __init__(self, config):
+                super().__init__(config)
+                self.markers = []
+
+            def worker_progress(self, worker):
+                if worker.run_id == "run-one":
+                    raise RuntimeError("endpoint unavailable")
+                return SupervisorTests.progress(
+                    run_id="run-two", active=14400, elapsed=14500
+                )
+
+            def marker_exists(self, worker, marker):
+                return False
+
+            def set_marker(self, worker, marker):
+                self.markers.append((worker.run_id, marker))
+                return True
+
+        supervisor = FakeSupervisor(self.config(workers))
+        with mock.patch.object(WATCH, "log") as watcher_log:
+            supervisor.active_once()
+        self.assertEqual(
+            supervisor.markers,
+            [("run-two", "/work/SCOREBENCH_4H_REACHED")],
+        )
+        messages = "\n".join(call.args[0] for call in watcher_log.call_args_list)
+        self.assertIn("run-one active-time check failed", messages)
+
     def test_busy_status_at_top_of_fullscreen_pane_prevents_nudge(self):
         class FakeSupervisor(WATCH.Supervisor):
-            def remove_markers(self, worker, *markers):
-                return True
+            def worker_progress(self, worker):
+                return SupervisorTests.progress()
+
+            def marker_exists(self, worker, marker):
+                return False
 
             def capture_pane(self, worker, history=120):
                 return "Responding\n" + ("\n" * 40)
@@ -349,22 +389,8 @@ class SupervisorTests(unittest.TestCase):
             def nudge(self, worker, active, tokens):
                 raise AssertionError("busy fullscreen worker must not be nudged")
 
-        report = {
-            "arms": [
-                {
-                    "points": [
-                        {
-                            "run_id": "run-one",
-                            "wall_seconds": 600,
-                            "tokens_total": 5000,
-                        }
-                    ]
-                }
-            ]
-        }
         supervisor = FakeSupervisor(self.config())
-        with mock.patch.object(WATCH, "fetch_report", return_value=report):
-            supervisor.active_once()
+        supervisor.active_once()
 
     def test_missing_window_reattaches_running_container(self):
         class FakeSupervisor(WATCH.Supervisor):

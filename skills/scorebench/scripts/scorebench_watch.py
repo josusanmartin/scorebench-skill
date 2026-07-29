@@ -9,13 +9,10 @@ import shlex
 import subprocess
 import sys
 import time
-import urllib.request
 from dataclasses import dataclass
 from datetime import datetime, timezone
-from html.parser import HTMLParser
 from pathlib import Path
 from typing import Any, Dict, List, Optional, Sequence, Tuple
-from urllib.parse import parse_qsl, urlencode, urlsplit, urlunsplit
 
 
 BUSY_PATTERNS = (
@@ -65,49 +62,10 @@ KNOWN_WORKER_FIELDS = {
     "restart_command",
 }
 ALLOWED_CLIENTS = {"claude", "codex", "gemini", "grok", "other"}
-REPORT_FILTER_QUERY_NAMES = {
-    "profiles",
-    "profile",
-    "users",
-    "user",
-    "runs",
-    "run",
-    "skills",
-    "skill",
-    "models",
-    "model",
-    "efforts",
-    "effort",
-    "autonomy",
-    "runAutonomy",
-    "gpus",
-    "gpu",
-}
 
 
 class ConfigError(ValueError):
     pass
-
-
-class ReportDataParser(HTMLParser):
-    def __init__(self) -> None:
-        super().__init__(convert_charrefs=False)
-        self._inside = False
-        self.parts: List[str] = []
-
-    def handle_starttag(
-        self, tag: str, attrs: List[Tuple[str, Optional[str]]]
-    ) -> None:
-        if tag.lower() == "script" and dict(attrs).get("id") == "report-data":
-            self._inside = True
-
-    def handle_endtag(self, tag: str) -> None:
-        if tag.lower() == "script" and self._inside:
-            self._inside = False
-
-    def handle_data(self, data: str) -> None:
-        if self._inside:
-            self.parts.append(data)
 
 
 @dataclass(frozen=True)
@@ -122,7 +80,9 @@ class Worker:
 @dataclass(frozen=True)
 class Config:
     tmux_session: str
-    report_url: str
+    # Retained only so existing watcher configs continue to validate. Progress
+    # is read from each worker's scoped CLI and never from this URL.
+    report_url: Optional[str]
     docker_command: Tuple[str, ...]
     recovery_poll_seconds: float
     active_poll_seconds: float
@@ -133,6 +93,20 @@ class Config:
     active_marker: str
     enforce_active_gate: bool
     workers: Tuple[Worker, ...]
+
+
+@dataclass(frozen=True)
+class RunProgress:
+    run_id: str
+    active_seconds: float
+    elapsed_seconds: float
+    tokens_total: float
+    active_seconds_source: str
+    elapsed_seconds_source: str
+    tokens_total_source: Optional[str]
+    measured_at: Optional[str]
+    tokens_measured_at: Optional[str]
+    candidate_count: int
 
 
 def _nonempty_string(value: Any, field: str) -> str:
@@ -168,7 +142,12 @@ def load_config(path: Path) -> Config:
         raise ConfigError(f"unknown config fields: {', '.join(sorted(unknown))}")
 
     tmux_session = _nonempty_string(raw.get("tmux_session"), "tmux_session")
-    report_url = _nonempty_string(raw.get("report_url"), "report_url")
+    report_url_value = raw.get("report_url")
+    report_url = (
+        _nonempty_string(report_url_value, "report_url")
+        if report_url_value is not None
+        else None
+    )
     docker_command = _command(raw.get("docker_command", ["docker"]), "docker_command")
     completion_marker = _nonempty_string(
         raw.get("completion_marker", "/work/GOAL_COMPLETE"), "completion_marker"
@@ -240,116 +219,99 @@ def load_config(path: Path) -> Config:
     )
 
 
-def parse_report_html(html: str) -> Dict[str, Any]:
-    parser = ReportDataParser()
-    parser.feed(html)
-    payload = "".join(parser.parts).strip()
-    if not payload:
-        raise ValueError("report-data script was not found")
-    data = json.loads(payload)
-    if not isinstance(data, dict) or not isinstance(data.get("arms"), list):
-        raise ValueError("report-data does not contain an arms array")
-    return data
-
-
-def _fetch(url: str, timeout: float) -> str:
-    request = urllib.request.Request(url, headers={"User-Agent": "scorebench-watch/1"})
-    with urllib.request.urlopen(request, timeout=timeout) as response:
-        return response.read().decode("utf-8")
-
-
-def _report_json_url(url: str, run_ids: Sequence[str] = ()) -> Optional[str]:
-    parts = urlsplit(url)
-    if parts.path.endswith(".html"):
-        path = parts.path[: -len(".html")] + ".json"
-    elif parts.path.endswith(".json"):
-        path = parts.path
-    else:
-        return None
-
-    query = parse_qsl(parts.query, keep_blank_values=True)
-    existing_runs = {
-        item.strip()
-        for key, value in query
-        if key in {"run", "runs"}
-        for item in value.split(",")
-        if item.strip()
-    }
-    for run_id in run_ids:
-        normalized = str(run_id).strip()
-        if normalized and normalized not in existing_runs:
-            query.append(("runs", normalized))
-            existing_runs.add(normalized)
-
-    if run_ids or any(key in REPORT_FILTER_QUERY_NAMES for key, _value in query):
-        query = [(key, value) for key, value in query if key != "_filter"]
-        query.append(("_filter", "1"))
-    return urlunsplit((parts.scheme, parts.netloc, path, urlencode(query), parts.fragment))
-
-
-def _parse_report_json(body: str) -> Dict[str, Any]:
-    data = json.loads(body)
-    if not isinstance(data, dict) or not isinstance(data.get("arms"), list):
-        raise ValueError("report json does not contain an arms array")
-    return data
-
-
-def fetch_report(
-    url: str, timeout: float = 30, run_ids: Sequence[str] = ()
-) -> Dict[str, Any]:
-    """Fetch the report payload.
-
-    ScoreBench used to inline the data in a <script id="report-data"> tag. Newer
-    deployments render the page client-side and serve the same payload from a
-    sibling .json URL. Prefer that endpoint, retaining dashboard filters and
-    scoping it to the watched run ids. Fall back to the embedded tag so this
-    still works against old servers.
-    """
-    json_url = _report_json_url(url, run_ids)
-    if json_url:
-        try:
-            return _parse_report_json(_fetch(json_url, timeout))
-        except Exception as json_error:
-            if urlsplit(url).path.endswith(".json"):
-                raise
-            try:
-                return parse_report_html(_fetch(url, timeout))
-            except Exception as html_error:
-                raise ValueError(
-                    f"report JSON fetch failed ({json_error}); "
-                    f"HTML fallback failed ({html_error})"
-                ) from html_error
-
-    return parse_report_html(_fetch(url, timeout))
-
-
-def _numeric(value: Any) -> float:
+def _nonnegative_number(value: Any, field: str) -> float:
+    if isinstance(value, bool):
+        raise ValueError(f"{field} must be numeric")
     try:
         number = float(value)
     except (TypeError, ValueError):
-        return 0.0
-    return number if math.isfinite(number) else 0.0
+        raise ValueError(f"{field} must be numeric") from None
+    if not math.isfinite(number) or number < 0:
+        raise ValueError(f"{field} must be finite and non-negative")
+    return number
 
 
-def latest_run_metrics(data: Dict[str, Any], run_id: str) -> Tuple[float, float]:
-    latest: Optional[Dict[str, Any]] = None
-    latest_active = -1.0
-    for arm in data.get("arms", []):
-        if not isinstance(arm, dict):
-            continue
-        points = arm.get("points", [])
-        if not isinstance(points, list):
-            continue
-        for point in points:
-            if not isinstance(point, dict) or point.get("run_id") != run_id:
-                continue
-            active = _numeric(point.get("wall_seconds"))
-            if active >= latest_active:
-                latest = point
-                latest_active = active
-    if latest is None:
-        return 0.0, 0.0
-    return max(latest_active, 0.0), _numeric(latest.get("tokens_total"))
+def _optional_single_line(value: Any, field: str) -> Optional[str]:
+    if value is None:
+        return None
+    if not isinstance(value, str) or not value.strip() or "\n" in value:
+        raise ValueError(f"{field} must be a non-empty single-line string or null")
+    return value
+
+
+def parse_run_progress(body: str, expected_run_id: str) -> RunProgress:
+    try:
+        data = json.loads(body)
+    except json.JSONDecodeError as exc:
+        raise ValueError(f"progress command did not return JSON: {exc}") from exc
+    if not isinstance(data, dict):
+        raise ValueError("progress response must be a JSON object")
+
+    scope = data.get("scope")
+    progress = data.get("progress")
+    if not isinstance(scope, dict) or not isinstance(progress, dict):
+        raise ValueError("progress response must contain scope and progress objects")
+    if scope.get("kind") != "run_token":
+        raise ValueError("progress response is not run-token scoped")
+    if scope.get("run_id") != expected_run_id:
+        raise ValueError(
+            f"progress scope mismatch: expected {expected_run_id!r}, "
+            f"got {scope.get('run_id')!r}"
+        )
+    if progress.get("run_id") != expected_run_id:
+        raise ValueError(
+            f"progress run mismatch: expected {expected_run_id!r}, "
+            f"got {progress.get('run_id')!r}"
+        )
+    if progress.get("schema_version") != 1:
+        raise ValueError(
+            f"unsupported progress schema version: {progress.get('schema_version')!r}"
+        )
+
+    active = _nonnegative_number(progress.get("active_seconds"), "active_seconds")
+    elapsed = _nonnegative_number(progress.get("elapsed_seconds"), "elapsed_seconds")
+    if active > elapsed + 1e-6:
+        raise ValueError("active_seconds cannot exceed elapsed_seconds")
+    tokens_value = progress.get("tokens_total")
+    tokens = (
+        0.0
+        if tokens_value is None
+        else _nonnegative_number(tokens_value, "tokens_total")
+    )
+    candidate_count = progress.get("candidate_count")
+    if isinstance(candidate_count, bool) or not isinstance(candidate_count, int):
+        raise ValueError("candidate_count must be a non-negative integer") from None
+    if candidate_count < 0:
+        raise ValueError("candidate_count must be a non-negative integer")
+
+    active_source = _optional_single_line(
+        progress.get("active_seconds_source"), "active_seconds_source"
+    )
+    elapsed_source = _optional_single_line(
+        progress.get("elapsed_seconds_source"), "elapsed_seconds_source"
+    )
+    if active_source is None or elapsed_source is None:
+        raise ValueError("active and elapsed sources are required")
+    measured_at = _optional_single_line(progress.get("measured_at"), "measured_at")
+    if candidate_count and measured_at is None:
+        raise ValueError("measured_at is required when candidates exist")
+
+    return RunProgress(
+        run_id=expected_run_id,
+        active_seconds=active,
+        elapsed_seconds=elapsed,
+        tokens_total=tokens,
+        active_seconds_source=active_source,
+        elapsed_seconds_source=elapsed_source,
+        tokens_total_source=_optional_single_line(
+            progress.get("tokens_total_source"), "tokens_total_source"
+        ),
+        measured_at=measured_at,
+        tokens_measured_at=_optional_single_line(
+            progress.get("tokens_measured_at"), "tokens_measured_at"
+        ),
+        candidate_count=candidate_count,
+    )
 
 
 def is_worker_busy(pane_text: str) -> bool:
@@ -409,6 +371,9 @@ class Supervisor:
         self.last_resume = {
             worker.run_id: float("-inf") for worker in config.workers
         }
+        self.high_water_active = {worker.run_id: 0.0 for worker in config.workers}
+        self.high_water_elapsed = {worker.run_id: 0.0 for worker in config.workers}
+        self.high_water_tokens = {worker.run_id: 0.0 for worker in config.workers}
 
     def tmux(self, *args: str) -> subprocess.CompletedProcess:
         return run_command(("tmux",) + args)
@@ -440,9 +405,25 @@ class Supervisor:
     def set_marker(self, worker: Worker, marker: str) -> bool:
         return self.docker("exec", worker.container, "touch", marker).returncode == 0
 
-    def remove_markers(self, worker: Worker, *markers: str) -> bool:
-        result = self.docker("exec", worker.container, "rm", "-f", *markers)
-        return result.returncode == 0
+    def worker_progress(self, worker: Worker) -> RunProgress:
+        result = self.docker(
+            "exec",
+            worker.container,
+            "scorebench",
+            "run",
+            "progress",
+        )
+        if result.returncode != 0:
+            detail = (result.stderr or result.stdout).strip()
+            if len(detail) > 500:
+                detail = detail[-500:]
+            raise RuntimeError(
+                "scoped progress command failed"
+                + (f": {detail}" if detail else "")
+                + "; ensure the container has the current scorebench CLI and "
+                "the ScoreBench deployment exposes /run/progress"
+            )
+        return parse_run_progress(result.stdout, worker.run_id)
 
     def container_running(self, worker: Worker) -> bool:
         result = self.docker(
@@ -557,37 +538,76 @@ class Supervisor:
             self.send_keys(worker, "Enter")
 
     def active_once(self) -> None:
-        try:
-            report = fetch_report(
-                self.config.report_url,
-                run_ids=tuple(worker.run_id for worker in self.config.workers),
-            )
-        except Exception as exc:
-            log(f"report fetch or parse failed; workers unchanged: {exc}")
-            return
-
         now = time.monotonic()
         for worker in self.config.workers:
             try:
-                active, tokens = latest_run_metrics(report, worker.run_id)
+                progress = self.worker_progress(worker)
+                observed_active = progress.active_seconds
+                observed_elapsed = progress.elapsed_seconds
+                observed_tokens = progress.tokens_total
+                previous_active = self.high_water_active[worker.run_id]
+                previous_elapsed = self.high_water_elapsed[worker.run_id]
+                previous_tokens = self.high_water_tokens[worker.run_id]
+                if observed_active + 1e-6 < previous_active:
+                    log(
+                        f"{worker.run_id} active-time regression observed "
+                        f"current={format_number(observed_active)}s "
+                        f"high_water={format_number(previous_active)}s; retaining high water"
+                    )
+                if observed_elapsed + 1e-6 < previous_elapsed:
+                    log(
+                        f"{worker.run_id} elapsed-time regression observed "
+                        f"current={format_number(observed_elapsed)}s "
+                        f"high_water={format_number(previous_elapsed)}s; retaining high water"
+                    )
+                if observed_tokens + 1e-6 < previous_tokens:
+                    log(
+                        f"{worker.run_id} token regression observed "
+                        f"current={format_number(observed_tokens)} "
+                        f"high_water={format_number(previous_tokens)}; retaining high water"
+                    )
+                active = max(observed_active, previous_active)
+                elapsed = max(observed_elapsed, previous_elapsed)
+                tokens = max(observed_tokens, previous_tokens)
+                self.high_water_active[worker.run_id] = active
+                self.high_water_elapsed[worker.run_id] = elapsed
+                self.high_water_tokens[worker.run_id] = tokens
+
                 active_text = format_number(active)
                 tokens_text = format_number(tokens)
+                active_marker_exists = self.marker_exists(
+                    worker, self.config.active_marker
+                )
+                completion_marker_exists = self.marker_exists(
+                    worker, self.config.completion_marker
+                )
+
+                if active_marker_exists:
+                    log(
+                        f"{worker.run_id} active={active_text}s tokens={tokens_text} "
+                        "target=reached evidence=marker"
+                    )
+                    continue
+
                 if active >= self.config.target_active_seconds:
                     if not self.set_marker(worker, self.config.active_marker):
                         log(f"{worker.run_id} could not create active-target marker")
                     log(
                         f"{worker.run_id} active={active_text}s tokens={tokens_text} "
-                        "target=reached"
+                        f"elapsed={format_number(elapsed)}s target=reached "
+                        f"source={progress.active_seconds_source} "
+                        f"measured_at={progress.measured_at or 'none'}"
                     )
                     continue
 
-                if self.config.enforce_active_gate:
-                    if not self.remove_markers(
-                        worker,
-                        self.config.active_marker,
-                        self.config.completion_marker,
-                    ):
-                        log(f"{worker.run_id} could not enforce active-time markers")
+                if completion_marker_exists:
+                    log(
+                        f"{worker.run_id} active={active_text}s tokens={tokens_text} "
+                        f"target=pending premature_complete=1 action=preserved "
+                        f"source={progress.active_seconds_source} "
+                        f"measured_at={progress.measured_at or 'none'}"
+                    )
+                    continue
 
                 recent = self.capture_pane(worker, history=80)
                 busy = is_worker_busy(recent)
