@@ -233,11 +233,37 @@ def parse_report_html(html: str) -> Dict[str, Any]:
     return data
 
 
-def fetch_report(url: str, timeout: float = 30) -> Dict[str, Any]:
+def _fetch(url: str, timeout: float) -> str:
     request = urllib.request.Request(url, headers={"User-Agent": "scorebench-watch/1"})
     with urllib.request.urlopen(request, timeout=timeout) as response:
-        html = response.read().decode("utf-8")
-    return parse_report_html(html)
+        return response.read().decode("utf-8")
+
+
+def fetch_report(url: str, timeout: float = 30) -> Dict[str, Any]:
+    """Fetch the report payload.
+
+    ScoreBench used to inline the data in a <script id="report-data"> tag. Newer
+    deployments render the page client-side and serve the same payload from a
+    sibling .json URL, so the inline tag is gone and every watcher fails with
+    "report-data script was not found". Prefer the JSON endpoint and fall back to
+    the embedded tag so this works against both old and new servers.
+    """
+    if url.endswith(".html"):
+        json_url = url[: -len(".html")] + ".json"
+        try:
+            data = json.loads(_fetch(json_url, timeout))
+        except Exception:
+            data = None
+        if isinstance(data, dict) and isinstance(data.get("arms"), list):
+            return data
+
+    body = _fetch(url, timeout)
+    if url.endswith(".json"):
+        data = json.loads(body)
+        if not isinstance(data, dict) or not isinstance(data.get("arms"), list):
+            raise ValueError("report json does not contain an arms array")
+        return data
+    return parse_report_html(body)
 
 
 def _numeric(value: Any) -> float:
