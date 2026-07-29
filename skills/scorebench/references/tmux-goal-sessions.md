@@ -46,7 +46,7 @@ command -v scorebench
 If you are not already inside tmux:
 
 ```bash
-tmux new -s harness-goals
+tmux new -s scorebench-goals
 ```
 
 Generic project setup:
@@ -61,7 +61,7 @@ GOAL_TEXT="Read this repository, summarize the current state, and propose one sa
 For a Harness worker, use a Harness-specific goal:
 
 ```bash
-GOAL_TEXT="Use the scorebench skill. Solve the assigned Harness exercise. Submit only through Harness. Do not read run_state.json, connector credentials, .env, or unrelated transcripts."
+GOAL_TEXT="Use the installed scorebench skill. Solve the assigned Scorebench exercise and submit only through Scorebench. Do not use exploits or read run_state.json, connector credentials, .env, sibling workspaces, or unrelated transcripts."
 ```
 
 ## Generic Goal Windows
@@ -144,6 +144,7 @@ signed in to the Harness UI, authorize the CLI from that page.
 Create scoped run keys and worker prompt files before launching agent TUIs:
 
 ```bash
+umask 077
 MANIFEST="$PWD/.harness/agent-runs/leaky-relu-no-skill-manifest.json"
 WORKROOT="$PWD/.harness/agent-runs/leaky-relu-no-skill"
 
@@ -157,16 +158,16 @@ scorebench admin launch \
   --model gpt-5-codex \
   --effort high \
   --autonomy autonomous \
-  --goal 'Without using the problem agnostic skill, solve leaky-relu for 3 hours and target <100us. Do not use exploits. Use the harness skill to submit.' \
+  --goal 'Without using the problem agnostic skill, solve leaky-relu for 3 hours and target <100us. Do not use exploits. Use the scorebench skill and submit only through Scorebench.' \
   --workspace-root "$WORKROOT" \
   --dry-run \
   --json > "$MANIFEST"
 ```
 
-Use the generated manifest to get each worker's `cwd`, `HARNESS_RUN_TOKEN`, and
+Use the generated manifest to get each worker's `cwd`, `SCOREBENCH_RUN_TOKEN`, and
 prompt file. The worker must receive only its own run token. Do not print raw
-manifests in user-visible output; they contain scoped run tokens. For summaries,
-redact the token:
+manifests or generated prompt files in user-visible output; both contain scoped
+run tokens and must remain mode `0600`. For summaries, redact the token:
 
 ```bash
 jq '{harness_url, connector, credential_name, exercise,
@@ -188,20 +189,20 @@ Claude Code, with optional model and effort:
 ```bash
 MANIFEST="$PWD/.harness/agent-runs/matmul-fable-manifest.json"
 CLAUDE_BIN="$(command -v claude)"
-SKILL_DIR="${CODEX_HOME:-$HOME/.codex}/skills"
-HARNESS_URL="$(jq -r '.harness_url' "$MANIFEST")"
+SCOREBENCH_URL="$(jq -r '.harness_url' "$MANIFEST")"
 MODEL_ARG="--model fable"       # leave empty for the default model
 EFFORT="max"                    # low, medium, high, xhigh, or max
 BYPASS="--dangerously-skip-permissions"  # only in a trusted workspace
+test -f "$HOME/.claude/skills/scorebench/SKILL.md"
 
 jq -r '.jobs[] | @base64' "$MANIFEST" | while read -r job; do
   field() { printf '%s' "$job" | base64 -d | jq -r "$1"; }
   run_id="$(field '.run_id')"
   cwd="$(field '.cwd')"
-  token="$(field '.token')"
+  token="$(field '.token.token')"
 
   tmux new-window -n "$run_id" -c "$cwd" \
-    "HARNESS_URL='$HARNESS_URL' HARNESS_RUN_TOKEN='$token' exec '$CLAUDE_BIN' $BYPASS $MODEL_ARG --effort '$EFFORT' --name '$run_id' --add-dir '$SKILL_DIR'"
+    "SCOREBENCH_URL='$SCOREBENCH_URL' SCOREBENCH_RUN_TOKEN='$token' exec '$CLAUDE_BIN' $BYPASS $MODEL_ARG --effort '$EFFORT' --name '$run_id'"
 done
 ```
 
@@ -210,18 +211,19 @@ Codex, with optional model and effort:
 ```bash
 MANIFEST="$PWD/.harness/agent-runs/matmul-codex-manifest.json"
 CODEX_BIN="$(command -v codex)"
-HARNESS_URL="$(jq -r '.harness_url' "$MANIFEST")"
+SCOREBENCH_URL="$(jq -r '.harness_url' "$MANIFEST")"
 MODEL_ARG="-m gpt-5.5"          # leave empty for the default model
 EFFORT="xhigh"
+test -f "${CODEX_HOME:-$HOME/.codex}/skills/scorebench/SKILL.md"
 
 jq -r '.jobs[] | @base64' "$MANIFEST" | while read -r job; do
   field() { printf '%s' "$job" | base64 -d | jq -r "$1"; }
   run_id="$(field '.run_id')"
   cwd="$(field '.cwd')"
-  token="$(field '.token')"
+  token="$(field '.token.token')"
 
   tmux new-window -n "$run_id" -c "$cwd" \
-    "HARNESS_URL='$HARNESS_URL' HARNESS_RUN_TOKEN='$token' exec '$CODEX_BIN' $MODEL_ARG -c 'model_reasoning_effort=\"'$EFFORT'\"'"
+    "SCOREBENCH_URL='$SCOREBENCH_URL' SCOREBENCH_RUN_TOKEN='$token' exec '$CODEX_BIN' $MODEL_ARG -c 'model_reasoning_effort=\"'$EFFORT'\"'"
 done
 ```
 
@@ -248,11 +250,11 @@ newlines and avoids shell history issues. Do not paste token-bearing manifest
 contents into the TUI.
 
 ```bash
-GOAL_TEXT='/goal Objective: Solve the assigned Harness exercise.
+GOAL_TEXT='/goal Objective: Solve the assigned Scorebench exercise.
 
-Use the scorebench skill. Submit only through Harness.
+Use the installed scorebench skill. Submit only through Scorebench.
 Use problem-agnostic-optimization when the experiment calls for it.
-Progress chart: off when Harness is handling progress.
+Progress chart: off when Scorebench is handling progress.
 If uncertain, keep iterating with best judgment toward a better score.'
 
 jq -r '.jobs[] | @base64' "$MANIFEST" | while read -r job; do
@@ -268,14 +270,14 @@ If each worker needs run-specific text, construct `GOAL_TEXT` inside the loop
 from non-secret fields such as `run_id`, `exercise`, and the strategy name. Keep
 these constraints in every worker goal:
 
-- submit only through Harness,
+- submit only through Scorebench,
 - read only the assigned exercise and current run,
 - do not read `run_state.json`, connector credentials, `.env`, sibling tokens,
   or unrelated transcripts,
 - send `scorebench run ping --event start` or `scorebench run ping --event resume`
   before optimization work and before the first submission,
 - initialize exact token accounting before the first submission,
-- run autonomously for the requested wall-clock budget.
+- honor the requested clock-time or Scorebench active-time budget exactly.
 
 ## Codex Goal Window
 
@@ -285,10 +287,10 @@ the environment:
 ```bash
 WINDOW="codex-run001"
 PROJECT_DIR="/path/to/worker/run001"
-HARNESS_URL="https://scorebench.dev/"
-HARNESS_RUN_TOKEN="hrun_..."
+SCOREBENCH_URL="https://scorebench.dev/"
+SCOREBENCH_RUN_TOKEN="hrun_..."
 EFFORT="xhigh"
-AGENT_CMD="export SCOREBENCH_URL=$HARNESS_URL; export SCOREBENCH_RUN_TOKEN=$HARNESS_RUN_TOKEN; exec $CODEX_BIN -c 'model_reasoning_effort=\"$EFFORT\"'"
+AGENT_CMD="export SCOREBENCH_URL=$SCOREBENCH_URL; export SCOREBENCH_RUN_TOKEN=$SCOREBENCH_RUN_TOKEN; exec $CODEX_BIN -c 'model_reasoning_effort=\"$EFFORT\"'"
 
 tmux new-window -n "$WINDOW" -c "$PROJECT_DIR" "$AGENT_CMD"
 ```
@@ -296,7 +298,7 @@ tmux new-window -n "$WINDOW" -c "$PROJECT_DIR" "$AGENT_CMD"
 Then send the goal into the TUI:
 
 ```bash
-GOAL_TEXT="Use the scorebench skill. Solve the assigned Harness exercise for 3 hours. Submit only through Harness. Do not use exploits."
+GOAL_TEXT="Use the installed scorebench skill. Solve the assigned Scorebench exercise for 3 hours. Submit only through Scorebench. Do not use exploits."
 tmux send-keys -t "$WINDOW" "/goal $GOAL_TEXT" Enter
 tmux send-keys -t "$WINDOW" Enter
 ```
@@ -312,11 +314,11 @@ token in the environment:
 ```bash
 WINDOW="claude-run001"
 PROJECT_DIR="/path/to/worker/run001"
-HARNESS_URL="https://scorebench.dev/"
-HARNESS_RUN_TOKEN="hrun_..."
+SCOREBENCH_URL="https://scorebench.dev/"
+SCOREBENCH_RUN_TOKEN="hrun_..."
 EFFORT="max"
 MODEL_ARG=""  # for example: --model fable
-AGENT_CMD="export SCOREBENCH_URL=$HARNESS_URL; export SCOREBENCH_RUN_TOKEN=$HARNESS_RUN_TOKEN; exec $CLAUDE_BIN $MODEL_ARG --effort $EFFORT --name $WINDOW"
+AGENT_CMD="export SCOREBENCH_URL=$SCOREBENCH_URL; export SCOREBENCH_RUN_TOKEN=$SCOREBENCH_RUN_TOKEN; exec $CLAUDE_BIN $MODEL_ARG --effort $EFFORT --name $WINDOW"
 
 tmux new-window -n "$WINDOW" -c "$PROJECT_DIR" "$AGENT_CMD"
 ```
@@ -325,13 +327,13 @@ If the workspace is trusted and the user explicitly wants no permission prompts,
 add the bypass flag to the Claude command:
 
 ```bash
-AGENT_CMD="export SCOREBENCH_URL=$HARNESS_URL; export SCOREBENCH_RUN_TOKEN=$HARNESS_RUN_TOKEN; exec $CLAUDE_BIN --dangerously-skip-permissions $MODEL_ARG --effort $EFFORT --name $WINDOW"
+AGENT_CMD="export SCOREBENCH_URL=$SCOREBENCH_URL; export SCOREBENCH_RUN_TOKEN=$SCOREBENCH_RUN_TOKEN; exec $CLAUDE_BIN --dangerously-skip-permissions $MODEL_ARG --effort $EFFORT --name $WINDOW"
 ```
 
 Then send the goal:
 
 ```bash
-GOAL_TEXT="Use the scorebench skill. Solve the assigned Harness exercise for 3 hours. Submit only through Harness. Do not use exploits."
+GOAL_TEXT="Use the installed scorebench skill. Solve the assigned Scorebench exercise for 3 hours. Submit only through Scorebench. Do not use exploits."
 tmux send-keys -t "$WINDOW" "/goal $GOAL_TEXT" Enter
 tmux send-keys -t "$WINDOW" Enter
 ```
@@ -374,7 +376,7 @@ Every worker should show:
 
 - the intended agent binary and effort level,
 - active `/goal` confirmation,
-- `HARNESS_URL` and its own `HARNESS_RUN_TOKEN` in the process environment,
+- `SCOREBENCH_URL` and its own `SCOREBENCH_RUN_TOKEN` in the process environment,
 - no access to sibling run tokens or connector credentials.
 
 ## Post-launch Harness Follow-up
@@ -388,13 +390,13 @@ Keep the manifest from `scorebench admin launch --json` or from the generated
 its run:
 
 ```bash
-HARNESS_URL="<manifest harness_url>"
-HARNESS_RUN_TOKEN="<job token>"
+SCOREBENCH_URL="<manifest harness_url>"
+SCOREBENCH_RUN_TOKEN="<job token>"
 
-env HARNESS_URL="$HARNESS_URL" HARNESS_RUN_TOKEN="$HARNESS_RUN_TOKEN" scorebench context
-env HARNESS_URL="$HARNESS_URL" HARNESS_RUN_TOKEN="$HARNESS_RUN_TOKEN" scorebench run current
-env HARNESS_URL="$HARNESS_URL" HARNESS_RUN_TOKEN="$HARNESS_RUN_TOKEN" scorebench history
-env HARNESS_URL="$HARNESS_URL" HARNESS_RUN_TOKEN="$HARNESS_RUN_TOKEN" scorebench best
+env SCOREBENCH_URL="$SCOREBENCH_URL" SCOREBENCH_RUN_TOKEN="$SCOREBENCH_RUN_TOKEN" scorebench context
+env SCOREBENCH_URL="$SCOREBENCH_URL" SCOREBENCH_RUN_TOKEN="$SCOREBENCH_RUN_TOKEN" scorebench run current
+env SCOREBENCH_URL="$SCOREBENCH_URL" SCOREBENCH_RUN_TOKEN="$SCOREBENCH_RUN_TOKEN" scorebench history
+env SCOREBENCH_URL="$SCOREBENCH_URL" SCOREBENCH_RUN_TOKEN="$SCOREBENCH_RUN_TOKEN" scorebench best
 ```
 
 Expected healthy signs:
@@ -411,7 +413,7 @@ If a candidate is pending/submitted/checking, refresh it with the same scoped
 token instead of resubmitting:
 
 ```bash
-env HARNESS_URL="$HARNESS_URL" HARNESS_RUN_TOKEN="$HARNESS_RUN_TOKEN" scorebench refresh
+env SCOREBENCH_URL="$SCOREBENCH_URL" SCOREBENCH_RUN_TOKEN="$SCOREBENCH_RUN_TOKEN" scorebench refresh
 ```
 
 Repeat refresh until the candidate reaches a terminal scored or failed state.
@@ -431,8 +433,8 @@ For each issue, capture both sides:
 
 ```bash
 tmux capture-pane -t "$WINDOW" -p -S -240
-env HARNESS_URL="$HARNESS_URL" HARNESS_RUN_TOKEN="$HARNESS_RUN_TOKEN" scorebench history
-env HARNESS_URL="$HARNESS_URL" HARNESS_RUN_TOKEN="$HARNESS_RUN_TOKEN" scorebench refresh
+env SCOREBENCH_URL="$SCOREBENCH_URL" SCOREBENCH_RUN_TOKEN="$SCOREBENCH_RUN_TOKEN" scorebench history
+env SCOREBENCH_URL="$SCOREBENCH_URL" SCOREBENCH_RUN_TOKEN="$SCOREBENCH_RUN_TOKEN" scorebench refresh
 ```
 
 Preserve exact error text and any `trace_id`. A coordinator report should say
@@ -446,7 +448,7 @@ Put safety constraints directly in the goal:
 
 ```text
 Do not read secrets or .env files.
-Do not submit outside Harness.
+Do not submit outside Scorebench.
 Do not deploy anything.
 Do not use exploits.
 Only make changes needed for the assigned exercise.

@@ -15,6 +15,7 @@ from datetime import datetime, timezone
 from html.parser import HTMLParser
 from pathlib import Path
 from typing import Any, Dict, List, Optional, Sequence, Tuple
+from urllib.parse import parse_qsl, urlencode, urlsplit, urlunsplit
 
 
 BUSY_PATTERNS = (
@@ -64,6 +65,24 @@ KNOWN_WORKER_FIELDS = {
     "restart_command",
 }
 ALLOWED_CLIENTS = {"claude", "codex", "gemini", "grok", "other"}
+REPORT_FILTER_QUERY_NAMES = {
+    "profiles",
+    "profile",
+    "users",
+    "user",
+    "runs",
+    "run",
+    "skills",
+    "skill",
+    "models",
+    "model",
+    "efforts",
+    "effort",
+    "autonomy",
+    "runAutonomy",
+    "gpus",
+    "gpu",
+}
 
 
 class ConfigError(ValueError):
@@ -239,31 +258,69 @@ def _fetch(url: str, timeout: float) -> str:
         return response.read().decode("utf-8")
 
 
-def fetch_report(url: str, timeout: float = 30) -> Dict[str, Any]:
+def _report_json_url(url: str, run_ids: Sequence[str] = ()) -> Optional[str]:
+    parts = urlsplit(url)
+    if parts.path.endswith(".html"):
+        path = parts.path[: -len(".html")] + ".json"
+    elif parts.path.endswith(".json"):
+        path = parts.path
+    else:
+        return None
+
+    query = parse_qsl(parts.query, keep_blank_values=True)
+    existing_runs = {
+        item.strip()
+        for key, value in query
+        if key in {"run", "runs"}
+        for item in value.split(",")
+        if item.strip()
+    }
+    for run_id in run_ids:
+        normalized = str(run_id).strip()
+        if normalized and normalized not in existing_runs:
+            query.append(("runs", normalized))
+            existing_runs.add(normalized)
+
+    if run_ids or any(key in REPORT_FILTER_QUERY_NAMES for key, _value in query):
+        query = [(key, value) for key, value in query if key != "_filter"]
+        query.append(("_filter", "1"))
+    return urlunsplit((parts.scheme, parts.netloc, path, urlencode(query), parts.fragment))
+
+
+def _parse_report_json(body: str) -> Dict[str, Any]:
+    data = json.loads(body)
+    if not isinstance(data, dict) or not isinstance(data.get("arms"), list):
+        raise ValueError("report json does not contain an arms array")
+    return data
+
+
+def fetch_report(
+    url: str, timeout: float = 30, run_ids: Sequence[str] = ()
+) -> Dict[str, Any]:
     """Fetch the report payload.
 
     ScoreBench used to inline the data in a <script id="report-data"> tag. Newer
     deployments render the page client-side and serve the same payload from a
-    sibling .json URL, so the inline tag is gone and every watcher fails with
-    "report-data script was not found". Prefer the JSON endpoint and fall back to
-    the embedded tag so this works against both old and new servers.
+    sibling .json URL. Prefer that endpoint, retaining dashboard filters and
+    scoping it to the watched run ids. Fall back to the embedded tag so this
+    still works against old servers.
     """
-    if url.endswith(".html"):
-        json_url = url[: -len(".html")] + ".json"
+    json_url = _report_json_url(url, run_ids)
+    if json_url:
         try:
-            data = json.loads(_fetch(json_url, timeout))
-        except Exception:
-            data = None
-        if isinstance(data, dict) and isinstance(data.get("arms"), list):
-            return data
+            return _parse_report_json(_fetch(json_url, timeout))
+        except Exception as json_error:
+            if urlsplit(url).path.endswith(".json"):
+                raise
+            try:
+                return parse_report_html(_fetch(url, timeout))
+            except Exception as html_error:
+                raise ValueError(
+                    f"report JSON fetch failed ({json_error}); "
+                    f"HTML fallback failed ({html_error})"
+                ) from html_error
 
-    body = _fetch(url, timeout)
-    if url.endswith(".json"):
-        data = json.loads(body)
-        if not isinstance(data, dict) or not isinstance(data.get("arms"), list):
-            raise ValueError("report json does not contain an arms array")
-        return data
-    return parse_report_html(body)
+    return parse_report_html(_fetch(url, timeout))
 
 
 def _numeric(value: Any) -> float:
@@ -501,7 +558,10 @@ class Supervisor:
 
     def active_once(self) -> None:
         try:
-            report = fetch_report(self.config.report_url)
+            report = fetch_report(
+                self.config.report_url,
+                run_ids=tuple(worker.run_id for worker in self.config.workers),
+            )
         except Exception as exc:
             log(f"report fetch or parse failed; workers unchanged: {exc}")
             return

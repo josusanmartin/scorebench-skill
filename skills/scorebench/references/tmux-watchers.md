@@ -123,9 +123,14 @@ workspace.
 
 ## Active-Time Behavior
 
-The `active` mode parses the public report's embedded `report-data` JSON. For
-each exact `run_id`, it selects the point with the greatest `wall_seconds` and
-logs that active value plus `tokens_total`.
+The `active` mode derives the sibling `.json` endpoint from the configured
+report URL, preserves dashboard filters, adds the exact configured run IDs, and
+requests server-side filtering. This keeps large reports from downloading
+unrelated runs. Legacy deployments that still inline `report-data` in HTML are
+supported as a fallback.
+
+For each exact `run_id`, the watcher selects the point with the greatest
+`wall_seconds` and logs that active value plus `tokens_total`.
 
 Below the target it removes premature completion markers when
 `enforce_active_gate` is true. If the matching TUI appears idle, it sends a

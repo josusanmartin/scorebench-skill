@@ -94,25 +94,53 @@ Then the whole loop goes through the `scorebench` CLI (legacy alias `harness`):
 ```bash
 scorebench context                 # verify the scoped run token
 scorebench exercise                # read the assigned problem
+```
+
+When context shows a pre-bound run, keep it:
+
+```bash
+scorebench run current
+```
+
+Only when context reports `needs_run_name: true`, start a run and preserve the
+complete original assignment:
+
+```bash
 scorebench run start --id run001 \
   --skills scorebench \
   --model <actual-model> \
   --effort <actual-effort> \
-  --autonomy autonomous
+  --autonomy autonomous \
+  --prompt-file /path/to/original-assignment.md
+```
+
+Then ping, establish exact token accounting, and submit:
+
+```bash
 scorebench run ping --event start  # mandatory before the first submission
-scorebench submit submission.py --total-tokens 25000 --tokens-total-source agent_claim
+SCOREBENCH_TOKEN_HELPER="${CODEX_HOME:-$HOME/.codex}/skills/scorebench/scripts/token_usage.py"
+python3 "$SCOREBENCH_TOKEN_HELPER" start \
+  --total-tokens <exact-session-total-at-run-start> \
+  --source codex_goal
+TOKEN_FLAGS="$(python3 "$SCOREBENCH_TOKEN_HELPER" flags \
+  --total-tokens <exact-current-session-total> \
+  --source codex_goal)"
+scorebench submit submission.py $TOKEN_FLAGS
 scorebench refresh                 # poll queued submissions to a terminal state
 scorebench best
 scorebench history
 ```
 
-Two hard rules for workers:
+Three hard rules for workers:
 
 - **Ping before submitting.** `scorebench run ping --event start` (or
   `--event resume` for resumed sessions) is mandatory even when the token is
   already bound to a run. The dashboard uses that server timestamp as the
   trusted run-time origin; without it, reports fall back to first-submission
   time zero and cross-run timing comparisons become misleading.
+- **Use exact run-relative tokens.** Establish a baseline from the current
+  session, then use the bundled helper to generate submission flags. Never use
+  an estimate, account-wide usage, or an `agent_claim`.
 - **Never call the venue directly.** Connector credentials stay in the
   harness. Workers must not call Tensara, HighLoad, CPU.mode, GPU Mode /
   Popcorn, Paradigm Puzzles, or GitHub themselves — use `scorebench leaderboard`,
@@ -138,14 +166,17 @@ export PATH="$HOME/.local/bin:$PATH"
 scorebench --help
 ```
 
-The skill bundles the same logic as a helper for agents, with a fallback that
-builds wrappers from a local server checkout (`HARNESS_REPO`) when no
-deployment is reachable:
+The skill bundles a deployment-first helper for agents, with an explicit
+fallback to a current local server/CLI checkout when the deployment is
+unreachable:
 
 ```bash
 SCOREBENCH_CLI_BOOTSTRAP="${CODEX_HOME:-$HOME/.codex}/skills/scorebench/scripts/install_scorebench_cli.sh"
 bash "$SCOREBENCH_CLI_BOOTSTRAP"
 ```
+
+Set `SCOREBENCH_CLI_FORCE=1` to refresh an existing installation. For an
+offline fallback, set `SCOREBENCH_CLI_CHECKOUT=/path/to/current/checkout`.
 
 ## Coordinator quick start
 
@@ -206,10 +237,17 @@ active run metadata onto each candidate automatically.
 ## Repository layout
 
 ```text
-skills/scorebench/SKILL.md                         # the complete agent workflow
+skills/scorebench/SKILL.md                         # core agent workflow and hard gates
+skills/scorebench/agents/openai.yaml               # Codex skill UI metadata
+skills/scorebench/references/clean-room-docker.md  # isolated worker image recipe
+skills/scorebench/references/connectors.md         # connector-specific contracts
+skills/scorebench/references/coordinator-runs.md   # admin and parallel-run operations
 skills/scorebench/references/paradigm-puzzles.md   # Paradigm exercise file and status contracts
 skills/scorebench/references/tmux-goal-sessions.md # long-running tmux /goal sessions
+skills/scorebench/references/tmux-watchers.md      # recovery and active-time monitors
+skills/scorebench/references/token-accounting.md   # exact run-relative usage
 skills/scorebench/scripts/install_scorebench_cli.sh # CLI bootstrap (hosted installer + fallback)
+skills/scorebench/scripts/scorebench_watch.py      # durable worker monitors
 skills/scorebench/scripts/token_usage.py           # run-relative token accounting
 ```
 
