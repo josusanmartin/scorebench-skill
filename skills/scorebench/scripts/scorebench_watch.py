@@ -5,7 +5,9 @@ import argparse
 import hashlib
 import json
 import math
+import os
 import shlex
+import signal
 import subprocess
 import sys
 import time
@@ -22,11 +24,11 @@ BUSY_PATTERNS = (
     "recombobulating",
     "thinking",
     "responding",
-    "running ",
     "tool running",
     "tool is running",
     "send now",
 )
+BUSY_STATUS_LINES = 16
 CAPACITY_PATTERNS = (
     "capacity",
     "overloaded",
@@ -315,7 +317,11 @@ def parse_run_progress(body: str, expected_run_id: str) -> RunProgress:
 
 
 def is_worker_busy(pane_text: str) -> bool:
-    lowered = pane_text.lower()
+    # Completed reports remain in scrollback and often describe tests or
+    # monitors as "running". Only recent nonblank TUI status lines should
+    # decide whether another turn is safe to enqueue.
+    recent_lines = [line for line in pane_text.splitlines() if line.strip()]
+    lowered = "\n".join(recent_lines[-BUSY_STATUS_LINES:]).lower()
     return any(pattern in lowered for pattern in BUSY_PATTERNS)
 
 
@@ -331,10 +337,30 @@ def nudge_text(
         f"Its own latest submitted active time is {format_number(active)} seconds "
         f"and submitted token total is {format_number(tokens)}; the active-time "
         f"target is {format_number(target)} seconds. Keep independently optimizing "
-        "in this isolated workspace, send a heartbeat, and make verified legitimate "
-        "submissions with exact tokens. Do not stop or create GOAL_COMPLETE while "
+        "in this isolated workspace, run `scorebench run ping --event resume`, "
+        "and make verified legitimate submissions with exact tokens. Do not stop "
+        "or create GOAL_COMPLETE while "
         f"{active_marker} is absent. Never use elapsed time or inspect any other run "
         "or solution."
+    )
+
+
+def finalize_text(
+    worker: Worker,
+    active: float,
+    tokens: float,
+    active_marker: str,
+    completion_marker: str,
+) -> str:
+    return (
+        f"Continue only the same existing ScoreBench run {worker.run_id}. "
+        f"Its latest submitted active time is {format_number(active)} seconds "
+        f"and submitted token total is {format_number(tokens)}. The target marker "
+        f"{active_marker} exists. Run `scorebench run ping --event resume`, finish "
+        "the current safe operation, refresh pending candidates, verify the best "
+        "candidate is valid and terminal, and record exact final usage with "
+        f"`scorebench run usage`. Then create {completion_marker} and report the "
+        "final run result. Never inspect another run or solution."
     )
 
 
@@ -351,15 +377,37 @@ def log(message: str) -> None:
 
 def run_command(
     args: Sequence[str],
+    timeout: float = 30,
 ) -> subprocess.CompletedProcess:
-    return subprocess.run(
-        list(args),
+    command = list(args)
+    process = subprocess.Popen(
+        command,
         text=True,
         stdout=subprocess.PIPE,
         stderr=subprocess.PIPE,
-        check=False,
-        timeout=30,
+        start_new_session=True,
     )
+    try:
+        stdout, stderr = process.communicate(timeout=timeout)
+        return subprocess.CompletedProcess(
+            command, process.returncode, stdout, stderr
+        )
+    except subprocess.TimeoutExpired:
+        try:
+            os.killpg(process.pid, signal.SIGTERM)
+        except ProcessLookupError:
+            pass
+        try:
+            stdout, stderr = process.communicate(timeout=2)
+        except subprocess.TimeoutExpired:
+            try:
+                os.killpg(process.pid, signal.SIGKILL)
+            except ProcessLookupError:
+                pass
+            stdout, stderr = process.communicate()
+        message = f"command timed out after {timeout:g} seconds"
+        stderr = f"{stderr.rstrip()}\n{message}".lstrip()
+        return subprocess.CompletedProcess(command, 124, stdout, stderr)
 
 
 class Supervisor:
@@ -384,16 +432,35 @@ class Supervisor:
     def target(self, worker: Worker) -> str:
         return f"{self.config.tmux_session}:{worker.window}"
 
+    def window_exists(self, worker: Worker) -> bool:
+        result = self.tmux(
+            "list-windows",
+            "-t",
+            self.config.tmux_session,
+            "-F",
+            "#{window_name}",
+        )
+        if result.returncode != 0:
+            return False
+        names = {line.strip() for line in result.stdout.splitlines()}
+        return worker.window in names
+
     def capture_pane(self, worker: Worker, history: int = 120) -> str:
+        if not self.window_exists(worker):
+            return ""
         result = self.tmux(
             "capture-pane", "-t", self.target(worker), "-p", "-S", f"-{history}"
         )
         return result.stdout if result.returncode == 0 else ""
 
     def send_keys(self, worker: Worker, *keys: str) -> None:
+        if not self.window_exists(worker):
+            return
         self.tmux("send-keys", "-t", self.target(worker), *keys)
 
     def send_literal(self, worker: Worker, value: str) -> None:
+        if not self.window_exists(worker):
+            return
         digest = hashlib.sha256(worker.run_id.encode("utf-8")).hexdigest()[:12]
         buffer_name = f"scorebench-watch-{digest}"
         self.tmux("set-buffer", "-b", buffer_name, "--", value)
@@ -432,6 +499,8 @@ class Supervisor:
         return result.returncode == 0 and result.stdout.strip() == "true"
 
     def pane_state(self, worker: Worker) -> Optional[str]:
+        if not self.window_exists(worker):
+            return None
         result = self.tmux(
             "display-message", "-p", "-t", self.target(worker), "#{pane_dead}"
         )
@@ -537,6 +606,21 @@ class Supervisor:
             time.sleep(2)
             self.send_keys(worker, "Enter")
 
+    def finalize(self, worker: Worker, active: float, tokens: float) -> None:
+        prompt = finalize_text(
+            worker,
+            active,
+            tokens,
+            self.config.active_marker,
+            self.config.completion_marker,
+        )
+        self.send_keys(worker, "C-u")
+        self.send_literal(worker, prompt)
+        self.send_keys(worker, "Enter")
+        if worker.client == "codex":
+            time.sleep(2)
+            self.send_keys(worker, "Enter")
+
     def active_once(self) -> None:
         now = time.monotonic()
         for worker in self.config.workers:
@@ -582,22 +666,51 @@ class Supervisor:
                     worker, self.config.completion_marker
                 )
 
-                if active_marker_exists:
-                    log(
-                        f"{worker.run_id} active={active_text}s tokens={tokens_text} "
-                        "target=reached evidence=marker"
-                    )
-                    continue
-
-                if active >= self.config.target_active_seconds:
-                    if not self.set_marker(worker, self.config.active_marker):
+                if (
+                    active_marker_exists
+                    or active >= self.config.target_active_seconds
+                ):
+                    marker_ready = active_marker_exists
+                    if not marker_ready:
+                        marker_ready = self.set_marker(
+                            worker, self.config.active_marker
+                        )
+                    if not marker_ready:
                         log(f"{worker.run_id} could not create active-target marker")
-                    log(
-                        f"{worker.run_id} active={active_text}s tokens={tokens_text} "
-                        f"elapsed={format_number(elapsed)}s target=reached "
-                        f"source={progress.active_seconds_source} "
-                        f"measured_at={progress.measured_at or 'none'}"
-                    )
+                        continue
+
+                    evidence = "marker" if active_marker_exists else "progress"
+                    if completion_marker_exists:
+                        log(
+                            f"{worker.run_id} active={active_text}s "
+                            f"tokens={tokens_text} target=reached "
+                            f"evidence={evidence} complete=1"
+                        )
+                        continue
+
+                    recent = self.capture_pane(worker, history=80)
+                    busy = is_worker_busy(recent)
+                    if (
+                        not busy
+                        and now - self.last_nudge[worker.run_id]
+                        >= self.config.nudge_seconds
+                    ):
+                        log(
+                            f"{worker.run_id} active={active_text}s "
+                            f"tokens={tokens_text} target=reached "
+                            f"evidence={evidence} idle; requesting finalization"
+                        )
+                        self.finalize(worker, active, tokens)
+                        self.last_nudge[worker.run_id] = time.monotonic()
+                    else:
+                        log(
+                            f"{worker.run_id} active={active_text}s "
+                            f"tokens={tokens_text} "
+                            f"elapsed={format_number(elapsed)}s target=reached "
+                            f"evidence={evidence} busy={int(busy)} "
+                            f"source={progress.active_seconds_source} "
+                            f"measured_at={progress.measured_at or 'none'}"
+                        )
                     continue
 
                 if completion_marker_exists:

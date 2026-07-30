@@ -1,458 +1,232 @@
 # tmux `/goal` Sessions
 
-Use this reference when launching persistent `/goal` sessions in separate tmux
-windows for Codex or Claude Code. It covers both generic project sessions and
-Harness-scoped worker sessions with per-run tokens.
+Use this reference to launch persistent Codex or Claude Code goal sessions.
+Passing a prompt as an agent CLI argument creates a one-turn request; it does
+not activate persistent `/goal` mode.
 
-## Core Rule
+## Contents
 
-Passing a prompt as a CLI argument starts a normal one-turn request. It does not
-activate persistent `/goal` mode.
+- [Core sequence](#core-sequence)
+- [Create prompt-bound run keys](#create-prompt-bound-run-keys)
+- [Launch host TUI workers](#launch-host-tui-workers)
+- [Attach container workers](#attach-container-workers)
+- [Stage and activate goals](#stage-and-activate-goals)
+- [Verify every lane](#verify-every-lane)
+- [Recover without changing identity](#recover-without-changing-identity)
 
-For persistent goal mode:
+## Core Sequence
 
-1. Open the interactive agent TUI inside tmux.
-2. Send a `/goal ...` slash command into that TUI.
-3. Verify the TUI confirms an active goal.
+For each worker:
 
-Expected Codex signs:
+1. Render its complete goal.
+2. Create a token bound to that exact original prompt.
+3. Start the interactive TUI with intended model/effort.
+4. Send a short `/goal` command into the TUI.
+5. Verify active goal, Scorebench scope/run/ping, exact token baseline, and a
+   protective first candidate.
+
+Expected active signs include:
 
 ```text
-Goal active Objective: ...
+Goal active
 Pursuing goal
 ```
 
-Expected Claude Code signs:
+or:
 
 ```text
-Goal set: ...
+Goal set
 ◎ /goal active
 ```
 
-## Prerequisites
+## Create Prompt-Bound Run Keys
 
-```bash
-command -v tmux
-command -v codex
-command -v claude
-```
-
-For Harness-scoped runs, also verify:
-
-```bash
-command -v scorebench
-```
-
-If you are not already inside tmux:
-
-```bash
-tmux new -s scorebench-goals
-```
-
-Generic project setup:
-
-```bash
-PROJECT_DIR="$(pwd)"
-CODEX_BIN="$(command -v codex)"
-CLAUDE_BIN="$(command -v claude)"
-GOAL_TEXT="Read this repository, summarize the current state, and propose one safe next step. Do not modify files or read secrets."
-```
-
-For a Harness worker, use a Harness-specific goal:
-
-```bash
-GOAL_TEXT="Use the installed scorebench skill. Solve the assigned Scorebench exercise and submit only through Scorebench. Do not use exploits or read run_state.json, connector credentials, .env, sibling workspaces, or unrelated transcripts."
-```
-
-## Generic Goal Windows
-
-Use this when the user wants a standalone Codex or Claude Code goal session
-without Harness run tokens.
-
-Codex medium:
-
-```bash
-WINDOW="codex-goal-medium"
-EFFORT="medium"
-
-tmux new-window -n "$WINDOW" -c "$PROJECT_DIR" \
-  "$CODEX_BIN -c 'model_reasoning_effort=\"'$EFFORT'\"'"
-
-tmux send-keys -t "$WINDOW" "/goal $GOAL_TEXT" Enter
-tmux send-keys -t "$WINDOW" Enter
-```
-
-Codex with an explicit model:
-
-```bash
-WINDOW="codex-goal-xhigh"
-EFFORT="xhigh"
-MODEL="<your-codex-model>"
-
-tmux new-window -n "$WINDOW" -c "$PROJECT_DIR" \
-  "$CODEX_BIN -m $MODEL -c 'model_reasoning_effort=\"'$EFFORT'\"'"
-
-tmux send-keys -t "$WINDOW" "/goal $GOAL_TEXT" Enter
-tmux send-keys -t "$WINDOW" Enter
-```
-
-Claude Code medium:
-
-```bash
-WINDOW="claude-goal-medium"
-EFFORT="medium"
-
-tmux new-window -n "$WINDOW" -c "$PROJECT_DIR" \
-  "$CLAUDE_BIN --effort $EFFORT --name $WINDOW"
-
-tmux send-keys -t "$WINDOW" "/goal $GOAL_TEXT" Enter
-tmux send-keys -t "$WINDOW" Enter
-```
-
-Claude Code max with permission prompts bypassed in a trusted workspace:
-
-```bash
-WINDOW="claude-goal-max"
-EFFORT="max"
-
-tmux new-window -n "$WINDOW" -c "$PROJECT_DIR" \
-  "$CLAUDE_BIN --dangerously-skip-permissions --effort $EFFORT --name $WINDOW"
-
-tmux send-keys -t "$WINDOW" "/goal $GOAL_TEXT" Enter
-tmux send-keys -t "$WINDOW" Enter
-```
-
-Codex commonly supports `low`, `medium`, `high`, and `xhigh` through
-`model_reasoning_effort`. Claude Code commonly supports `low`, `medium`,
-`high`, `xhigh`, and `max` through `--effort`. Confirm current support with
-Codex `/model` or `claude --help`.
-
-## Harness Coordinator Setup
-
-Log the coordinator CLI into Harness first:
-
-```bash
-scorebench admin login --url https://scorebench.dev/ --username <your-username>
-scorebench admin whoami
-```
-
-The login command opens or prints a browser authorization link. If already
-signed in to the Harness UI, authorize the CLI from that page.
-
-## Create Run Keys First
-
-Create scoped run keys and worker prompt files before launching agent TUIs:
+Read [Coordinator runs](coordinator-runs.md) first. Render goals before
+creating tokens. A batch manifest is secret material:
 
 ```bash
 umask 077
-MANIFEST="$PWD/.harness/agent-runs/leaky-relu-no-skill-manifest.json"
-WORKROOT="$PWD/.harness/agent-runs/leaky-relu-no-skill"
+MANIFEST="$PWD/.harness/agent-runs/condition-timestamp-manifest.json"
+WORKROOT="$PWD/.harness/agent-runs/condition-timestamp"
 
 scorebench admin launch \
-  --connector local_tensara \
-  --credential skill-research \
-  --exercise leaky-relu \
-  --count 4 \
-  --run-prefix no-skill- \
+  --connector <connector> \
+  --credential <credential-profile> \
+  --exercise <exercise> \
+  --count 3 \
+  --run-prefix <condition-timestamp-lane-prefix> \
   --skills scorebench \
-  --model gpt-5-codex \
-  --effort high \
+  --model <actual-model> \
+  --effort <actual-effort> \
   --autonomy autonomous \
-  --goal 'Without using the problem agnostic skill, solve leaky-relu for 3 hours and target <100us. Do not use exploits. Use the scorebench skill and submit only through Scorebench.' \
+  --goal-file /absolute/path/to/rendered-goal.md \
   --workspace-root "$WORKROOT" \
   --dry-run \
   --json > "$MANIFEST"
 ```
 
-Use the generated manifest to get each worker's `cwd`, `SCOREBENCH_RUN_TOKEN`, and
-prompt file. The worker must receive only its own run token. Do not print raw
-manifests or generated prompt files in user-visible output; both contain scoped
-run tokens and must remain mode `0600`. For summaries, redact the token:
+Omit `--credential` for credentialless connectors such as `vliw`.
+`--dry-run` still creates keys and prompt files; it only skips tmux. Do not
+repeat it as a pure syntax check.
+
+Keep manifest and generated prompts mode 0600. Never print them. A redacted
+summary may include only non-secret job fields:
 
 ```bash
 jq '{harness_url, connector, credential_name, exercise,
      jobs: [.jobs[] | {run_id, cwd, prompt_file, window}]}' "$MANIFEST"
 ```
 
-For local Tensara URLs, pass the exercise slug, not the URL path. For example,
-`http://host/problems/matrix-multiplication` becomes
-`--exercise matrix-multiplication`, not `--exercise /problems/matrix-multiplication`.
+## Launch Host TUI Workers
 
-## Batch Launcher From Manifest
-
-Use this pattern when launching several long-lived goal sessions. It starts
-interactive TUIs with per-worker Harness tokens and keeps the raw token inside
-the process environment.
-
-Claude Code, with optional model and effort:
+Verify installed skills and CLI first:
 
 ```bash
-MANIFEST="$PWD/.harness/agent-runs/matmul-fable-manifest.json"
+test -f "$HOME/.claude/skills/scorebench/SKILL.md"
+test -f "${CODEX_HOME:-$HOME/.codex}/skills/scorebench/SKILL.md"
+command -v scorebench tmux
+```
+
+Claude Code:
+
+```bash
 CLAUDE_BIN="$(command -v claude)"
 SCOREBENCH_URL="$(jq -r '.harness_url' "$MANIFEST")"
-MODEL_ARG="--model fable"       # leave empty for the default model
-EFFORT="max"                    # low, medium, high, xhigh, or max
-BYPASS="--dangerously-skip-permissions"  # only in a trusted workspace
-test -f "$HOME/.claude/skills/scorebench/SKILL.md"
+MODEL="<actual-model>"
+EFFORT="<actual-effort>"
+SECRET_DIR="$PWD/.harness/agent-runs/condition-timestamp-secrets"
+install -d -m 0700 "$SECRET_DIR"
 
 jq -r '.jobs[] | @base64' "$MANIFEST" | while read -r job; do
   field() { printf '%s' "$job" | base64 -d | jq -r "$1"; }
   run_id="$(field '.run_id')"
   cwd="$(field '.cwd')"
   token="$(field '.token.token')"
+  env_file="$SECRET_DIR/$run_id.env"
+  (umask 077; printf 'SCOREBENCH_URL=%s\nSCOREBENCH_RUN_TOKEN=%s\n' \
+    "$SCOREBENCH_URL" "$token" > "$env_file")
 
-  tmux new-window -n "$run_id" -c "$cwd" \
-    "SCOREBENCH_URL='$SCOREBENCH_URL' SCOREBENCH_RUN_TOKEN='$token' exec '$CLAUDE_BIN' $BYPASS $MODEL_ARG --effort '$EFFORT' --name '$run_id'"
+  tmux new-window -d -t "$SESSION" -n "$run_id" -c "$cwd" \
+    "set -a; . '$env_file'; set +a; exec '$CLAUDE_BIN' --name '$run_id' --model '$MODEL' --effort '$EFFORT'"
 done
 ```
 
-Codex, with optional model and effort:
+Add `--dangerously-skip-permissions` only when explicitly authorized and the
+workspace is isolated or trusted.
+
+Codex:
 
 ```bash
-MANIFEST="$PWD/.harness/agent-runs/matmul-codex-manifest.json"
 CODEX_BIN="$(command -v codex)"
 SCOREBENCH_URL="$(jq -r '.harness_url' "$MANIFEST")"
-MODEL_ARG="-m gpt-5.5"          # leave empty for the default model
-EFFORT="xhigh"
-test -f "${CODEX_HOME:-$HOME/.codex}/skills/scorebench/SKILL.md"
+MODEL="<actual-model>"
+EFFORT="<actual-effort>"
+SECRET_DIR="$PWD/.harness/agent-runs/condition-timestamp-secrets"
+install -d -m 0700 "$SECRET_DIR"
 
 jq -r '.jobs[] | @base64' "$MANIFEST" | while read -r job; do
   field() { printf '%s' "$job" | base64 -d | jq -r "$1"; }
   run_id="$(field '.run_id')"
   cwd="$(field '.cwd')"
   token="$(field '.token.token')"
+  env_file="$SECRET_DIR/$run_id.env"
+  (umask 077; printf 'SCOREBENCH_URL=%s\nSCOREBENCH_RUN_TOKEN=%s\n' \
+    "$SCOREBENCH_URL" "$token" > "$env_file")
 
-  tmux new-window -n "$run_id" -c "$cwd" \
-    "SCOREBENCH_URL='$SCOREBENCH_URL' SCOREBENCH_RUN_TOKEN='$token' exec '$CODEX_BIN' $MODEL_ARG -c 'model_reasoning_effort=\"'$EFFORT'\"'"
+  tmux new-window -d -t "$SESSION" -n "$run_id" -c "$cwd" \
+    "set -a; . '$env_file'; set +a; exec '$CODEX_BIN' -m '$MODEL' -c 'model_reasoning_effort=\"'$EFFORT'\"'"
 done
 ```
 
-Pass run identity metadata to `scorebench admin launch` once, matching the actual
-worker command you start from the manifest. The worker should not repeat
-skills/model/effort/autonomy on every submission.
+Scorebench metadata does not configure the provider. Pass and later verify the
+same model/effort in both layers. Keep lane environment files mode 0600 until
+recovery is no longer needed, then remove only their exact paths.
 
-Name the run prefix, tmux window, strategy, and notes after the experimental
-condition. Examples:
+## Attach Container Workers
 
-- `claude-pao-med-mm` with `problem-agnostic-optimization-claude-medium`
-- `claude-pao-mm` with `problem-agnostic-optimization-claude-max`
-- `fable-pao-mm` with `problem-agnostic-optimization-claude-fable-max`
-- `codex-pao-xhigh-mm` with `problem-agnostic-optimization-codex-xhigh`
+For isolated lanes:
 
-After launch, capture each pane before sending the goal. Claude should show the
-requested model and effort, for example `Fable 5 with max effort` or
-`medium · /effort`.
+1. Create every container with its lane-specific environment file, volumes,
+   model, effort, and fixed provider session ID.
+2. Start every container.
+3. Verify each remains running and bootstrap-ready.
+4. Only then create tmux windows that run `docker attach <exact-container>`.
 
-## Send Goals To A Batch
+A failed attachment can immediately close a newly created window or session.
 
-For long goals, prefer tmux buffers over `send-keys -l`; this preserves
-newlines and avoids shell history issues. Do not paste token-bearing manifest
-contents into the TUI.
+List and exact-match windows before assuming one exists:
 
 ```bash
-GOAL_TEXT='/goal Objective: Solve the assigned Scorebench exercise.
-
-Use the installed scorebench skill. Submit only through Scorebench.
-Use problem-agnostic-optimization when the experiment calls for it.
-Progress chart: off when Scorebench is handling progress.
-If uncertain, keep iterating with best judgment toward a better score.'
-
-jq -r '.jobs[] | @base64' "$MANIFEST" | while read -r job; do
-  field() { printf '%s' "$job" | base64 -d | jq -r "$1"; }
-  run_id="$(field '.run_id')"
-  tmux set-buffer -b "goal_$run_id" "$GOAL_TEXT"
-  tmux paste-buffer -t "$run_id" -b "goal_$run_id"
-  tmux send-keys -t "$run_id" Enter
-done
+tmux list-windows -t "$SESSION" -F '#{window_name}'
 ```
 
-If each worker needs run-specific text, construct `GOAL_TEXT` inside the loop
-from non-secret fields such as `run_id`, `exercise`, and the strategy name. Keep
-these constraints in every worker goal:
+Do not use `tmux display-message -t <target>` as an existence check; an unknown
+target can resolve to another current pane.
 
-- submit only through Scorebench,
-- read only the assigned exercise and current run,
-- do not read `run_state.json`, connector credentials, `.env`, sibling tokens,
-  or unrelated transcripts,
-- send `scorebench run ping --event start` or `scorebench run ping --event resume`
-  before optimization work and before the first submission,
-- initialize exact token accounting before the first submission,
-- honor the requested clock-time or Scorebench active-time budget exactly.
+## Stage And Activate Goals
 
-## Codex Goal Window
+For long goals, stage the complete prompt at `/work/TMUX_GOAL` or use the
+manifest's generated `prompt_file`. This preserves the same original text and
+avoids tmux quoting/input limits.
 
-Start an interactive Codex TUI in the worker directory with the worker token in
-the environment:
+Send a short instruction through a named buffer:
 
 ```bash
-WINDOW="codex-run001"
-PROJECT_DIR="/path/to/worker/run001"
-SCOREBENCH_URL="https://scorebench.dev/"
-SCOREBENCH_RUN_TOKEN="hrun_..."
-EFFORT="xhigh"
-AGENT_CMD="export SCOREBENCH_URL=$SCOREBENCH_URL; export SCOREBENCH_RUN_TOKEN=$SCOREBENCH_RUN_TOKEN; exec $CODEX_BIN -c 'model_reasoning_effort=\"$EFFORT\"'"
+GOAL_COMMAND='/goal Read /work/TMUX_GOAL completely and execute it as the persistent goal.'
+BUFFER="goal-${WINDOW}"
 
-tmux new-window -n "$WINDOW" -c "$PROJECT_DIR" "$AGENT_CMD"
+tmux set-buffer -b "$BUFFER" -- "$GOAL_COMMAND"
+tmux paste-buffer -b "$BUFFER" -t "${SESSION}:${WINDOW}"
+tmux send-keys -t "${SESSION}:${WINDOW}" Enter
 ```
 
-Then send the goal into the TUI:
+If the command is visible but unexecuted in a multiline editor, inspect first
+and send one more Enter. Never paste a raw manifest, environment file, or token
+into the TUI.
+
+The goal must require:
+
+- installed Scorebench skill and assigned scope only;
+- start/resume ping and exact token baseline before optimization;
+- a tested protective baseline before extended design;
+- Scorebench-only submissions and reads;
+- no secrets, siblings, prior artifacts, or exploits;
+- final exact usage and terminal candidate verification.
+
+## Verify Every Lane
 
 ```bash
-GOAL_TEXT="Use the installed scorebench skill. Solve the assigned Scorebench exercise for 3 hours. Submit only through Scorebench. Do not use exploits."
-tmux send-keys -t "$WINDOW" "/goal $GOAL_TEXT" Enter
-tmux send-keys -t "$WINDOW" Enter
+tmux capture-pane -t "${SESSION}:${WINDOW}" -p -S -160
+tmux list-panes -t "${SESSION}:${WINDOW}" \
+  -F '#{pane_id} #{pane_current_command} #{pane_current_path} #{pane_dead}'
 ```
 
-Use `low`, `medium`, `high`, or `xhigh` for Codex effort when supported. Verify
-the active model and effort in the TUI with `/model` if uncertain.
+For containers, inspect the exact process with a bounded `docker top` or
+equivalent command.
 
-## Claude Code Goal Window
+Require evidence of:
 
-Start an interactive Claude Code TUI in the worker directory with the worker
-token in the environment:
+- intended model, effort, autonomy/permission mode, and fixed session identity;
+- active `/goal`;
+- installed skill;
+- `scorebench context`, exercise, and exact current run;
+- successful start/resume ping;
+- exact token baseline;
+- tested protective baseline progressing to submission.
 
-```bash
-WINDOW="claude-run001"
-PROJECT_DIR="/path/to/worker/run001"
-SCOREBENCH_URL="https://scorebench.dev/"
-SCOREBENCH_RUN_TOKEN="hrun_..."
-EFFORT="max"
-MODEL_ARG=""  # for example: --model fable
-AGENT_CMD="export SCOREBENCH_URL=$SCOREBENCH_URL; export SCOREBENCH_RUN_TOKEN=$SCOREBENCH_RUN_TOKEN; exec $CLAUDE_BIN $MODEL_ARG --effort $EFFORT --name $WINDOW"
+Do not declare success because windows exist. Query each lane's scoped
+`scorebench run progress` and history until candidates are recorded.
 
-tmux new-window -n "$WINDOW" -c "$PROJECT_DIR" "$AGENT_CMD"
-```
+## Recover Without Changing Identity
 
-If the workspace is trusted and the user explicitly wants no permission prompts,
-add the bypass flag to the Claude command:
+On provider or attachment failure:
 
-```bash
-AGENT_CMD="export SCOREBENCH_URL=$SCOREBENCH_URL; export SCOREBENCH_RUN_TOKEN=$SCOREBENCH_RUN_TOKEN; exec $CLAUDE_BIN --dangerously-skip-permissions $MODEL_ARG --effort $EFFORT --name $WINDOW"
-```
+1. Exact-match tmux window and container.
+2. Preserve work/session volumes, session ID, run token, model, and effort.
+3. Restart/resume only that lane.
+4. Recreate its exact attachment if missing.
+5. Send `scorebench run ping --event resume`.
+6. Resume the same persistent goal.
 
-Then send the goal:
-
-```bash
-GOAL_TEXT="Use the installed scorebench skill. Solve the assigned Scorebench exercise for 3 hours. Submit only through Scorebench. Do not use exploits."
-tmux send-keys -t "$WINDOW" "/goal $GOAL_TEXT" Enter
-tmux send-keys -t "$WINDOW" Enter
-```
-
-Use `low`, `medium`, `high`, `xhigh`, or `max` for Claude Code effort when
-supported. Use `--model fable` for Claude Fable when requested. Confirm current
-model aliases and effort values with `claude --help`.
-
-## Why Send Enter Twice
-
-Long `/goal ...` text can land in the TUI multiline editor without executing.
-If the full command is visible but the UI does not show an active goal, send one
-more Enter:
-
-```bash
-tmux send-keys -t "$WINDOW" Enter
-```
-
-## Verification
-
-Inspect recent pane output:
-
-```bash
-tmux capture-pane -t "$WINDOW" -p -S -120
-```
-
-List windows:
-
-```bash
-tmux list-windows
-```
-
-Inspect the active command and cwd:
-
-```bash
-tmux list-panes -t "$WINDOW" -F '#{pane_id} #{pane_current_command} #{pane_current_path} #{pane_active}'
-```
-
-Every worker should show:
-
-- the intended agent binary and effort level,
-- active `/goal` confirmation,
-- `SCOREBENCH_URL` and its own `SCOREBENCH_RUN_TOKEN` in the process environment,
-- no access to sibling run tokens or connector credentials.
-
-## Post-launch Harness Follow-up
-
-Do not stop after tmux windows are created. The coordinator is responsible for
-making sure each worker is actually submitting through Harness and not silently
-erroring.
-
-Keep the manifest from `scorebench admin launch --json` or from the generated
-`manifest.json`. For each job, use only that job's scoped token when checking
-its run:
-
-```bash
-SCOREBENCH_URL="<manifest harness_url>"
-SCOREBENCH_RUN_TOKEN="<job token>"
-
-env SCOREBENCH_URL="$SCOREBENCH_URL" SCOREBENCH_RUN_TOKEN="$SCOREBENCH_RUN_TOKEN" scorebench context
-env SCOREBENCH_URL="$SCOREBENCH_URL" SCOREBENCH_RUN_TOKEN="$SCOREBENCH_RUN_TOKEN" scorebench run current
-env SCOREBENCH_URL="$SCOREBENCH_URL" SCOREBENCH_RUN_TOKEN="$SCOREBENCH_RUN_TOKEN" scorebench history
-env SCOREBENCH_URL="$SCOREBENCH_URL" SCOREBENCH_RUN_TOKEN="$SCOREBENCH_RUN_TOKEN" scorebench best
-```
-
-Expected healthy signs:
-
-- `scorebench context` shows the intended connector, exercise, credential profile,
-  and run id.
-- the worker pane shows a successful `scorebench run ping --event start` or
-  `scorebench run ping --event resume` before the first `scorebench submit`.
-- `scorebench run current` shows the active run.
-- `scorebench history` eventually shows candidate rows for that run.
-- `scorebench best` updates after scored submissions.
-
-If a candidate is pending/submitted/checking, refresh it with the same scoped
-token instead of resubmitting:
-
-```bash
-env SCOREBENCH_URL="$SCOREBENCH_URL" SCOREBENCH_RUN_TOKEN="$SCOREBENCH_RUN_TOKEN" scorebench refresh
-```
-
-Repeat refresh until the candidate reaches a terminal scored or failed state.
-Some connectors take 5-10 minutes; this is a reason to keep following up, not a
-reason to drop the run.
-
-Investigate immediately when:
-
-- a worker has no `history` rows after the expected bootstrap period,
-- `history` shows failed, errored, or rejected submissions,
-- `refresh` keeps returning missing connector ids, stale pending state, or
-  harness errors,
-- the pane output shows token-accounting, CLI bootstrap, login, scope, or
-  connector errors.
-
-For each issue, capture both sides:
-
-```bash
-tmux capture-pane -t "$WINDOW" -p -S -240
-env SCOREBENCH_URL="$SCOREBENCH_URL" SCOREBENCH_RUN_TOKEN="$SCOREBENCH_RUN_TOKEN" scorebench history
-env SCOREBENCH_URL="$SCOREBENCH_URL" SCOREBENCH_RUN_TOKEN="$SCOREBENCH_RUN_TOKEN" scorebench refresh
-```
-
-Preserve exact error text and any `trace_id`. A coordinator report should say
-which runs submitted, which scored, which are pending, and which are blocked or
-erroring. Never report a parallel launch as successful based only on tmux window
-creation.
-
-## Safety
-
-Put safety constraints directly in the goal:
-
-```text
-Do not read secrets or .env files.
-Do not submit outside Scorebench.
-Do not deploy anything.
-Do not use exploits.
-Only make changes needed for the assigned exercise.
-```
-
-If the agent should make changes, say what changes are allowed. If a change or
-submission requires confirmation, put that in the goal text too.
+Use [tmux watchers](tmux-watchers.md) for durable recovery and progress
+monitoring.

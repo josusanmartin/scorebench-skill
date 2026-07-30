@@ -4,6 +4,16 @@ Use this only when the operator explicitly requests isolated, reproducible
 workers: a fresh filesystem per run, no prior attempts, no private code, and
 agent CLIs plus the Scorebench skill preinstalled.
 
+## Contents
+
+- [Build the image](#build-the-image)
+- [Verify image cleanliness](#verify-image-cleanliness)
+- [Prepare model authentication](#prepare-model-authentication)
+- [Create fresh lane state](#create-fresh-lane-state)
+- [Launch one worker per run](#launch-one-worker-per-run)
+- [Verify isolation](#verify-isolation)
+- [Recover and tear down](#recover-and-tear-down)
+
 ## Build The Image
 
 Build from a fresh checkout of this public skill repository. The Dockerfile
@@ -50,53 +60,112 @@ For another deployment, replace `https://scorebench.dev` with its origin.
 Rebuild when the server CLI or skill changes. Do not copy host solution
 workspaces into the image.
 
-Verify both the CLI and skill:
+## Verify Image Cleanliness
+
+Verify the CLI/skill and confirm the image contains no prior work, credentials,
+or transcripts:
 
 ```bash
 docker run --rm scorebench-worker bash -lc '
   scorebench --help >/dev/null &&
   test -f "$HOME/.codex/skills/scorebench/SKILL.md" &&
-  test -f "$HOME/.claude/skills/scorebench/SKILL.md"
+  test -f "$HOME/.claude/skills/scorebench/SKILL.md" &&
+  test -z "$(ls -A /work)" &&
+  ! find "$HOME" -name "*.jsonl" -o -name auth.json -o -name ".credentials.json" |
+    grep -q .
 '
 ```
+
+Inspect the actual image layers when clean-room provenance matters. A failed
+check blocks any claim that the run started clean.
 
 ## Prepare Model Authentication
 
 ```bash
 claude setup-token
-mkdir -p ~/.codex-worker
 ```
 
-Place only a pre-authenticated Codex `auth.json` in `~/.codex-worker`, or inject
-`OPENAI_API_KEY` instead. A Scorebench worker needs no admin login: it receives
-one scoped `hrun_` token created in the Runs UI or with
-`scorebench admin create-run-token`.
+Prefer the resulting long-lived `CLAUDE_CODE_OAUTH_TOKEN` for parallel Claude
+lanes. Avoid copying one refreshable `.credentials.json` into multiple
+containers because refresh-token rotation can invalidate sibling lanes.
+
+For Codex, inject `OPENAI_API_KEY` or mount only one explicit pre-authenticated
+`auth.json`. Never mount a full host `.codex` or `.claude` directory.
+
+A worker needs no Scorebench admin login. It receives one scoped `hrun_` token.
+
+## Create Fresh Lane State
+
+Use unique timestamped exact names. Create one empty work volume and one empty
+provider-session volume per lane. Never share or reuse them:
+
+```text
+container:      sb-<unique-lane-id>
+work volume:    sbw-<unique-lane-id>
+session volume: sbsession-<unique-lane-id>
+```
+
+Mount provider session state at the narrow history path so the preinstalled
+skill remains visible, for example `/home/worker/.claude/projects` or
+`/home/worker/.codex/sessions`.
+
+Stage only the rendered goal, bootstrap, exact token helper wrapper, and an
+official public starter repository. Never seed old projects, transcripts,
+history, candidates, sibling volumes, or host workspaces.
 
 ## Launch One Worker Per Run
 
-```bash
-docker run --rm -it \
-  -e SCOREBENCH_URL=https://scorebench.dev/ \
-  -e SCOREBENCH_RUN_TOKEN=hrun_... \
-  -e CLAUDE_CODE_OAUTH_TOKEN=... \
-  -v "$HOME/.codex-worker/auth.json:/home/worker/.codex/auth.json:ro" \
-  scorebench-worker
+Create one mode-600 environment file outside worker workspaces:
+
+```text
+SCOREBENCH_URL=https://scorebench.dev/
+SCOREBENCH_RUN_TOKEN=hrun_...
+SCOREBENCH_RUN_ID=<exact-run-id>
+CLAUDE_CODE_OAUTH_TOKEN=...
 ```
 
-Expose only the exact Codex auth file. Do not replace the preinstalled
-`~/.codex` directory with a broad host mount because that would hide the skill.
+Create a named recoverable container; do not use `--rm` for a long-running
+lane:
 
-Inside the container, start `claude` or `codex` and use the normal worker
-workflow from `SKILL.md`. Use one container and one scoped token per run.
+```bash
+docker create \
+  --name "sb-<unique-lane-id>" \
+  --restart on-failure:10 \
+  --env-file "/coordinator/secrets/lane.env" \
+  --mount source="sbw-<unique-lane-id>",target=/work \
+  --mount source="sbsession-<unique-lane-id>",target=/home/worker/.claude/projects \
+  scorebench-worker \
+  /work/start-worker.sh
+```
 
-## Isolation Properties And Limits
+Use the corresponding narrow Codex session path for Codex workers. An explicit
+Codex `auth.json` may be mounted read-only as one file.
 
-- A new container filesystem makes prior attempts unreachable.
-- No GitHub or SSH credentials are baked in.
-- Connector credentials never enter the worker.
-- The scoped token limits Scorebench reads and writes to that run.
-- Host workspaces and dotfiles are not mounted.
-- The skill and CLI are public build inputs, not private server source.
+Create all lane containers, then start all of them. Verify each bootstrap before
+creating tmux `docker attach` windows. An attachment to a stopped container can
+close the new window or tmux session.
+
+## Verify Isolation
+
+Before sending goals, verify:
+
+- `/work` contains only allowlisted bootstrap/goal/starter files;
+- session storage contains no old transcript;
+- `docker inspect` shows no host workspace, home, or sibling mounts;
+- the worker has one scoped token;
+- live process arguments/TUI show the requested model and effort;
+- both CLI and agent-specific Scorebench skill are readable;
+- no GitHub/SSH or connector credential is present.
 
 For hard egress controls, add a proxy/firewall allowlist for the Scorebench
 deployment, model provider APIs, and explicitly required package indexes.
+
+## Recover And Tear Down
+
+Keep the exact work/session volumes and fixed provider session ID across a lane
+restart. Require `scorebench run ping --event resume` afterward.
+
+Archive only explicitly allowed final artifacts and record final run usage.
+Then remove only exact validated batch-owned tmux session, containers, work
+volumes, and session volumes. Never use prefix globs, `docker system prune`, or
+`tmux kill-server` on a shared host.

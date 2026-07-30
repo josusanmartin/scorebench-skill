@@ -120,10 +120,13 @@ Then ping, establish exact token accounting, and submit:
 scorebench run ping --event start  # mandatory before the first submission
 scorebench run progress            # canonical submitted timing and token progress
 SCOREBENCH_TOKEN_HELPER="${CODEX_HOME:-$HOME/.codex}/skills/scorebench/scripts/token_usage.py"
+SCOREBENCH_TOKEN_STATE="/work/.scorebench-token-usage.json"
 python3 "$SCOREBENCH_TOKEN_HELPER" start \
+  --state "$SCOREBENCH_TOKEN_STATE" \
   --total-tokens <exact-session-total-at-run-start> \
   --source codex_goal
 TOKEN_FLAGS="$(python3 "$SCOREBENCH_TOKEN_HELPER" flags \
+  --state "$SCOREBENCH_TOKEN_STATE" \
   --total-tokens <exact-current-session-total> \
   --source codex_goal)"
 scorebench submit submission.py $TOKEN_FLAGS
@@ -132,7 +135,7 @@ scorebench best
 scorebench history
 ```
 
-Three hard rules for workers:
+Four hard rules for workers:
 
 - **Ping before submitting.** `scorebench run ping --event start` (or
   `--event resume` for resumed sessions) is mandatory even when the token is
@@ -142,6 +145,9 @@ Three hard rules for workers:
 - **Use exact run-relative tokens.** Establish a baseline from the current
   session, then use the bundled helper to generate submission flags. Never use
   an estimate, account-wide usage, or an `agent_claim`.
+- **Submit a protective baseline first.** Create, test, and submit the simplest
+  correct candidate in the first work cycle, then optimize in bounded
+  increments.
 - **Never call the venue directly.** Connector credentials stay in the
   harness. Workers must not call Tensara, HighLoad, CPU.mode, GPU Mode /
   Popcorn, Paradigm Puzzles, or GitHub themselves — use `scorebench leaderboard`,
@@ -158,8 +164,8 @@ fields use nanoseconds. Secret case bodies are never returned. Use
 
 ## CLI bootstrap
 
-If `scorebench` is not on `PATH`, install it straight from the deployment (no
-repository access needed):
+If `scorebench` is missing or lacks prompt-bound tokens or `run progress`,
+install it straight from the deployment (no repository access needed):
 
 ```bash
 curl -fsSL https://scorebench.dev/install.sh | bash
@@ -220,8 +226,8 @@ scorebench refresh
 Inspect each pane and confirm the worker ran `scorebench run ping --event start`
 (or `--event resume`) before submitting, and keep checking until every worker
 has terminal scored or failed submissions. The full follow-up checklist is in
-`skills/scorebench/SKILL.md`; long-running tmux `/goal` sessions are covered in
-`skills/scorebench/references/tmux-goal-sessions.md`.
+`skills/scorebench/references/coordinator-runs.md`; long-running tmux `/goal`
+sessions are covered in `skills/scorebench/references/tmux-goal-sessions.md`.
 
 Long-running supervisors must use each container's scoped `scorebench run
 progress` response. They must not parse dashboard HTML, use `scorebench best`
@@ -244,15 +250,17 @@ active run metadata onto each candidate automatically.
 ## Repository layout
 
 ```text
-skills/scorebench/SKILL.md                         # core agent workflow and hard gates
+skills/scorebench/SKILL.md                         # concise contract and workflow router
 skills/scorebench/agents/openai.yaml               # Codex skill UI metadata
 skills/scorebench/references/clean-room-docker.md  # isolated worker image recipe
+skills/scorebench/references/cli-and-auth.md        # CLI compatibility and coordinator login
 skills/scorebench/references/connectors.md         # connector-specific contracts
 skills/scorebench/references/coordinator-runs.md   # admin and parallel-run operations
 skills/scorebench/references/paradigm-puzzles.md   # Paradigm exercise file and status contracts
 skills/scorebench/references/tmux-goal-sessions.md # long-running tmux /goal sessions
 skills/scorebench/references/tmux-watchers.md      # recovery and active-time monitors
 skills/scorebench/references/token-accounting.md   # exact run-relative usage
+skills/scorebench/references/worker-workflow.md     # one scoped run from bootstrap to final usage
 skills/scorebench/scripts/install_scorebench_cli.sh # CLI bootstrap (hosted installer + fallback)
 skills/scorebench/scripts/scorebench_watch.py      # durable worker monitors
 skills/scorebench/scripts/token_usage.py           # run-relative token accounting

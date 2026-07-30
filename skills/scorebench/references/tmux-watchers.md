@@ -1,48 +1,48 @@
 # Durable tmux Worker Watchers
 
-Use this reference for long-running, isolated ScoreBench workers that must:
+Use the bundled watcher for isolated long-running workers that must recover
+attachments/processes and continue to a submitted Scorebench active-time
+target. Run recovery and progress modes in separate tmux windows.
 
-- recover a dead tmux attachment or stopped worker process,
-- resume `/goal` after a transient capacity block,
-- continue until a submitted ScoreBench active-time target is reached, and
-- report the latest submitted token total while they run.
+## Contents
 
-The recovery watcher and active-time watcher are separate processes. Run each
-in its own tmux window so an outage or parsing failure in one cannot disable the
-other.
+- [Timing and marker contract](#timing-and-marker-contract)
+- [Configuration](#configuration)
+- [Launch and validate](#launch-and-validate)
+- [Recovery behavior](#recovery-behavior)
+- [Progress behavior](#progress-behavior)
+- [Authentication and liveness limits](#authentication-and-liveness-limits)
+- [Coordinator verification](#coordinator-verification)
 
-## Timing Rule
+## Timing And Marker Contract
 
-Use `scorebench run progress` field `progress.active_seconds` as the
-active-time clock. Never stop a worker based on
-`progress.elapsed_seconds`, tmux window age, container age, ordinary wall-clock
-elapsed time, dashboard HTML, or `scorebench best`. The progress API uses the
-same canonical idle-gap heuristic as reports and measures active time at the
-latest submitted candidate, so it may lag work that has not yet been
-submitted.
+Use `scorebench run progress` field `progress.active_seconds`. Never stop from
+`progress.elapsed_seconds`, tmux/container age, wall-clock elapsed time,
+dashboard HTML, or `scorebench best`. Progress measures at the latest submitted
+candidate and can lag unsubmitted work.
 
-The active watcher creates an in-container marker after the target is reached.
-Both that marker and `GOAL_COMPLETE` are monotonic evidence: the watcher never
-deletes either file. If it observes a premature `GOAL_COMPLETE`, it logs
-`premature_complete=1 action=preserved` for operator review and does not mutate
-the worker. Put the marker contract in every worker goal:
+Both `active_marker` and `GOAL_COMPLETE` are monotonic evidence: the watcher never
+deletes either file. A premature completion marker is preserved and logged for
+operator review.
+
+Put the exact contract in every goal:
 
 ```text
 Continue until /work/SCOREBENCH_ACTIVE_TARGET_REACHED exists. Do not create
-/work/GOAL_COMPLETE before then. Base completion only on ScoreBench active time,
-never elapsed clock time. Submit periodically so the active-time and exact-token
-monitor can observe progress.
+/work/GOAL_COMPLETE before then. Base completion only on this run's submitted
+Scorebench active_seconds. Submit periodically. At target, refresh pending
+candidates, record final exact usage, verify the best valid terminal candidate,
+then create /work/GOAL_COMPLETE.
 ```
 
 ## Configuration
 
-Create a coordinator-owned JSON file outside every isolated worker. Do not put
-run tokens, connector credentials, solution paths, or sibling source code in
-this file.
+Keep coordinator-owned JSON outside worker workspaces. Do not include tokens,
+credentials, solution paths, or sibling code.
 
 ```json
 {
-  "tmux_session": "ant",
+  "tmux_session": "condition-model-high-20260730T190000Z",
   "docker_command": ["sudo", "-n", "docker"],
   "recovery_poll_seconds": 30,
   "active_poll_seconds": 120,
@@ -53,128 +53,133 @@ this file.
   "active_marker": "/work/SCOREBENCH_ACTIVE_TARGET_REACHED",
   "workers": [
     {
-      "run_id": "vliw-clean-codex-max-20260713-001",
-      "window": "v6-sol56-max",
-      "container": "sb-vliw-sol56-max-001",
-      "client": "codex",
+      "run_id": "condition-model-high-20260730T190000Z-l1",
+      "window": "condition-model-high-20260730T190000Z-l1",
+      "container": "sb-condition-model-high-20260730T190000Z-l1",
+      "client": "claude",
       "restart_command": [
-        "/absolute/path/to/v6-sol56-max/start-isolated-worker.sh"
+        "/absolute/path/to/lane1/start-worker.sh"
       ]
     }
   ]
 }
 ```
 
-Each worker needs a unique exact ScoreBench `run_id`, tmux `window`, Docker
-`container`, and `restart_command`. Supported client values are `claude`,
-`codex`, `gemini`, `grok`, and `other`. The client only controls small TUI input
-differences; it does not grant cross-run access.
+Every run ID, window, container, and restart command must be unique and exact.
+Clients are `claude`, `codex`, `gemini`, `grok`, or `other`.
 
-Every container must have a current `scorebench` CLI and its own scoped run
-token. Verify this before launching the watcher:
+Each container needs a current CLI and its own scoped token:
 
 ```bash
-docker exec sb-vliw-sol56-max-001 scorebench run progress
+docker exec <exact-container> scorebench run progress
 ```
 
-The returned `scope.run_id` and `progress.run_id` must both exactly match the
-configured worker `run_id`. Refresh an old CLI with the skill bootstrap helper
-and `SCOREBENCH_CLI_FORCE=1` before starting the watcher. The coordinator never
-reads or stores worker run tokens; the command executes inside each container.
+Both `scope.run_id` and `progress.run_id` must match the configured worker.
+Refresh old CLIs with the bootstrap helper.
 
-Legacy configs may still contain `report_url` and `enforce_active_gate`. They
-remain accepted for compatibility but are not used. In particular,
-`enforce_active_gate` never authorizes marker deletion.
+Legacy `report_url` and `enforce_active_gate` fields remain accepted but unused.
+They never authorize marker deletion.
 
-The marker path is configurable. For an existing four-hour goal that already
-uses `/work/SCOREBENCH_4H_REACHED`, set `active_marker` to that exact path in
-the watcher config and retain the same path in the worker goal.
-
-The restart command must recreate or restart only that worker's existing
-isolated environment. Clean-room workers should still follow
-`clean-room-docker.md`: fresh named volumes, no host bind mounts, one scoped run
-token, and no shared prior-attempt artifacts.
-
-Validate the file before launching anything:
+## Launch And Validate
 
 ```bash
 WATCHER="${CODEX_HOME:-$HOME/.codex}/skills/scorebench/scripts/scorebench_watch.py"
 CONFIG="/absolute/path/to/scorebench-watch.json"
+
 python3 "$WATCHER" validate --config "$CONFIG"
-```
-
-## Launch Two Watcher Windows
-
-The script logs to stdout. Use `tee` to keep each tmux window observable while
-also preserving a coordinator log:
-
-```bash
-SESSION="ant"
-LOG_DIR="/absolute/path/to/coordinator-logs"
-mkdir -p "$LOG_DIR"
-
-tmux new-window -d -t "$SESSION" -n "v6-watch" \
-  "exec python3 '$WATCHER' recovery --config '$CONFIG' 2>&1 | tee -a '$LOG_DIR/recovery.log'"
-
-tmux new-window -d -t "$SESSION" -n "v6-active" \
-  "exec python3 '$WATCHER' active --config '$CONFIG' 2>&1 | tee -a '$LOG_DIR/active.log'"
-```
-
-Attach with `tmux attach -t "$SESSION"`, then select `v6-watch` for
-process/capacity recovery or `v6-active` for active-time and token progress.
-
-## Recovery Behavior
-
-The `recovery` mode:
-
-- accepts known startup trust prompts,
-- detects capacity or usage-limit `/goal` blocks and sends `/goal resume` after
-  a cooldown,
-- reports authentication failures without attempting to bypass login,
-- reattaches a running container when only its tmux attachment died,
-- restarts the configured isolated worker when both worker and attachment died,
-  and
-- recreates a missing worker window unless `GOAL_COMPLETE` exists.
-
-It has no elapsed-time stop. It never reads report data or another worker's
-workspace.
-
-## Active-Time Behavior
-
-For each worker, `active` mode runs `scorebench run progress` inside that exact
-container. ScoreBench authenticates with the container's own run token and
-returns active time, elapsed time, working tokens, their sources, and
-measurement timestamps. The watcher rejects a response whose scope or run ID
-does not exactly match the configured worker.
-
-The watcher retains per-run high-water values for active time, elapsed time,
-and tokens. A transient regression is logged and cannot reverse a target
-decision. An existing `active_marker` remains authoritative across watcher
-restarts.
-
-Below the target, an idle worker without either marker receives a throttled
-prompt containing only its own run ID, active time, token total, and target. A
-premature `GOAL_COMPLETE` is preserved and reported rather than deleted. The
-watcher does not include sibling metrics, code, or solution details.
-
-At or above the target it creates `active_marker`. The worker remains
-responsible for finishing its current safe operation, recording final exact run
-usage with `scorebench run usage`, and exiting cleanly. A report fetch or parse
-is not part of this workflow. A progress-command failure changes no worker
-state and does not block sibling checks.
-
-## Verification
-
-Run one non-looping poll when checking a new setup:
-
-```bash
 python3 "$WATCHER" recovery --config "$CONFIG" --once
 python3 "$WATCHER" active --config "$CONFIG" --once
 ```
 
-Then inspect both watcher panes and the exact worker panes. Confirm that active
-logs contain `active=...s tokens=...`, no message references an unassigned run,
-no stop decision uses elapsed time, and each container's
-`scorebench run progress` reports its exact configured run ID. Treat any
-`premature_complete=1` or progress regression log as an operator-review event;
-the watcher deliberately preserves the evidence.
+Then launch separate windows:
+
+```bash
+tmux new-window -d -t "$SESSION" -n "sb-recovery" \
+  "exec python3 '$WATCHER' recovery --config '$CONFIG' 2>&1 | tee -a '$LOG_DIR/recovery.log'"
+
+tmux new-window -d -t "$SESSION" -n "sb-progress" \
+  "exec python3 '$WATCHER' active --config '$CONFIG' 2>&1 | tee -a '$LOG_DIR/progress.log'"
+```
+
+Every watcher subprocess starts in a fresh process group and is hard-bounded.
+On timeout, the watcher terminates and then SIGKILLs the group so one wedged
+tool cannot freeze sibling monitoring.
+
+## Recovery Behavior
+
+Recovery mode:
+
+- accepts known startup trust confirmations;
+- resumes `/goal` after capacity/usage-limit blocks and a cooldown;
+- reports authentication failures;
+- exact-matches tmux window membership before capture, input, or pane-state
+  queries;
+- reattaches a running container when only the attachment died;
+- uses the configured restart command when the container stopped;
+- leaves completed workers alone.
+
+Exact membership matters because `tmux display-message -t <missing-target>` can
+silently resolve another pane.
+
+Recovery never reads sibling workspaces and has no elapsed-time stop.
+
+## Progress Behavior
+
+For each worker, active mode runs `scorebench run progress` inside that exact
+container. It rejects any response whose token scope or run ID differs from the
+configured worker.
+
+It retains per-run high-water active time, elapsed time, and tokens. A transient
+regression cannot reverse target evidence. An existing active marker remains
+authoritative across watcher restarts.
+
+Below target, a premature completion marker is preserved and reported. An idle
+unmarked worker receives a throttled lane-only prompt. Busy detection considers
+only recent nonblank TUI status lines: stale prose containing “running” does
+not suppress recovery, while live `Working (` or `esc to interrupt` does.
+
+Every continuation prompt explicitly requires:
+
+```text
+scorebench run ping --event resume
+```
+
+At target, the watcher creates the active marker. If the worker is idle and not
+complete, it sends a throttled finalization prompt requiring pending refresh,
+best-candidate verification, `scorebench run usage`, and completion-marker
+creation. It does not interrupt a visibly busy worker.
+
+A progress failure mutates no worker and does not block sibling checks.
+
+## Authentication And Liveness Limits
+
+Recovery reports auth failure but does not copy credentials. Prefer
+`CLAUDE_CODE_OAUTH_TOKEN` for parallel Claude lanes.
+
+If a separate repair monitor is unavoidable:
+
+1. Validate the host credential with a real bounded inference request.
+2. Stop and require operator action when that probe fails.
+3. Copy only the allowlisted credential into the exact lane.
+4. Restart only that lane and enforce a cooldown.
+
+Never repair from an expired host credential.
+
+Pane text is a heuristic, not proof of inference progress. Separately monitor
+exact process arguments, process presence, frozen retry counters, and scoped
+history. Sample retry counters twice before declaring a request wedged.
+
+## Coordinator Verification
+
+Periodically confirm:
+
+- watcher logs contain only assigned run IDs;
+- every window exists by exact membership;
+- provider processes match model and effort;
+- progress logs show `active=...s tokens=...`;
+- pending candidates advance or preserve an exact error;
+- no completion decision uses elapsed time;
+- final usage and completion marker follow target finalization.
+
+Treat `premature_complete=1`, progress regression, or auth failure as an
+operator-review event; preserve the evidence.
