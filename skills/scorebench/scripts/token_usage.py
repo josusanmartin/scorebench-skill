@@ -7,7 +7,7 @@ from pathlib import Path
 from typing import Any
 
 
-DEFAULT_STATE = ".harness-token-usage.json"
+DEFAULT_STATE = "/work/.harness-token-usage.json"
 
 
 def load_state(path: Path) -> dict[str, Any]:
@@ -20,6 +20,26 @@ def load_state(path: Path) -> dict[str, Any]:
     if not isinstance(loaded, dict):
         raise SystemExit(f"invalid token usage state: {path}")
     return loaded
+
+
+def resolve_state_path(raw: str) -> Path:
+    """Return an absolute state path, refusing ambiguous relative ones.
+
+    The state file carries the run-relative token baseline. A relative path
+    follows the current working directory, so a worker that runs ``start`` from
+    one directory and ``flags`` from another silently loses its baseline and
+    then cannot submit at all, because the middleware rejects submissions
+    without a token snapshot. Fail loudly instead.
+    """
+    path = Path(raw)
+    if not path.is_absolute():
+        raise SystemExit(
+            f"--state must be an absolute path, got: {raw}\n"
+            "A relative state path follows the current working directory, which "
+            "silently loses the token baseline between invocations.\n"
+            f"Use for example: --state {Path.cwd() / path}"
+        )
+    return path
 
 
 def write_state(path: Path, state: dict[str, Any]) -> None:
@@ -166,13 +186,13 @@ def cmd_start(args: argparse.Namespace) -> int:
         "tokens_total_source": tokens_source,
         "usage_source": usage_source_for(tokens_source),
     }
-    write_state(Path(args.state), state)
+    write_state(resolve_state_path(args.state), state)
     print(json.dumps({"ok": True, **state}, indent=2, sort_keys=True))
     return 0
 
 
 def current_run_total(args: argparse.Namespace) -> tuple[dict[str, Any], int, int]:
-    state = load_state(Path(args.state))
+    state = load_state(resolve_state_path(args.state))
     baseline = state.get("baseline_total_tokens")
     if not isinstance(baseline, int):
         raise SystemExit(f"invalid baseline_total_tokens in {args.state}")

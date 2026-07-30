@@ -114,6 +114,53 @@ class TokenUsageTests(unittest.TestCase):
         self.assertIn("--usage-source claude_code", result.stdout)
         self.assertIn("--usage-confidence parsed", result.stdout)
 
+    def test_rejects_relative_state_path(self):
+        """A relative --state follows cwd and silently loses the baseline.
+
+        Because the middleware rejects submissions without a token snapshot,
+        that loss blocks every submission for the affected run.
+        """
+        result = subprocess.run(
+            [
+                sys.executable,
+                str(SCRIPT),
+                "start",
+                "--state",
+                "relative-usage.json",
+                "--total-tokens",
+                "100",
+                "--source",
+                "codex_goal",
+            ],
+            text=True,
+            capture_output=True,
+            cwd=str(self.root),
+        )
+        self.assertNotEqual(result.returncode, 0)
+        self.assertIn("--state must be an absolute path", result.stderr)
+
+    def test_absolute_state_survives_a_cwd_change(self):
+        """start and flags must agree even when run from different directories."""
+        other = self.root / "elsewhere"
+        other.mkdir()
+        subprocess.run(
+            [
+                sys.executable, str(SCRIPT), "start",
+                "--state", str(self.state),
+                "--total-tokens", "100", "--source", "codex_goal",
+            ],
+            text=True, capture_output=True, check=True, cwd=str(self.root),
+        )
+        result = subprocess.run(
+            [
+                sys.executable, str(SCRIPT), "flags",
+                "--state", str(self.state),
+                "--total-tokens", "250", "--source", "codex_goal",
+            ],
+            text=True, capture_output=True, check=True, cwd=str(other),
+        )
+        self.assertIn("--total-tokens 150", result.stdout)
+
     def test_rejects_total_below_baseline(self):
         self.run_helper("start", "--total-tokens", "100")
 

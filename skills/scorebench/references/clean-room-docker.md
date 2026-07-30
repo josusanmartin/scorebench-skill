@@ -72,6 +72,19 @@ Place only a pre-authenticated Codex `auth.json` in `~/.codex-worker`, or inject
 one scoped `hrun_` token created in the Runs UI or with
 `scorebench admin create-run-token`.
 
+Prefer `claude setup-token` over copying a refreshable OAuth credential into
+each worker. Seeding the same `~/.claude/.credentials.json` into several lanes
+makes them race at expiry: refresh-token rotation lets one lane win, and the
+losers have `expiresAt: 0` written into their credential file and stop with
+`Login expired`. A long-lived `CLAUDE_CODE_OAUTH_TOKEN` removes the refresh
+step, and with it the race.
+
+If lanes must share a refreshable credential, note that the host credential is
+itself a participant in that race. Any repair routine that copies the host
+credential into a failed lane must **verify the host credential is still valid
+first** and report that an operator must re-authenticate otherwise; copying an
+expired credential is a no-op that will loop indefinitely.
+
 ## Launch One Worker Per Run
 
 ```bash
