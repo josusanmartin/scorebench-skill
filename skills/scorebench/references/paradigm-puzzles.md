@@ -6,6 +6,14 @@ Do not ask for or use a Paradigm `pp_...` API key, browser cookie, CSRF value, o
 deployment token. ScoreBench stores the credential and is the only submission
 path.
 
+## Contents
+
+- [Start with the scoped contract](#start-with-the-scoped-contract)
+- [Candidate shape](#candidate-shape)
+- [Validation and cooldown behavior](#validation-and-cooldown-behavior)
+- [Results and refresh](#results-and-refresh)
+- [Read-only venue context](#read-only-venue-context)
+
 ## Start With The Scoped Contract
 
 ```bash

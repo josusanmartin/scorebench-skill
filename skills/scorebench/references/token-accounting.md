@@ -10,7 +10,18 @@ Use the bundled helper:
 
 ```bash
 SCOREBENCH_TOKEN_HELPER="${CODEX_HOME:-$HOME/.codex}/skills/scorebench/scripts/token_usage.py"
+SCOREBENCH_TOKEN_STATE="/work/.scorebench-token-usage.json"
 ```
+
+Use a unique absolute state path per lane. The helper's default is relative to
+the current directory; changing directories can otherwise make a valid
+baseline appear missing. Never reuse another run's state file.
+
+## Contents
+
+- [Establish the baseline](#establish-the-baseline)
+- [Before every submission](#before-every-submission)
+- [Final run usage](#final-run-usage)
 
 ## Establish The Baseline
 
@@ -21,6 +32,7 @@ Codex goal usage:
 
 ```bash
 python3 "$SCOREBENCH_TOKEN_HELPER" start \
+  --state "$SCOREBENCH_TOKEN_STATE" \
   --total-tokens <get_goal_total_tokens> \
   --source codex_goal
 ```
@@ -29,6 +41,7 @@ Codex JSONL from a supervised/noninteractive launcher:
 
 ```bash
 python3 "$SCOREBENCH_TOKEN_HELPER" start \
+  --state "$SCOREBENCH_TOKEN_STATE" \
   --codex-jsonl "$CODEX_EXEC_JSONL" \
   --source codex_exec_jsonl \
   --confidence parsed
@@ -46,6 +59,7 @@ identified JSONL transcript for the current session:
 ```bash
 export CLAUDE_CODE_JSONL=/home/.../.claude/projects/.../<session>.jsonl
 python3 "$SCOREBENCH_TOKEN_HELPER" start \
+  --state "$SCOREBENCH_TOKEN_STATE" \
   --claude-jsonl "$CLAUDE_CODE_JSONL" \
   --source claude_code_jsonl \
   --confidence parsed
@@ -96,6 +110,7 @@ Take another snapshot from the same source and generate flags:
 
 ```bash
 TOKEN_FLAGS="$(python3 "$SCOREBENCH_TOKEN_HELPER" flags \
+  --state "$SCOREBENCH_TOKEN_STATE" \
   --total-tokens <current_total_tokens> \
   --source codex_goal)"
 ```
@@ -104,6 +119,7 @@ Codex JSONL:
 
 ```bash
 TOKEN_FLAGS="$(python3 "$SCOREBENCH_TOKEN_HELPER" flags \
+  --state "$SCOREBENCH_TOKEN_STATE" \
   --codex-jsonl "$CODEX_EXEC_JSONL" \
   --source codex_exec_jsonl \
   --confidence parsed)"
@@ -113,6 +129,7 @@ Claude Code JSONL:
 
 ```bash
 TOKEN_FLAGS="$(python3 "$SCOREBENCH_TOKEN_HELPER" flags \
+  --state "$SCOREBENCH_TOKEN_STATE" \
   --claude-jsonl "$CLAUDE_CODE_JSONL" \
   --source claude_code_jsonl \
   --confidence parsed)"
@@ -141,6 +158,7 @@ source and record it:
 
 ```bash
 FINAL_TOKEN_FLAGS="$(python3 "$SCOREBENCH_TOKEN_HELPER" flags \
+  --state "$SCOREBENCH_TOKEN_STATE" \
   --total-tokens <current_total_tokens> \
   --source codex_goal)"
 scorebench run usage $FINAL_TOKEN_FLAGS

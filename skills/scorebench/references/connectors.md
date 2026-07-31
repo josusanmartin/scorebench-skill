@@ -4,6 +4,15 @@ The scoped run token fixes the connector, exercise, credential profile, and
 optional GPU. Use Scorebench for both submissions and connector-visible reads;
 never call the venue API or CLI directly.
 
+## Contents
+
+- [Shared read paths](#shared-read-paths)
+- [HighLoad](#highload)
+- [GPU Mode and Popcorn](#gpu-mode--popcorn)
+- [VLIW](#vliw)
+- [Paradigm Puzzles](#paradigm-puzzles)
+- [PR-backed connectors](#pr-backed-connectors)
+
 ## Shared Read Paths
 
 Use these commands when supported by the connector:

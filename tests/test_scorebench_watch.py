@@ -1,6 +1,9 @@
 import importlib.util
 import json
+import subprocess
+import sys
 import tempfile
+import time
 import unittest
 from pathlib import Path
 from unittest import mock
@@ -156,6 +159,18 @@ class PromptTests(unittest.TestCase):
                 self.assertTrue(WATCH.is_worker_busy(status))
         self.assertFalse(WATCH.is_worker_busy("Ready for another prompt"))
 
+    def test_completed_summary_that_says_running_is_idle(self):
+        pane = (
+            "Verification and search both running in parallel.\n"
+            "All checks passed.\n"
+            "Ready for another prompt"
+        )
+        self.assertFalse(WATCH.is_worker_busy(pane))
+
+    def test_live_recent_status_remains_busy(self):
+        pane = ("old completed output\n" * 40) + "Working (42s · esc to interrupt)"
+        self.assertTrue(WATCH.is_worker_busy(pane))
+
     def test_nudge_contains_only_assigned_identity_and_metrics(self):
         worker = WATCH.Worker(
             "run-one", "worker-one", "container-one", "grok", ("start",)
@@ -169,6 +184,38 @@ class PromptTests(unittest.TestCase):
         self.assertNotIn("run-two", prompt)
         self.assertIn("/work/SCOREBENCH_4H_REACHED", prompt)
         self.assertIn("Never use elapsed time", prompt)
+        self.assertIn("scorebench run ping --event resume", prompt)
+
+    def test_finalization_prompt_requires_usage_and_completion(self):
+        worker = WATCH.Worker(
+            "run-one", "worker-one", "container-one", "claude", ("start",)
+        )
+        prompt = WATCH.finalize_text(
+            worker,
+            14400.0,
+            9000.0,
+            "/work/SCOREBENCH_4H_REACHED",
+            "/work/GOAL_COMPLETE",
+        )
+        self.assertIn("run-one", prompt)
+        self.assertIn("scorebench run usage", prompt)
+        self.assertIn("/work/SCOREBENCH_4H_REACHED", prompt)
+        self.assertIn("/work/GOAL_COMPLETE", prompt)
+        self.assertIn("scorebench run ping --event resume", prompt)
+
+
+class CommandTests(unittest.TestCase):
+    def test_run_command_hard_bounds_a_wedged_process(self):
+        started = time.monotonic()
+        result = WATCH.run_command(
+            (sys.executable, "-c", "import time; time.sleep(30)"),
+            timeout=0.05,
+        )
+        elapsed = time.monotonic() - started
+
+        self.assertEqual(result.returncode, 124)
+        self.assertIn("command timed out", result.stderr)
+        self.assertLess(elapsed, 3)
 
 
 class SupervisorTests(unittest.TestCase):
@@ -288,11 +335,12 @@ class SupervisorTests(unittest.TestCase):
         supervisor.active_once()
         self.assertEqual(supervisor.nudged, [("run-one", 600, 5000)])
 
-    def test_active_target_sets_marker_without_nudging(self):
+    def test_active_target_sets_marker_and_finalizes_idle_worker(self):
         class FakeSupervisor(WATCH.Supervisor):
             def __init__(self, config):
                 super().__init__(config)
                 self.markers = []
+                self.finalized = []
 
             def worker_progress(self, worker):
                 return SupervisorTests.progress(
@@ -306,8 +354,11 @@ class SupervisorTests(unittest.TestCase):
                 self.markers.append((worker.run_id, marker))
                 return True
 
-            def nudge(self, worker, active, tokens):
-                raise AssertionError("target-reached worker must not be nudged")
+            def capture_pane(self, worker, history=120):
+                return "Ready for another prompt"
+
+            def finalize(self, worker, active, tokens):
+                self.finalized.append((worker.run_id, active, tokens))
 
         supervisor = FakeSupervisor(self.config())
         supervisor.active_once()
@@ -316,6 +367,29 @@ class SupervisorTests(unittest.TestCase):
             supervisor.markers,
             [("run-one", "/work/SCOREBENCH_4H_REACHED")],
         )
+        self.assertEqual(supervisor.finalized, [("run-one", 14400, 9000)])
+
+    def test_active_target_does_not_interrupt_busy_worker(self):
+        class FakeSupervisor(WATCH.Supervisor):
+            def worker_progress(self, worker):
+                return SupervisorTests.progress(
+                    active=14400, elapsed=15000, tokens=9000
+                )
+
+            def marker_exists(self, worker, marker):
+                return False
+
+            def set_marker(self, worker, marker):
+                return True
+
+            def capture_pane(self, worker, history=120):
+                return "Working (42s · esc to interrupt)"
+
+            def finalize(self, worker, active, tokens):
+                raise AssertionError("busy worker must not be interrupted")
+
+        supervisor = FakeSupervisor(self.config())
+        supervisor.active_once()
 
     def test_existing_target_marker_survives_metric_regression(self):
         class FakeSupervisor(WATCH.Supervisor):
@@ -323,7 +397,10 @@ class SupervisorTests(unittest.TestCase):
                 return SupervisorTests.progress(active=100, elapsed=200, tokens=50)
 
             def marker_exists(self, worker, marker):
-                return marker == self.config.active_marker
+                return marker in (
+                    self.config.active_marker,
+                    self.config.completion_marker,
+                )
 
             def nudge(self, worker, active, tokens):
                 raise AssertionError("marked worker must not be nudged")
@@ -419,6 +496,32 @@ class SupervisorTests(unittest.TestCase):
             supervisor.created,
             [("run-one", ("docker", "attach", "container-one"))],
         )
+
+    def test_pane_state_requires_exact_window_membership(self):
+        class FakeSupervisor(WATCH.Supervisor):
+            def tmux(self, *args):
+                if args[0] == "list-windows":
+                    return subprocess.CompletedProcess(
+                        args, 0, "worker-one-copy\nother\n", ""
+                    )
+                raise AssertionError("display-message must not use a missing target")
+
+        supervisor = FakeSupervisor(self.config())
+        self.assertIsNone(supervisor.pane_state(self.config().workers[0]))
+
+    def test_pane_state_reads_an_exact_existing_window(self):
+        class FakeSupervisor(WATCH.Supervisor):
+            def tmux(self, *args):
+                if args[0] == "list-windows":
+                    return subprocess.CompletedProcess(
+                        args, 0, "worker-one\nother\n", ""
+                    )
+                if args[0] == "display-message":
+                    return subprocess.CompletedProcess(args, 0, "0\n", "")
+                raise AssertionError(f"unexpected tmux command: {args}")
+
+        supervisor = FakeSupervisor(self.config())
+        self.assertEqual(supervisor.pane_state(self.config().workers[0]), "0")
 
 
 if __name__ == "__main__":

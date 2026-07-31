@@ -1,159 +1,274 @@
 # Coordinator Runs
 
-Read this reference only when acting as a human operator or coordinator. A
-worker that already has `SCOREBENCH_RUN_TOKEN` must not use admin credentials.
+Use this reference when creating scoped tokens or supervising multiple workers.
+A coordinator orchestrates and reports; it does not solve for a lane, copy
+candidates between lanes, or submit on a worker's behalf.
 
-## Admin Session
+## Contents
 
-Browser login and account/session management live at:
+- [Preflight](#preflight)
+- [Define identities and conditions](#define-identities-and-conditions)
+- [Render goals before tokens](#render-goals-before-tokens)
+- [Mint scoped tokens safely](#mint-scoped-tokens-safely)
+- [Validate provider authentication](#validate-provider-authentication)
+- [Launch in dependency order](#launch-in-dependency-order)
+- [Verify the actual runtime](#verify-the-actual-runtime)
+- [Monitor authoritative state](#monitor-authoritative-state)
+- [Repair safely](#repair-safely)
+- [Report and tear down](#report-and-tear-down)
+
+## Preflight
+
+Before creating server state:
+
+1. Read [CLI and authentication](cli-and-auth.md), upgrade the CLI, and verify
+   prompt-bound token creation plus `scorebench run progress`.
+2. Run `scorebench admin whoami` and verify the intended account/profile.
+3. Verify `docker`, `tmux`, the selected agent CLI, and required GPU.
+4. Verify the Scorebench skill exists inside the actual worker image or state
+   volume. `--skills scorebench` is metadata, not an installer.
+5. Verify target run IDs, containers, volumes, tmux session, and windows do not
+   exist.
+6. Resolve the actual provider model identifier and supported effort value.
+
+Treat `scorebench admin launch --dry-run` as mutating: it creates run keys and
+prompt files but skips tmux. Use local help and file/identifier validation
+before the first token-creating command. Do not repeat a dry run with the same
+run IDs merely to test shape.
+
+## Define Identities And Conditions
+
+Use a batch timestamp and lane suffix across every resource:
 
 ```text
-https://scorebench.dev/ui/login
-https://scorebench.dev/ui/account
+<condition>-<model>-<effort>-<UTC timestamp>-l<N>
 ```
 
-For the CLI:
+Use the same exact identity for the Scorebench run, container, volumes, tmux
+window, logs, and lane files, adding only safe type prefixes. Timestamping
+prevents concurrent same-model/effort batches from colliding.
 
-```bash
-scorebench admin login --url https://scorebench.dev/ --username <username>
-scorebench admin whoami
+Record:
+
+- connector, credential profile, and exercise;
+- model and effort;
+- autonomous, steered, or mixed operation;
+- solving skills actually used;
+- strategy, hypothesis, lane, and batch timestamp;
+- one GPU, when applicable;
+- requested `progress.active_seconds` target.
+
+For a no-solving-skill condition use `--skills scorebench`. The worker still
+uses Scorebench for lifecycle and submission, but must not load an optimization
+skill.
+
+## Render Goals Before Tokens
+
+Render complete lane-specific goals first because every token must store exact
+`original_prompt` text. Keep immutable rendered files in a coordinator-owned
+directory and use one per lane.
+
+Every goal must:
+
+- name exact run ID, lane, model, effort, autonomy, and solving skills;
+- require context, exercise, current run, start/resume ping, and exact token
+  baseline before optimization;
+- require a correct protective baseline in the first work cycle;
+- require bounded iterations, official correctness checks, periodic
+  submissions, and refresh of pending candidates;
+- forbid direct venue access, sibling inspection, credential access, prior
+  artifacts, and exploit classes;
+- define the active/completion marker contract when watchers enforce a target;
+- require final usage and best-candidate verification before completion.
+
+Use explicit baseline language:
+
+```text
+Create, test, and submit the simplest correct protective baseline before
+extended design. Keep responses bounded. Then optimize in small verified
+increments and submit after meaningful improvements.
 ```
 
-The login command opens or prints a browser authorization URL. Over SSH, add
-`--no-browser` and open the URL locally. For supervised automation only, pass a
-password through stdin:
+The published exercise, pinned generator, and original prompt together define
+the correctness contract. Allow specialization to documented generator
+properties unless the prompt is stricter. Add this boundary when absent:
 
-```bash
-printf '%s\n' "$SCOREBENCH_ADMIN_PASSWORD" | scorebench admin login \
-  --url https://scorebench.dev/ \
-  --username <username> \
-  --password-stdin
+```text
+Do not use exploits. Do not hardcode exact benchmark instances, memoize or
+cache outputs for repeated venue inputs, key off pointer identity, reuse stale
+outputs, detect hidden tests, skip required work, or bypass intended semantics.
+Invalidate any submitted candidate later found invalid or exploitive.
 ```
 
-Use `--profile <name>` on login, whoami, and logout when managing more than one
-deployment. The local admin profile is stored under
-`~/.config/harness/cli.json`.
+For long instructions, stage the full text at a worker-local path such as
+`/work/TMUX_GOAL` and send a short `/goal` command to read it. Never put tokens
+in a goal.
 
-Never give a worker the admin profile, password, browser cookie, or that config
-file. Give each worker only its own scoped run token.
+## Mint Scoped Tokens Safely
 
-## Before Creating Runs
-
-Install and load the Scorebench skill in every worker environment first,
-including clean Docker environments. Installing the CLI is separate, and
-`--skills scorebench` records metadata rather than installing the skill.
-
-Preserve the complete original assignment. Prefer files for nontrivial text:
+Create one distinct token per lane after all goals exist:
 
 ```bash
 scorebench admin create-run-token \
   --connector <connector> \
-  --credential <profile> \
+  --credential <credential-profile> \
   --exercise <exercise> \
-  --run-id <run-id> \
-  --prompt-file /absolute/path/to/original-prompt.md \
+  --run-id "<unique-lane-id>" \
+  --run-name "<unique-lane-id>" \
+  --prompt-file "<absolute-rendered-goal-path>" \
+  --strategy "<condition>" \
+  --hypothesis "<hypothesis>" \
+  --notes "<batch and lane>" \
   --skills scorebench \
-  --model <model> \
-  --effort <effort> \
-  --autonomy autonomous
+  --model <actual-model> \
+  --effort <actual-effort> \
+  --autonomy autonomous \
+  --json > "<coordinator-secret-dir>/lane<N>.json"
 ```
 
-`--prompt` or `--prompt-file` is required by `create-run-token`; the exact text
-is stored on the run and shown in the dashboard. Do not replace it with a
-summary. Omit `--credential` for credentialless connectors such as `vliw`.
+Omit `--credential` for credentialless connectors such as `vliw`. Add solving
+skills and GPU only when used. Treat server-returned fields, including a
+normalized credential profile, as authoritative.
 
-Every worker assignment must include an explicit no-exploit boundary. Append
-this text when the user has not already supplied an equivalent requirement:
+Keep token JSON/manifests outside worker workspaces. Use a mode-700 directory
+and mode-600 files. Never print raw manifests or prompt files; redact tokens
+before summaries.
 
-```text
-Do not use exploits. Solve the full input domain documented by the exercise and
-pinned generator. Specialization to explicitly guaranteed domain properties is
-allowed unless this run's prompt adds a stricter requirement. Do not hardcode
-exact benchmark instances, memoize or cache outputs for repeated venue inputs,
-key off pointer identity, reuse stale outputs, detect hidden tests, skip required
-work, or bypass the intended problem semantics. If any submitted candidate is
-later found exploity or invalid, immediately run `scorebench invalidate
-<candidate_id> --reason "..."`
-```
+The CLI/server may normalize one terminal newline from `--prompt-file`. When
+verifying stored `original_prompt`, normalize only that terminal line ending on
+both sides. Do not ignore internal whitespace or compare a different template.
 
-The published exercise, pinned generator, and original prompt together define
-the contract. A documented fixed property is eligible for specialization; an
-extra restriction in the original prompt remains binding.
+If token creation stops mid-batch, validate every existing token against exact
+run ID and normalized prompt, preserve valid tokens, and create only missing
+lanes.
 
-## Launching Workers
+`scorebench admin launch` can create multiple tokens and prompt files. Use its
+JSON manifest as secret material. Persistent `/goal` or custom-container runs
+must also follow [tmux goal sessions](tmux-goal-sessions.md).
 
-Use `scorebench admin launch` when creating parallel scoped runs:
+## Validate Provider Authentication
+
+An auth-status command proves credentials exist, not that inference works.
+Before launch, make one noninteractive bounded inference request with the exact
+model and auth mechanism. Require the expected small response.
+
+Run probes in a fresh process group. On timeout, terminate and then SIGKILL the
+entire group so wedged descendants cannot survive.
+
+For parallel Claude Code lanes, prefer:
 
 ```bash
-scorebench admin launch \
-  --connector local_tensara \
-  --credential skill-research \
-  --exercise leaky-relu \
-  --count 4 \
-  --run-prefix no-skill- \
-  --skills scorebench \
-  --model gpt-5-codex \
-  --effort high \
-  --autonomy autonomous \
-  --gpu RTX5090 \
-  --goal-file /absolute/path/to/goal.md \
-  --agent-command codex
+claude setup-token
 ```
 
-Use `--dry-run --json` first for a new launch shape. `admin launch` stores the
-complete assembled goal and additional prompt as the run's original prompt.
-Use `--goal-file` and `--prompt-file` for long text so shell quoting cannot
-truncate or alter it.
+Inject the long-lived `CLAUDE_CODE_OAUTH_TOKEN` through each lane's mode-600
+environment file. Do not put it in command arguments, goals, or logs.
 
-Run metadata describes the experimental condition:
+Copying one refreshable `.credentials.json` into several lanes creates a
+refresh-token rotation race. Avoid shared refreshable OAuth state. If
+unavoidable, use lane-private auth volumes and a guarded repair monitor:
 
-- `--skills` lists skills actually used; always include `scorebench`.
-- `--model` and `--effort` name the actual runtime configuration.
-- `--autonomy` is `autonomous`, `steered`, or `mixed`.
-- `--gpu` pins a GPU-backed run to one device. Omit it for CPU-only connectors.
-- `--strategy`, `--hypothesis`, and `--notes` describe the treatment.
+1. Validate the host credential with a real bounded inference request.
+2. If it fails, stop repairs and report `OPERATOR ACTION REQUIRED`.
+3. Otherwise copy only the allowlisted credential into the exact lane.
+4. Restart only that lane and enforce a cooldown.
 
-For the credentialless `vliw` connector, omit `--credential`; Scorebench binds
-the run to its `main` profile. Match the model and effort in both run metadata
-and the launched agent command.
+Repeatedly copying an expired host credential cannot recover a worker.
 
-Passing a prompt to `codex` or `claude` is not equivalent to a persistent
-`/goal` session. For long-running tmux goals, read
-`tmux-goal-sessions.md` and send `/goal ...` to the interactive TUI. When
-workers must recover from capacity/process interruptions or continue to an
-active-time target, also read `tmux-watchers.md`.
+## Launch In Dependency Order
 
-For clean-room Docker workers, read `clean-room-docker.md`. Keep independent
-workspaces and tokens; never mount prior solution artifacts into a clean run.
+For isolated batches, read [Clean-room Docker](clean-room-docker.md).
 
-## Required Follow-up
+1. Create and verify fresh lane-specific work and agent-state volumes.
+2. Seed only allowlisted files, installed skills, bootstrap, token helper, and
+   staged goal.
+3. Create/start every container.
+4. Verify each container is running and bootstrap-ready.
+5. Create the tmux session and one exact attachment window per running
+   container.
+6. Verify model, effort, session identity, and permission/autonomy flags.
+7. Send the short staged-goal command.
+8. Verify `/goal`, context, run, ping, token baseline, and first candidate.
+9. Start recovery and progress watchers in separate windows.
 
-A created token or tmux window is not evidence that a worker is operating.
-Keep the JSON launch output or generated manifest, then verify every job:
+Attaching before a container runs can close the tmux window or newly created
+session when `docker attach` fails.
 
-1. Inspect the pane and confirm the agent loaded this skill.
-2. Confirm it ran `scorebench context`, `scorebench exercise`, and
-   `scorebench run current` or `scorebench run start`.
-3. Confirm a successful `scorebench run ping --event start` or `--event resume`
-   happened before any submission.
-4. Query each job with only that job's token:
+## Verify The Actual Runtime
 
-   ```bash
-   SCOREBENCH_URL=<url> SCOREBENCH_RUN_TOKEN=<token> scorebench context
-   SCOREBENCH_URL=<url> SCOREBENCH_RUN_TOKEN=<token> scorebench run current
-   SCOREBENCH_URL=<url> SCOREBENCH_RUN_TOKEN=<token> scorebench history
-   SCOREBENCH_URL=<url> SCOREBENCH_RUN_TOKEN=<token> scorebench best
-   ```
+Run metadata describes intent; it does not configure the provider. Verify:
 
-5. If history stays empty past bootstrap, inspect and nudge the matching pane.
-6. Refresh pending candidates with that worker's token until terminal.
-7. Preserve exact errors and `trace_id` values for failed or rejected runs.
+- exact process arguments in each container or host process;
+- TUI header model and effort;
+- requested permission/autonomy mode;
+- fixed lane-specific provider session ID across restarts;
+- exactly one scoped Scorebench token per lane.
 
-Use read-only Scorebench commands for venue-visible context:
-`leaderboard`, `solutions`, `inspect-solution`, `challenge-page`, and
-`solve-form`. Never give workers connector credentials or let them call a venue
-directly.
+Do not report a model/effort condition merely because metadata names it. The
+live process must match.
 
-For long experiments, repeat these checks during the run and near its deadline.
-The final coordinator report must distinguish runs with scored submissions,
-pending submissions, terminal failures, and workers that never connected.
+## Monitor Authoritative State
+
+Launching windows is not success. Query each lane through only its scoped
+token:
+
+```bash
+SCOREBENCH_URL=<url> SCOREBENCH_RUN_TOKEN=<lane-token> scorebench context
+SCOREBENCH_URL=<url> SCOREBENCH_RUN_TOKEN=<lane-token> scorebench run current
+SCOREBENCH_URL=<url> SCOREBENCH_RUN_TOKEN=<lane-token> scorebench run progress
+SCOREBENCH_URL=<url> SCOREBENCH_RUN_TOKEN=<lane-token> scorebench history
+SCOREBENCH_URL=<url> SCOREBENCH_RUN_TOKEN=<lane-token> scorebench best
+```
+
+Use `run progress` for latest submitted active time/tokens and history for
+candidate state. Refresh every pending candidate until terminal.
+
+Watch for:
+
+- no protective baseline after the expected bootstrap interval;
+- no artifact/test activity during a long high/max-effort response;
+- pending candidates that stop changing;
+- failures, rejections, `trust.warnings`, or trace IDs;
+- authentication/capacity errors;
+- missing windows, stopped containers, dead provider processes, or frozen
+  retry counters;
+- mismatched run, prompt, model, effort, skills, or token provenance.
+
+If a lane spends its first long work cycle without an artifact, queue:
+
+```text
+Submit a working candidate now. Create the simplest correct baseline, run the
+official tests, submit it, then optimize in small bounded increments.
+```
+
+Use [tmux watchers](tmux-watchers.md) for durable recovery. Hard-bound every
+`docker`, `tmux`, provider, and Scorebench subprocess so one wedged command
+cannot disable sibling monitoring.
+
+## Repair Safely
+
+Resolve exact targets read-only before repair:
+
+- list tmux windows and exact-match the name; `tmux display-message -t` can
+  silently resolve an unknown target to another pane;
+- inspect the exact container name/state;
+- preserve monotonic active/completion markers;
+- preserve provider session ID, run token, model, and effort;
+- send `scorebench run ping --event resume` after recovery.
+
+Never copy source, transcripts, tokens, or metrics between lanes. A coordinator
+repairs infrastructure, not solutions.
+
+## Report And Tear Down
+
+Report each lane's verified runtime condition, best terminal candidate/score,
+pending/failing candidates, exact tokens/source, latest submitted
+`progress.active_seconds`, and auth/restart caveats.
+
+Before cleanup, archive only permitted final artifacts and record final usage.
+Then remove exact validated names only:
+
+- kill only the batch's tmux session, never `tmux kill-server`;
+- remove exact containers/volumes, never prefix globs;
+- never run Docker prune on a shared host;
+- verify unrelated batches remain healthy.

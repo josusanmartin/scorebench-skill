@@ -14,16 +14,28 @@ fail() {
   exit 1
 }
 
+compatible_cli() {
+  local cli="$1"
+  "$cli" admin create-run-token --help 2>&1 |
+    grep -q -- "--prompt-file" &&
+    "$cli" run progress --help >/dev/null 2>&1
+}
+
 FORCE="${SCOREBENCH_CLI_FORCE:-0}"
-if [[ "$FORCE" != "1" ]] && command -v scorebench >/dev/null 2>&1; then
-  log "scorebench already available: $(command -v scorebench)"
-  scorebench --help >/dev/null
-  exit 0
-fi
-if [[ "$FORCE" != "1" ]] && command -v harness >/dev/null 2>&1; then
-  log "legacy harness CLI already available: $(command -v harness)"
-  harness --help >/dev/null
-  exit 0
+if [[ "$FORCE" != "1" ]]; then
+  existing_cli=""
+  if command -v scorebench >/dev/null 2>&1; then
+    existing_cli="$(command -v scorebench)"
+  elif command -v harness >/dev/null 2>&1; then
+    existing_cli="$(command -v harness)"
+  fi
+  if [[ -n "$existing_cli" ]]; then
+    if compatible_cli "$existing_cli"; then
+      log "compatible Scorebench CLI already available: $existing_cli"
+      exit 0
+    fi
+    log "existing Scorebench CLI lacks prompt/progress support; upgrading: $existing_cli"
+  fi
 fi
 
 VENV_DIR="${SCOREBENCH_CLI_VENV:-$HOME/.local/share/scorebench-cli}"

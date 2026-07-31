@@ -12,7 +12,7 @@ README = ROOT / "README.md"
 class SkillContractTests(unittest.TestCase):
     def test_core_skill_stays_concise_and_has_valid_frontmatter(self):
         text = SKILL.read_text(encoding="utf-8")
-        self.assertLessEqual(len(text.splitlines()), 500)
+        self.assertLessEqual(len(text.splitlines()), 200)
         self.assertTrue(text.startswith("---\nname: scorebench\n"))
         self.assertIn("description:", text.split("---\n", 2)[1])
 
@@ -23,11 +23,20 @@ class SkillContractTests(unittest.TestCase):
 
     def test_referenced_markdown_files_exist(self):
         text = SKILL.read_text(encoding="utf-8")
-        references = set(re.findall(r"`(references/[^`]+\.md)`", text))
-        self.assertGreaterEqual(len(references), 6)
+        references = set(
+            re.findall(r"\((references/[^)#]+\.md)(?:#[^)]+)?\)", text)
+        )
+        self.assertGreaterEqual(len(references), 8)
         for relative in references:
             with self.subTest(reference=relative):
                 self.assertTrue((SKILL_DIR / relative).is_file())
+
+    def test_long_references_have_contents_navigation(self):
+        for path in sorted((SKILL_DIR / "references").glob("*.md")):
+            text = path.read_text(encoding="utf-8")
+            if len(text.splitlines()) > 100:
+                with self.subTest(reference=path.name):
+                    self.assertIn("## Contents", text)
 
     def test_worker_hard_gates_remain_in_core_skill(self):
         text = SKILL.read_text(encoding="utf-8")
@@ -67,6 +76,8 @@ class SkillContractTests(unittest.TestCase):
         self.assertLess(text.index('INSTALL_URL="${'), text.index('local_repo="${'))
         self.assertIn("SCOREBENCH_CLI_FORCE", text)
         self.assertIn("SCOREBENCH_CLI_CHECKOUT", text)
+        self.assertIn("--prompt-file", text)
+        self.assertIn("run progress --help", text)
 
     def test_clean_room_installs_current_cli_and_skill(self):
         text = (SKILL_DIR / "references" / "clean-room-docker.md").read_text(
