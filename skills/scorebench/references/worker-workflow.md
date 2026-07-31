@@ -7,6 +7,7 @@ Do not use coordinator admin credentials from a worker.
 
 - [Verify scope and establish the run](#verify-scope-and-establish-the-run)
 - [Create a trusted session timestamp](#create-a-trusted-session-timestamp)
+- [Capture the trace boundary](#capture-the-trace-boundary)
 - [Initialize exact token accounting](#initialize-exact-token-accounting)
 - [Submit a protective baseline](#submit-a-protective-baseline)
 - [Iterate and refresh](#iterate-and-refresh)
@@ -81,6 +82,25 @@ Use `scorebench run progress` for authoritative run-scoped active time, elapsed
 time, tokens, sources, and measurement timestamps. It measures at the latest
 submitted candidate and does not create a heartbeat when polled. Never parse
 dashboard HTML or treat `scorebench best` as the latest timing point.
+
+## Capture The Trace Boundary
+
+Immediately after the trusted start or resume ping, read [end-of-run
+traces](run-traces.md) and record the current session boundary:
+
+```bash
+SCOREBENCH_SKILL_DIR="${CODEX_HOME:-$HOME/.codex}/skills/scorebench"
+test -f "$SCOREBENCH_SKILL_DIR/scripts/run_trace.py" || \
+  SCOREBENCH_SKILL_DIR="$HOME/.claude/skills/scorebench"
+SCOREBENCH_TRACE_HELPER="$SCOREBENCH_SKILL_DIR/scripts/run_trace.py"
+python3 "$SCOREBENCH_TRACE_HELPER" start
+```
+
+`start` only discovers the Codex or Claude session JSONL and saves its current
+byte offset. It does not parse, tail, compress, or upload the transcript. If
+automatic discovery fails, preserve the exact error and use the explicit
+`--provider` and `--source` form documented in the trace reference when the
+runner exposes its current JSONL.
 
 ## Initialize Exact Token Accounting
 
@@ -211,8 +231,23 @@ Before exit:
 3. Confirm the best candidate is valid.
 4. Snapshot the original exact token source.
 5. Run `scorebench run usage $FINAL_TOKEN_FLAGS`.
-6. Only then create a coordinator-defined completion marker.
+6. Run `scorebench run ping --event finish --note "worker session finished"`.
+7. Resolve the helper path again, then sanitize, compress, and upload the frozen
+   session segment:
+
+```bash
+SCOREBENCH_TRACE_HELPER="${CODEX_HOME:-$HOME/.codex}/skills/scorebench/scripts/run_trace.py"
+test -f "$SCOREBENCH_TRACE_HELPER" || \
+  SCOREBENCH_TRACE_HELPER="$HOME/.claude/skills/scorebench/scripts/run_trace.py"
+python3 "$SCOREBENCH_TRACE_HELPER" finish
+```
+
+8. Only then create a coordinator-defined completion marker.
+
+The trace upload is idempotent and best effort. If it fails, keep the local
+artifact path and exact error so the same upload can be retried; never change a
+candidate or run result because trace observability failed.
 
 Report run ID, best terminal candidate and score, exact tokens/source,
-submitted Scorebench active time, and unresolved failures. Never substitute
-ordinary elapsed time for `progress.active_seconds`.
+submitted Scorebench active time, trace ID or trace error, and unresolved
+failures. Never substitute ordinary elapsed time for `progress.active_seconds`.

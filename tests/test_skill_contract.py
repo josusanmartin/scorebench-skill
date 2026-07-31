@@ -49,6 +49,9 @@ class SkillContractTests(unittest.TestCase):
             "scorebench invalidate",
             "scorebench reinstate",
             "scorebench run usage",
+            "record the trace source and byte",
+            "sanitized trace upload",
+            "A trace failure never changes",
         )
         for phrase in required:
             with self.subTest(phrase=phrase):
@@ -114,6 +117,27 @@ class SkillContractTests(unittest.TestCase):
         self.assertNotIn('"rm"', script)
         self.assertNotIn('"/best"', script)
         self.assertIn("the watcher never\ndeletes either file", reference)
+
+    def test_run_trace_is_end_only_sanitized_and_bounded(self):
+        script = (SKILL_DIR / "scripts" / "run_trace.py").read_text(
+            encoding="utf-8"
+        )
+        reference = (SKILL_DIR / "references" / "run-traces.md").read_text(
+            encoding="utf-8"
+        )
+        workflow = (SKILL_DIR / "references" / "worker-workflow.md").read_text(
+            encoding="utf-8"
+        )
+        self.assertIn('TRACE_FORMAT = "scorebench-run-trace"', script)
+        self.assertIn("DEFAULT_MAX_TRACE_BYTES = 32 * 1024 * 1024", script)
+        self.assertIn('"private_reasoning_included": False', script)
+        self.assertIn('endpoint = f"{parsed.path.rstrip(\'/\')}/run/trace"', script)
+        self.assertIn("start` only discovers", reference)
+        self.assertIn("Trace failure never changes", reference)
+        self.assertIn("Do not paste raw session JSONL", reference)
+        self.assertIn('python3 "$SCOREBENCH_TRACE_HELPER" start', workflow)
+        self.assertIn('python3 "$SCOREBENCH_TRACE_HELPER" finish', workflow)
+        self.assertIn("does not parse, tail, compress, or upload", workflow)
 
 
 if __name__ == "__main__":

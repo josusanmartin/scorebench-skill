@@ -19,6 +19,7 @@ triggered by the task:
 | --- | --- |
 | Install or upgrade the CLI; authenticate a coordinator | [CLI and authentication](references/cli-and-auth.md) |
 | Solve or resume one scoped run | [Worker workflow](references/worker-workflow.md), then [exact token accounting](references/token-accounting.md) |
+| Capture or upload the end-of-run agent trace | [End-of-run traces](references/run-traces.md), plus worker workflow |
 | Create tokens or coordinate parallel runs | [Coordinator runs](references/coordinator-runs.md), plus CLI/authentication |
 | Use connector-specific flags or interpret responses | [Connector guidance](references/connectors.md) |
 | Solve a Paradigm Puzzles exercise | [Paradigm Puzzles](references/paradigm-puzzles.md), plus connector guidance |
@@ -65,20 +66,23 @@ Apply these hard gates to every worker:
 4. Send a successful `scorebench run ping --event start` for a new worker
    session or `--event resume` for a resumed session before optimization and
    before the first submission.
-5. Every submission requires an exact, run-relative token total. Establish one
+5. Immediately after that trusted ping, record the trace source and byte
+   offset. Do all sanitization, compression, and upload after final usage and
+   the finish ping; never include private reasoning or secrets.
+6. Every submission requires an exact, run-relative token total. Establish one
    run-scoped source, snapshot it before every submission, and finish with
    `scorebench run usage`.
-6. Submit the simplest correct protective baseline in the first work cycle,
+7. Submit the simplest correct protective baseline in the first work cycle,
    then optimize in small tested increments. Refresh pending candidates instead
    of resubmitting them.
-7. Use `scorebench run progress` as the authoritative submitted timing/token
+8. Use `scorebench run progress` as the authoritative submitted timing/token
    read. Never infer latest-run timing from dashboard HTML, ordinary elapsed
    time, or `scorebench best`.
-8. Do not use an external venue CLI, API, cookie, or credential. Route every
+9. Do not use an external venue CLI, API, cookie, or credential. Route every
    submission and venue-visible read through Scorebench.
-9. Preserve exact harness errors, `trace_id`, `trust.warnings`, and immutable
-   audit evidence.
-10. Submit only legitimate general solutions. Honor the published exercise,
+10. Preserve exact harness errors, `trace_id`, `trust.warnings`, and immutable
+    audit evidence.
+11. Submit only legitimate general solutions. Honor the published exercise,
     pinned generator, and every stricter original-prompt condition.
 
 Never hardcode benchmark instances, cache exact venue outputs, key off pointer
@@ -98,12 +102,17 @@ the original.
 
 ## Minimal Worker Sequence
 
-Follow the detailed worker and accounting references:
+Follow the detailed worker, accounting, and trace references:
 
 ```text
-context -> exercise -> current/start -> ping -> token baseline
--> correct baseline -> submit -> refresh -> iterate -> final run usage
+context -> exercise -> current/start -> ping -> trace boundary -> token baseline
+-> correct baseline -> submit -> refresh -> iterate -> final usage -> finish ping
+-> sanitized trace upload
 ```
+
+Trace capture is best-effort observability. A trace failure never changes a
+candidate score, validity, status, or run completion; preserve the local
+artifact and exact error for a later retry.
 
 Do not spend a full high-effort or max-effort turn designing an ideal solution
 before creating, testing, and submitting a correct artifact.

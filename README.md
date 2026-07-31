@@ -121,6 +121,11 @@ scorebench run ping --event start  # mandatory before the first submission
 scorebench run progress            # canonical submitted timing and token progress
 SCOREBENCH_TOKEN_HELPER="${CODEX_HOME:-$HOME/.codex}/skills/scorebench/scripts/token_usage.py"
 SCOREBENCH_TOKEN_STATE="/work/.scorebench-token-usage.json"
+SCOREBENCH_SKILL_DIR="${CODEX_HOME:-$HOME/.codex}/skills/scorebench"
+test -f "$SCOREBENCH_SKILL_DIR/scripts/run_trace.py" || \
+  SCOREBENCH_SKILL_DIR="$HOME/.claude/skills/scorebench"
+SCOREBENCH_TRACE_HELPER="$SCOREBENCH_SKILL_DIR/scripts/run_trace.py"
+python3 "$SCOREBENCH_TRACE_HELPER" start # records one file offset; no background work
 python3 "$SCOREBENCH_TOKEN_HELPER" start \
   --state "$SCOREBENCH_TOKEN_STATE" \
   --total-tokens <exact-session-total-at-run-start> \
@@ -133,9 +138,16 @@ scorebench submit submission.py $TOKEN_FLAGS
 scorebench refresh                 # poll queued submissions to a terminal state
 scorebench best
 scorebench history
+FINAL_TOKEN_FLAGS="$(python3 "$SCOREBENCH_TOKEN_HELPER" flags \
+  --state "$SCOREBENCH_TOKEN_STATE" \
+  --total-tokens <exact-final-session-total> \
+  --source codex_goal)"
+scorebench run usage $FINAL_TOKEN_FLAGS
+scorebench run ping --event finish
+python3 "$SCOREBENCH_TRACE_HELPER" finish # sanitize, compress, and upload now
 ```
 
-Four hard rules for workers:
+Five hard rules for workers:
 
 - **Ping before submitting.** `scorebench run ping --event start` (or
   `--event resume` for resumed sessions) is mandatory even when the token is
@@ -153,6 +165,10 @@ Four hard rules for workers:
   Popcorn, Paradigm Puzzles, or GitHub themselves — use `scorebench leaderboard`,
   `scorebench solutions`, `scorebench inspect-solution`, `scorebench solve-form`, and
   `scorebench challenge-page` for read-only venue context.
+- **Upload traces only after the run.** The trace helper records one byte offset
+  at startup, then performs all JSONL filtering, secret redaction, compression,
+  and upload after final usage. It excludes private reasoning and never changes
+  candidate status when trace upload fails.
 
 For GPU Mode, the harness is the Popcorn proxy: `scorebench submit` and
 `scorebench refresh` return the Popcorn payload under
@@ -257,12 +273,14 @@ skills/scorebench/references/cli-and-auth.md        # CLI compatibility and coor
 skills/scorebench/references/connectors.md         # connector-specific contracts
 skills/scorebench/references/coordinator-runs.md   # admin and parallel-run operations
 skills/scorebench/references/paradigm-puzzles.md   # Paradigm exercise file and status contracts
+skills/scorebench/references/run-traces.md         # end-only sanitized trace capture
 skills/scorebench/references/tmux-goal-sessions.md # long-running tmux /goal sessions
 skills/scorebench/references/tmux-watchers.md      # recovery and active-time monitors
 skills/scorebench/references/token-accounting.md   # exact run-relative usage
 skills/scorebench/references/worker-workflow.md     # one scoped run from bootstrap to final usage
 skills/scorebench/scripts/install_scorebench_cli.sh # CLI bootstrap (hosted installer + fallback)
 skills/scorebench/scripts/scorebench_watch.py      # durable worker monitors
+skills/scorebench/scripts/run_trace.py             # post-run trace sanitizer/uploader
 skills/scorebench/scripts/token_usage.py           # run-relative token accounting
 ```
 
