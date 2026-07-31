@@ -3,18 +3,26 @@ from __future__ import annotations
 
 import argparse
 import json
+import os
 from pathlib import Path
 from typing import Any
 
 
-DEFAULT_STATE = "/work/.harness-token-usage.json"
+# No built-in default: any fixed value is either relative (and silently follows
+# the working directory) or hardcodes one environment's layout. Workers set
+# SCOREBENCH_TOKEN_STATE once; everyone else passes --state explicitly.
+STATE_ENV_VAR = "SCOREBENCH_TOKEN_STATE"
+DEFAULT_STATE = os.environ.get(STATE_ENV_VAR, "")
 
 
 def load_state(path: Path) -> dict[str, Any]:
     if not path.exists():
         raise SystemExit(
-            f"token usage baseline missing: run this first after the harness run is established:\n"
-            f"  {Path(__file__).name} start --total-tokens <current_exact_tokens> --source <source>"
+            f"token usage baseline missing at {path}\n"
+            "Run this first after the harness run is established, with the same "
+            "--state path used for every later invocation:\n"
+            f"  {Path(__file__).name} start --state {path} "
+            "--total-tokens <current_exact_tokens> --source <source>"
         )
     loaded = json.loads(path.read_text(encoding="utf-8"))
     if not isinstance(loaded, dict):
@@ -31,13 +39,24 @@ def resolve_state_path(raw: str) -> Path:
     then cannot submit at all, because the middleware rejects submissions
     without a token snapshot. Fail loudly instead.
     """
+    if not raw:
+        raise SystemExit(
+            "no token state path: pass --state /absolute/path.json or set "
+            f"{STATE_ENV_VAR}.\n"
+            "The state file carries this run's token baseline and must be the "
+            "same absolute path for every invocation of the run."
+        )
     path = Path(raw)
     if not path.is_absolute():
+        # Deliberately not suggesting the cwd-resolved form: the current
+        # directory is the variable that causes this bug, so echoing it back
+        # would recommend a path that is only correct from here.
         raise SystemExit(
             f"--state must be an absolute path, got: {raw}\n"
             "A relative state path follows the current working directory, which "
             "silently loses the token baseline between invocations.\n"
-            f"Use for example: --state {Path.cwd() / path}"
+            "Pass one absolute path and reuse it for start, status, and flags, "
+            f"or set {STATE_ENV_VAR} once for the run."
         )
     return path
 
@@ -268,7 +287,11 @@ def cmd_flags(args: argparse.Namespace) -> int:
 
 
 def add_total_args(parser: argparse.ArgumentParser) -> None:
-    parser.add_argument("--state", default=DEFAULT_STATE, help=f"state file; default {DEFAULT_STATE}")
+    parser.add_argument(
+        "--state",
+        default=DEFAULT_STATE,
+        help=f"absolute state file path; defaults to ${STATE_ENV_VAR} ({DEFAULT_STATE or 'unset'})",
+    )
     parser.add_argument("--total-tokens", type=int, help="current exact cumulative token count from the runner")
     parser.add_argument("--codex-jsonl", help="Codex exec --json event log to parse")
     parser.add_argument("--claude-jsonl", help="current Claude Code session JSONL transcript to parse")

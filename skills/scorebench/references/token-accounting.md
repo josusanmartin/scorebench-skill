@@ -78,7 +78,17 @@ token usage baseline missing: run this first after the harness run is establishe
 Because the middleware rejects submissions without a token snapshot, that lane
 cannot submit at all until the baseline is restored. Pass an absolute path
 explicitly, for example `--state /work/.harness-token-usage.json`, and keep the
-same value for `start` and `flags`.
+same value for `start`, `status`, and `flags`.
+
+There is no built-in default path. Either pass `--state` on every call or export
+`SCOREBENCH_TOKEN_STATE` once for the run:
+
+```bash
+export SCOREBENCH_TOKEN_STATE=/work/.harness-token-usage.json
+```
+
+Omitting both fails immediately rather than writing a baseline somewhere the
+next invocation will not look for it.
 
 ## Before Every Submission
 
