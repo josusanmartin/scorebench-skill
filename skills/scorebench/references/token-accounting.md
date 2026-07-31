@@ -1,10 +1,11 @@
 # Exact Token Accounting
 
-Every submission requires an exact, run-relative `--total-tokens` value. Never
-submit zero, an estimate, an account-wide usage number, or a value copied from
-another session. If no exact run-scoped source is available after one quick
-check, stop before submitting and ask for a supervised runner that exposes
-usage.
+Every submission requires an exact, run-relative `--total-tokens` value. Full
+input, output, cache-write, and cache-read counters also let Scorebench derive a
+more accurate API-equivalent cost curve. Never submit zero, an estimate, an
+account-wide usage number, or a value copied from another session. If no exact
+run-scoped source is available after one quick check, stop before submitting
+and ask for a supervised runner that exposes usage.
 
 Use the bundled helper:
 
@@ -13,9 +14,9 @@ SCOREBENCH_TOKEN_HELPER="${CODEX_HOME:-$HOME/.codex}/skills/scorebench/scripts/t
 SCOREBENCH_TOKEN_STATE="/work/.scorebench-token-usage.json"
 ```
 
-Use a unique absolute state path per lane. The helper's default is relative to
-the current directory; changing directories can otherwise make a valid
-baseline appear missing. Never reuse another run's state file.
+Use a unique absolute state path per lane. The helper has no built-in state
+path; set one absolute path once or pass it on every call. Never reuse another
+run's state file.
 
 ## Contents
 
@@ -47,8 +48,10 @@ python3 "$SCOREBENCH_TOKEN_HELPER" start \
   --confidence parsed
 ```
 
-The helper sums `input_tokens + output_tokens` from completed turns. Do not
-launch a nested `codex exec` from inside a solving agent.
+The helper sums completed-turn usage while keeping input, output, cached input,
+and reasoning-output counters separate. Cached input is excluded from the
+working-token total but retained for API cost accounting. Do not launch a
+nested `codex exec` from inside a solving agent.
 
 For a Codex TUI without `get_goal`, an exact current-session value visibly
 reported by `/status` is acceptable. Do not use `/usage`; it is account-wide.
@@ -135,9 +138,11 @@ TOKEN_FLAGS="$(python3 "$SCOREBENCH_TOKEN_HELPER" flags \
   --confidence parsed)"
 ```
 
-The helper subtracts the run-start baseline and emits `--total-tokens`,
-`--usage-source`, `--usage-confidence`, and `--tokens-total-source`. Do not
-hand-write those flags unless the helper itself is unavailable.
+The helper subtracts the run-start baseline and emits `--total-tokens`, the
+available run-relative component flags, `--usage-source`,
+`--usage-confidence`, and `--tokens-total-source`. Cache reads do not inflate
+the working-token total, but the server prices them at the model's cache-hit
+rate. Do not hand-write those flags unless the helper itself is unavailable.
 
 Use the resulting flags in the same submission call:
 
@@ -167,7 +172,8 @@ scorebench run usage $FINAL_TOKEN_FLAGS
 The JSONL forms use the same arguments as the pre-submit examples. Reports
 prefer this final run measurement over inference from the last candidate.
 
-If exact provider breakdown fields are available, they may be included:
+JSONL-backed helper invocations include exact provider breakdown fields
+automatically. For another exact source, they may be included manually:
 
 ```bash
 scorebench run usage \
@@ -182,3 +188,8 @@ scorebench run usage \
 ```
 
 Omit any unavailable breakdown. Never invent component counts.
+
+Scorebench hardcodes a dated public API price table on the server. The skill
+never guesses a price or computes invoice spend locally. Dashboard values with
+incomplete historical usage are marked as estimates; see
+<https://scorebench.dev/ui/docs/cost-accounting/>.

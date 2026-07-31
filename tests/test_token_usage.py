@@ -58,7 +58,12 @@ class TokenUsageTests(unittest.TestCase):
             json.dumps(
                 {
                     "type": "turn.completed",
-                    "usage": {"input_tokens": 10, "output_tokens": 5},
+                    "usage": {
+                        "input_tokens": 10,
+                        "output_tokens": 5,
+                        "cached_input_tokens": 100,
+                        "reasoning_output_tokens": 2,
+                    },
                 }
             )
             + "\n",
@@ -70,7 +75,12 @@ class TokenUsageTests(unittest.TestCase):
                 json.dumps(
                     {
                         "type": "turn.completed",
-                        "usage": {"input_tokens": 20, "output_tokens": 3},
+                        "usage": {
+                            "input_tokens": 20,
+                            "output_tokens": 3,
+                            "cached_input_tokens": 50,
+                            "reasoning_output_tokens": 1,
+                        },
                     }
                 )
                 + "\n"
@@ -79,6 +89,10 @@ class TokenUsageTests(unittest.TestCase):
         result = self.run_helper("flags", "--codex-jsonl", str(log))
 
         self.assertIn("--total-tokens 23", result.stdout)
+        self.assertIn("--input-tokens 20", result.stdout)
+        self.assertIn("--output-tokens 3", result.stdout)
+        self.assertIn("--cache-read-tokens 50", result.stdout)
+        self.assertIn("--reasoning-output-tokens 1", result.stdout)
         self.assertIn("--usage-confidence parsed", result.stdout)
         self.assertIn("--tokens-total-source codex_exec_jsonl", result.stdout)
 
@@ -112,8 +126,71 @@ class TokenUsageTests(unittest.TestCase):
         result = self.run_helper("flags", "--claude-jsonl", str(log))
 
         self.assertIn("--total-tokens 7", result.stdout)
+        self.assertIn("--input-tokens 3", result.stdout)
+        self.assertIn("--output-tokens 4", result.stdout)
+        self.assertIn("--cache-creation-tokens 0", result.stdout)
+        self.assertIn("--cache-read-tokens 2000", result.stdout)
         self.assertIn("--usage-source claude_code", result.stdout)
         self.assertIn("--usage-confidence parsed", result.stdout)
+
+    def test_jsonl_breakdown_defines_scorebench_working_total(self):
+        log = self.root / "codex-total.jsonl"
+        first = {
+            "type": "turn.completed",
+            "usage": {
+                "total_tokens": 115,
+                "input_tokens": 10,
+                "output_tokens": 5,
+                "cached_input_tokens": 100,
+            },
+        }
+        second = {
+            "type": "turn.completed",
+            "usage": {
+                "total_tokens": 73,
+                "input_tokens": 20,
+                "output_tokens": 3,
+                "cached_input_tokens": 50,
+            },
+        }
+        log.write_text(json.dumps(first) + "\n", encoding="utf-8")
+        self.run_helper("start", "--codex-jsonl", str(log))
+        with log.open("a", encoding="utf-8") as handle:
+            handle.write(json.dumps(second) + "\n")
+
+        result = self.run_helper("flags", "--codex-jsonl", str(log))
+
+        self.assertIn("--total-tokens 23", result.stdout)
+        self.assertIn("--cache-read-tokens 50", result.stdout)
+
+    def test_old_state_without_component_baselines_remains_compatible(self):
+        self.state.write_text(
+            json.dumps(
+                {
+                    "baseline_total_tokens": 100,
+                    "confidence": "parsed",
+                    "tokens_total_source": "codex_exec_jsonl",
+                    "usage_source": "codex_usage",
+                }
+            ),
+            encoding="utf-8",
+        )
+        log = self.root / "codex-old-state.jsonl"
+        log.write_text(
+            json.dumps(
+                {
+                    "type": "turn.completed",
+                    "usage": {"total_tokens": 145, "input_tokens": 120, "output_tokens": 25},
+                }
+            )
+            + "\n",
+            encoding="utf-8",
+        )
+
+        result = self.run_helper("flags", "--codex-jsonl", str(log))
+
+        self.assertIn("--total-tokens 45", result.stdout)
+        self.assertNotIn("--input-tokens", result.stdout)
 
     def test_rejects_relative_state_path(self):
         """A relative --state follows cwd and silently loses the baseline.

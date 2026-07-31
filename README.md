@@ -252,12 +252,13 @@ in `skills/scorebench/references/tmux-watchers.md`.
 
 ## Token accounting
 
-Dashboards compare strategies by score *per token*, so submitted totals must be
-honest. The skill ships `scripts/token_usage.py`, a helper that baselines usage
-when the run starts and emits run-relative `--total-tokens` plus provenance
-flags before each submission. It parses Codex JSONL and Claude Code session
-JSONL exactly; Claude Code cache-read tokens are excluded because they are
-repeated cached context reads, not distinct run expenditure.
+Dashboards compare strategies by score per token and per API-equivalent cost,
+so submitted usage must be honest. The skill ships `scripts/token_usage.py`, a
+helper that baselines usage when the run starts and emits run-relative working
+tokens, available input/output/cache categories, and provenance before each
+submission. It parses Codex JSONL and Claude Code session JSONL exactly. Cache
+reads are excluded from working tokens but retained for the server's model-cost
+calculation.
 
 Run identity metadata (skills, model, effort, autonomy) is run-level: set it
 once with `scorebench run start`, not on every submission — the harness copies the

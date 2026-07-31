@@ -2,6 +2,7 @@
 from __future__ import annotations
 
 import argparse
+from dataclasses import dataclass
 import json
 import os
 from pathlib import Path
@@ -13,6 +14,30 @@ from typing import Any
 # SCOREBENCH_TOKEN_STATE once; everyone else passes --state explicitly.
 STATE_ENV_VAR = "SCOREBENCH_TOKEN_STATE"
 DEFAULT_STATE = os.environ.get(STATE_ENV_VAR, "")
+COMPONENT_FIELDS = (
+    "input_tokens",
+    "output_tokens",
+    "cache_creation_tokens",
+    "cache_read_tokens",
+    "reasoning_output_tokens",
+)
+
+
+@dataclass(frozen=True)
+class UsageSnapshot:
+    total_tokens: int
+    input_tokens: int | None = None
+    output_tokens: int | None = None
+    cache_creation_tokens: int | None = None
+    cache_read_tokens: int | None = None
+    reasoning_output_tokens: int | None = None
+
+    def components(self) -> dict[str, int]:
+        return {
+            field: value
+            for field in COMPONENT_FIELDS
+            if isinstance((value := getattr(self, field)), int)
+        }
 
 
 def load_state(path: Path) -> dict[str, Any]:
@@ -66,21 +91,66 @@ def write_state(path: Path, state: dict[str, Any]) -> None:
     path.write_text(json.dumps(state, indent=2, sort_keys=True) + "\n", encoding="utf-8")
 
 
+def usage_int(usage: dict[str, Any], *keys: str) -> int | None:
+    for key in keys:
+        value = usage.get(key)
+        if isinstance(value, int) and not isinstance(value, bool) and value >= 0:
+            return value
+    return None
+
+
 def usage_total(usage: dict[str, Any]) -> int | None:
     for key in ("total_tokens", "total", "tokens_total"):
-        value = usage.get(key)
-        if isinstance(value, int):
+        value = usage_int(usage, key)
+        if value is not None:
             return value
-    input_tokens = usage.get("input_tokens", usage.get("prompt_tokens"))
-    output_tokens = usage.get("output_tokens", usage.get("completion_tokens"))
-    if isinstance(input_tokens, int) and isinstance(output_tokens, int):
+    input_tokens = usage_int(usage, "input_tokens", "prompt_tokens")
+    output_tokens = usage_int(usage, "output_tokens", "completion_tokens")
+    if input_tokens is not None and output_tokens is not None:
         return input_tokens + output_tokens
     return None
 
 
-def codex_jsonl_total(path: Path) -> int:
-    total = 0
-    seen = 0
+def usage_snapshot(usage: dict[str, Any], *, claude: bool = False) -> UsageSnapshot | None:
+    total = claude_usage_total(usage) if claude else usage_total(usage)
+    if total is None:
+        return None
+    reasoning = usage_int(usage, "reasoning_output_tokens")
+    output_details = usage.get("output_tokens_details")
+    if reasoning is None and isinstance(output_details, dict):
+        reasoning = usage_int(output_details, "reasoning_tokens")
+    return UsageSnapshot(
+        total_tokens=total,
+        input_tokens=usage_int(usage, "input_tokens", "prompt_tokens"),
+        output_tokens=usage_int(usage, "output_tokens", "completion_tokens"),
+        cache_creation_tokens=usage_int(
+            usage, "cache_creation_input_tokens", "cache_creation_tokens"
+        ),
+        cache_read_tokens=usage_int(
+            usage,
+            "cached_input_tokens",
+            "cache_read_input_tokens",
+            "cache_read_tokens",
+        ),
+        reasoning_output_tokens=reasoning,
+    )
+
+
+def aggregate_snapshots(snapshots: list[UsageSnapshot], path: Path, label: str) -> UsageSnapshot:
+    if not snapshots:
+        raise SystemExit(f"no {label} usage records found in {path}")
+    components: dict[str, int | None] = {}
+    for field in COMPONENT_FIELDS:
+        values = [getattr(snapshot, field) for snapshot in snapshots]
+        components[field] = sum(values) if all(isinstance(value, int) for value in values) else None
+    return UsageSnapshot(
+        total_tokens=sum(snapshot.total_tokens for snapshot in snapshots),
+        **components,
+    )
+
+
+def codex_jsonl_snapshot(path: Path) -> UsageSnapshot:
+    snapshots: list[UsageSnapshot] = []
     with path.open("r", encoding="utf-8") as handle:
         for line in handle:
             line = line.strip()
@@ -97,37 +167,31 @@ def codex_jsonl_total(path: Path) -> int:
             usage = event.get("usage")
             if not isinstance(usage, dict):
                 continue
-            value = usage_total(usage)
-            if value is None:
-                continue
-            total += value
-            seen += 1
-    if seen == 0:
-        raise SystemExit(f"no turn.completed usage events found in {path}")
-    return total
+            snapshot = usage_snapshot(usage)
+            if snapshot is not None:
+                snapshots.append(snapshot)
+    return aggregate_snapshots(snapshots, path, "turn.completed")
+
+
+def codex_jsonl_total(path: Path) -> int:
+    return codex_jsonl_snapshot(path).total_tokens
 
 
 def claude_usage_total(usage: dict[str, Any]) -> int | None:
-    distinct_fields = (
-        "input_tokens",
-        "output_tokens",
-        "cache_creation_input_tokens",
-        "cache_creation_tokens",
+    input_tokens = usage_int(usage, "input_tokens")
+    output_tokens = usage_int(usage, "output_tokens")
+    cache_creation_tokens = usage_int(
+        usage, "cache_creation_input_tokens", "cache_creation_tokens"
     )
-    cache_read_fields = (
-        "cache_read_input_tokens",
-        "cache_read_tokens",
-    )
-    distinct_values = [usage.get(field) for field in distinct_fields]
-    cache_read_values = [usage.get(field) for field in cache_read_fields]
-    if any(isinstance(value, int) for value in (*distinct_values, *cache_read_values)):
-        return sum(value for value in distinct_values if isinstance(value, int))
+    cache_read_tokens = usage_int(usage, "cache_read_input_tokens", "cache_read_tokens")
+    distinct_values = (input_tokens, output_tokens, cache_creation_tokens)
+    if any(value is not None for value in (*distinct_values, cache_read_tokens)):
+        return sum(value for value in distinct_values if value is not None)
     return usage_total(usage)
 
 
-def claude_jsonl_total(path: Path) -> int:
-    total = 0
-    seen = 0
+def claude_jsonl_snapshot(path: Path) -> UsageSnapshot:
+    snapshots: list[UsageSnapshot] = []
     with path.open("r", encoding="utf-8") as handle:
         for line in handle:
             line = line.strip()
@@ -147,28 +211,32 @@ def claude_jsonl_total(path: Path) -> int:
                 usage = event.get("usage")
             if not isinstance(usage, dict):
                 continue
-            value = claude_usage_total(usage)
-            if value is None:
-                continue
-            total += value
-            seen += 1
-    if seen == 0:
-        raise SystemExit(f"no Claude Code message.usage records found in {path}")
-    return total
+            snapshot = usage_snapshot(usage, claude=True)
+            if snapshot is not None:
+                snapshots.append(snapshot)
+    return aggregate_snapshots(snapshots, path, "Claude Code message.usage")
 
 
-def read_total(args: argparse.Namespace) -> int:
+def claude_jsonl_total(path: Path) -> int:
+    return claude_jsonl_snapshot(path).total_tokens
+
+
+def read_snapshot(args: argparse.Namespace) -> UsageSnapshot:
     if args.codex_jsonl and args.claude_jsonl:
         raise SystemExit("provide only one of --codex-jsonl or --claude-jsonl")
     if args.codex_jsonl:
-        return codex_jsonl_total(Path(args.codex_jsonl))
+        return codex_jsonl_snapshot(Path(args.codex_jsonl))
     if args.claude_jsonl:
-        return claude_jsonl_total(Path(args.claude_jsonl))
+        return claude_jsonl_snapshot(Path(args.claude_jsonl))
     if args.total_tokens is None:
         raise SystemExit("provide --total-tokens, --codex-jsonl, or --claude-jsonl")
     if args.total_tokens < 0:
         raise SystemExit("--total-tokens cannot be negative")
-    return args.total_tokens
+    return UsageSnapshot(total_tokens=args.total_tokens)
+
+
+def read_total(args: argparse.Namespace) -> int:
+    return read_snapshot(args).total_tokens
 
 
 def tokens_source_from_args(args: argparse.Namespace) -> str | None:
@@ -194,13 +262,14 @@ def usage_source_for(tokens_source: str) -> str:
 
 
 def cmd_start(args: argparse.Namespace) -> int:
-    total = read_total(args)
+    snapshot = read_snapshot(args)
     tokens_source = tokens_source_from_args(args) or "codex_goal"
     confidence = args.confidence or (
         "parsed" if args.codex_jsonl or args.claude_jsonl else "exact"
     )
     state = {
-        "baseline_total_tokens": total,
+        "baseline_total_tokens": snapshot.total_tokens,
+        "baseline_usage": snapshot.components(),
         "confidence": confidence,
         "tokens_total_source": tokens_source,
         "usage_source": usage_source_for(tokens_source),
@@ -210,19 +279,57 @@ def cmd_start(args: argparse.Namespace) -> int:
     return 0
 
 
-def current_run_total(args: argparse.Namespace) -> tuple[dict[str, Any], int, int]:
+def current_run_usage(
+    args: argparse.Namespace,
+) -> tuple[dict[str, Any], UsageSnapshot, int, dict[str, int]]:
     state = load_state(resolve_state_path(args.state))
     baseline = state.get("baseline_total_tokens")
     if not isinstance(baseline, int):
         raise SystemExit(f"invalid baseline_total_tokens in {args.state}")
-    absolute_total = read_total(args)
-    run_total = absolute_total - baseline
+    snapshot = read_snapshot(args)
+    run_total = snapshot.total_tokens - baseline
     if run_total < 0:
         raise SystemExit(
             "current token total is lower than the stored baseline; do not submit. "
             "Start a new harness run or recreate the token baseline."
         )
-    return state, absolute_total, run_total
+    baseline_usage = state.get("baseline_usage")
+    if not isinstance(baseline_usage, dict):
+        baseline_usage = {}
+    run_components: dict[str, int] = {}
+    for field, current in snapshot.components().items():
+        component_baseline = baseline_usage.get(field)
+        if not isinstance(component_baseline, int):
+            continue
+        delta = current - component_baseline
+        if delta < 0:
+            raise SystemExit(
+                f"current {field} is lower than the stored baseline; do not submit. "
+                "Start a new harness run or recreate the token baseline."
+            )
+        run_components[field] = delta
+
+    required = (
+        ("input_tokens", "output_tokens", "cache_creation_tokens")
+        if args.claude_jsonl
+        else ("input_tokens", "output_tokens")
+        if args.codex_jsonl
+        else ()
+    )
+    if required and not all(field in run_components for field in required):
+        run_components = {}
+    if "input_tokens" in run_components and "output_tokens" in run_components:
+        run_total = (
+            run_components["input_tokens"]
+            + run_components["output_tokens"]
+            + run_components.get("cache_creation_tokens", 0)
+        )
+    return state, snapshot, run_total, run_components
+
+
+def current_run_total(args: argparse.Namespace) -> tuple[dict[str, Any], int, int]:
+    state, snapshot, run_total, _run_components = current_run_usage(args)
+    return state, snapshot.total_tokens, run_total
 
 
 def current_provenance(
@@ -251,14 +358,17 @@ def current_provenance(
 
 
 def cmd_status(args: argparse.Namespace) -> int:
-    state, absolute_total, run_total = current_run_total(args)
+    state, snapshot, run_total, run_components = current_run_usage(args)
     tokens_source, usage_source, confidence = current_provenance(args, state)
     print(
         json.dumps(
             {
-                "absolute_total_tokens": absolute_total,
+                "absolute_total_tokens": snapshot.total_tokens,
                 "baseline_total_tokens": state["baseline_total_tokens"],
+                "source_run_total_tokens": snapshot.total_tokens
+                - state["baseline_total_tokens"],
                 "run_total_tokens": run_total,
+                "run_usage": run_components,
                 "tokens_total_source": tokens_source,
                 "usage_source": usage_source,
                 "confidence": confidence,
@@ -271,17 +381,30 @@ def cmd_status(args: argparse.Namespace) -> int:
 
 
 def cmd_flags(args: argparse.Namespace) -> int:
-    state, _absolute_total, run_total = current_run_total(args)
+    state, _snapshot, run_total, run_components = current_run_usage(args)
     tokens_source, usage_source, confidence = current_provenance(args, state)
+    component_flags = {
+        "input_tokens": "--input-tokens",
+        "output_tokens": "--output-tokens",
+        "cache_creation_tokens": "--cache-creation-tokens",
+        "cache_read_tokens": "--cache-read-tokens",
+        "reasoning_output_tokens": "--reasoning-output-tokens",
+    }
+    flags = [f"--total-tokens {run_total}"]
+    flags.extend(
+        f"{component_flags[field]} {run_components[field]}"
+        for field in COMPONENT_FIELDS
+        if field in run_components
+    )
+    flags.extend(
+        [
+            f"--usage-source {usage_source}",
+            f"--usage-confidence {confidence}",
+            f"--tokens-total-source {tokens_source}",
+        ]
+    )
     print(
-        " ".join(
-            [
-                f"--total-tokens {run_total}",
-                f"--usage-source {usage_source}",
-                f"--usage-confidence {confidence}",
-                f"--tokens-total-source {tokens_source}",
-            ]
-        )
+        " ".join(flags)
     )
     return 0
 
