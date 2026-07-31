@@ -365,7 +365,11 @@ def finalize_text(
 
 
 def format_number(value: float) -> str:
-    if value.is_integer():
+    # int.is_integer() only exists on Python 3.12+, and the progress API returns
+    # integral values as ints. Without the coercion this raises AttributeError,
+    # which the caller swallows as "active-time check failed" and silently stops
+    # nudging and finalizing that worker.
+    if float(value).is_integer():
         return str(int(value))
     return f"{value:.1f}"
 

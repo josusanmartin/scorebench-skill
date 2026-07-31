@@ -1,4 +1,5 @@
 import json
+import os
 import subprocess
 import sys
 import tempfile
@@ -113,6 +114,112 @@ class TokenUsageTests(unittest.TestCase):
         self.assertIn("--total-tokens 7", result.stdout)
         self.assertIn("--usage-source claude_code", result.stdout)
         self.assertIn("--usage-confidence parsed", result.stdout)
+
+    def test_rejects_relative_state_path(self):
+        """A relative --state follows cwd and silently loses the baseline.
+
+        Because the middleware rejects submissions without a token snapshot,
+        that loss blocks every submission for the affected run.
+        """
+        result = subprocess.run(
+            [
+                sys.executable,
+                str(SCRIPT),
+                "start",
+                "--state",
+                "relative-usage.json",
+                "--total-tokens",
+                "100",
+                "--source",
+                "codex_goal",
+            ],
+            text=True,
+            capture_output=True,
+            cwd=str(self.root),
+        )
+        self.assertNotEqual(result.returncode, 0)
+        self.assertIn("--state must be an absolute path", result.stderr)
+
+    def test_flags_also_rejects_a_relative_state_path(self):
+        """The read path must reject a relative --state, not just start.
+
+        cmd_start and current_run_total resolve the path separately, so a guard
+        on only one of them still lets a lane read a different baseline than it
+        wrote.
+        """
+        result = subprocess.run(
+            [
+                sys.executable, str(SCRIPT), "flags",
+                "--state", "relative-usage.json",
+                "--total-tokens", "250", "--source", "codex_goal",
+            ],
+            text=True, capture_output=True, cwd=str(self.root),
+        )
+        self.assertNotEqual(result.returncode, 0)
+        self.assertIn("--state must be an absolute path", result.stderr)
+
+    def test_requires_a_state_path_when_env_var_is_unset(self):
+        """With no --state and no SCOREBENCH_TOKEN_STATE, fail with guidance.
+
+        The previous default resolved against the working directory, and a
+        hardcoded container path raised an unhandled PermissionError anywhere
+        that path was not writable.
+        """
+        env = dict(os.environ)
+        env.pop("SCOREBENCH_TOKEN_STATE", None)
+        result = subprocess.run(
+            [
+                sys.executable, str(SCRIPT), "start",
+                "--total-tokens", "100", "--source", "codex_goal",
+            ],
+            text=True, capture_output=True, cwd=str(self.root), env=env,
+        )
+        self.assertNotEqual(result.returncode, 0)
+        self.assertIn("no token state path", result.stderr)
+        self.assertIn("SCOREBENCH_TOKEN_STATE", result.stderr)
+
+    def test_state_env_var_supplies_the_default(self):
+        """SCOREBENCH_TOKEN_STATE lets a run set the path once."""
+        env = dict(os.environ)
+        env["SCOREBENCH_TOKEN_STATE"] = str(self.state)
+        subprocess.run(
+            [
+                sys.executable, str(SCRIPT), "start",
+                "--total-tokens", "100", "--source", "codex_goal",
+            ],
+            text=True, capture_output=True, check=True, cwd=str(self.root), env=env,
+        )
+        result = subprocess.run(
+            [
+                sys.executable, str(SCRIPT), "flags",
+                "--total-tokens", "250", "--source", "codex_goal",
+            ],
+            text=True, capture_output=True, check=True,
+            cwd=str(self.root / ".."), env=env,
+        )
+        self.assertIn("--total-tokens 150", result.stdout)
+
+    def test_absolute_state_survives_a_cwd_change(self):
+        """start and flags must agree even when run from different directories."""
+        other = self.root / "elsewhere"
+        other.mkdir()
+        subprocess.run(
+            [
+                sys.executable, str(SCRIPT), "start",
+                "--state", str(self.state),
+                "--total-tokens", "100", "--source", "codex_goal",
+            ],
+            text=True, capture_output=True, check=True, cwd=str(self.root),
+        )
+        result = subprocess.run(
+            [
+                sys.executable, str(SCRIPT), "flags",
+                "--state", str(self.state),
+                "--total-tokens", "250", "--source", "codex_goal",
+            ],
+            text=True, capture_output=True, check=True, cwd=str(other),
+        )
+        self.assertIn("--total-tokens 150", result.stdout)
 
     def test_rejects_total_below_baseline(self):
         self.run_helper("start", "--total-tokens", "100")

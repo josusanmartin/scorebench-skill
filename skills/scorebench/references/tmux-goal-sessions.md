@@ -11,6 +11,8 @@ not activate persistent `/goal` mode.
 - [Launch host TUI workers](#launch-host-tui-workers)
 - [Attach container workers](#attach-container-workers)
 - [Stage and activate goals](#stage-and-activate-goals)
+- [Goal size limit](#goal-size-limit)
+- [Tell workers to submit a baseline early](#tell-workers-to-submit-a-baseline-early)
 - [Verify every lane](#verify-every-lane)
 - [Recover without changing identity](#recover-without-changing-identity)
 
@@ -192,6 +194,45 @@ The goal must require:
 - Scorebench-only submissions and reads;
 - no secrets, siblings, prior artifacts, or exploits;
 - final exact usage and terminal candidate verification.
+
+## Goal Size Limit
+
+Claude Code refuses a `/goal` whose condition exceeds **4,000 characters**:
+
+```text
+Goal condition is limited to 4000 characters (got 5114)
+```
+
+The whole goal is rejected, so every lane in a batch fails at once. Measure the
+rendered text excluding the leading `/goal ` before sending, and move long
+command sequences into a helper script seeded into the worker's workspace
+instead of inlining them.
+
+## Tell Workers To Submit A Baseline Early
+
+Long-horizon optimization goals reproducibly trigger this failure: the worker
+spends 60-80 minutes designing a complete solution inside one response, writes
+no file, submits nothing, and then loses the whole turn to the model's
+output-token cap:
+
+```text
+API Error: Claude's response exceeded the 64000 output token maximum
+```
+
+Raising the cap does not help, because the worker expands to fill it. Workers
+recover completely once told to ship something first, so put it in the goal:
+
+```text
+Write the simplest correct solution that passes the official tests and submit it
+as a protective baseline even if its score is poor. Then optimize in small
+increments, submitting after each improvement. Keep every response small and
+bounded.
+```
+
+Coordinator detection signal: the worker's repository has no modified files and
+the run has no candidates after ~75 minutes. Deliver the correction by pasting
+it into the pane as a queued message rather than interrupting; a queued message
+is consumed at the next turn boundary and preserves in-flight reasoning.
 
 ## Verify Every Lane
 
