@@ -64,6 +64,32 @@ runners, sum the provider's usage fields for only this run and use
 Never broadly search `~/.codex`, `~/.claude`, browser profiles, shell snapshots,
 or old transcripts to infer usage.
 
+### Use An Absolute State Path
+
+`--state` must be an absolute path. The default and any relative value are
+resolved against the current working directory, so a worker that runs `start`
+from one directory and `flags` from another silently loses its baseline and
+then reports:
+
+```text
+token usage baseline missing: run this first after the harness run is established
+```
+
+Because the middleware rejects submissions without a token snapshot, that lane
+cannot submit at all until the baseline is restored. Pass an absolute path
+explicitly, for example `--state /work/.harness-token-usage.json`, and keep the
+same value for `start`, `status`, and `flags`.
+
+There is no built-in default path. Either pass `--state` on every call or export
+`SCOREBENCH_TOKEN_STATE` once for the run:
+
+```bash
+export SCOREBENCH_TOKEN_STATE=/work/.harness-token-usage.json
+```
+
+Omitting both fails immediately rather than writing a baseline somewhere the
+next invocation will not look for it.
+
 ## Before Every Submission
 
 Take another snapshot from the same source and generate flags:
