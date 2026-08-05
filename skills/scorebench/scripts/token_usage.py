@@ -14,6 +14,7 @@ from typing import Any
 # SCOREBENCH_TOKEN_STATE once; everyone else passes --state explicitly.
 STATE_ENV_VAR = "SCOREBENCH_TOKEN_STATE"
 DEFAULT_STATE = os.environ.get(STATE_ENV_VAR, "")
+ACCOUNTING_VERSION = 2
 COMPONENT_FIELDS = (
     "input_tokens",
     "output_tokens",
@@ -136,6 +137,56 @@ def usage_snapshot(usage: dict[str, Any], *, claude: bool = False) -> UsageSnaps
     )
 
 
+def codex_usage_snapshot(
+    usage: dict[str, Any], *, cache_aware: bool
+) -> UsageSnapshot | None:
+    if not cache_aware:
+        return usage_snapshot(usage)
+
+    input_tokens = usage_int(usage, "input_tokens", "prompt_tokens")
+    output_tokens = usage_int(usage, "output_tokens", "completion_tokens")
+    if input_tokens is None or output_tokens is None:
+        return usage_snapshot(usage)
+
+    cache_read_tokens = usage_int(usage, "cached_input_tokens")
+    input_details = usage.get("input_tokens_details")
+    if cache_read_tokens is None and isinstance(input_details, dict):
+        cache_read_tokens = usage_int(input_details, "cached_tokens")
+    cache_creation_tokens = usage_int(
+        usage,
+        "cache_write_input_tokens",
+        "cache_creation_input_tokens",
+        "cache_creation_tokens",
+    )
+
+    # Codex reports cached and cache-write input as subsets of input_tokens.
+    # Canonical ScoreBench components are disjoint so cached reads can be left
+    # out of working tokens while every category is still priced exactly once.
+    if cache_read_tokens is None:
+        return UsageSnapshot(
+            total_tokens=input_tokens + output_tokens,
+            input_tokens=input_tokens,
+            output_tokens=output_tokens,
+            cache_creation_tokens=cache_creation_tokens,
+            reasoning_output_tokens=usage_int(usage, "reasoning_output_tokens"),
+        )
+    cache_creation_tokens = cache_creation_tokens or 0
+    categorized_input = cache_read_tokens + cache_creation_tokens
+    if categorized_input > input_tokens:
+        raise SystemExit(
+            "invalid Codex usage: cached plus cache-write input exceeds input_tokens"
+        )
+    fresh_input_tokens = input_tokens - categorized_input
+    return UsageSnapshot(
+        total_tokens=fresh_input_tokens + cache_creation_tokens + output_tokens,
+        input_tokens=fresh_input_tokens,
+        output_tokens=output_tokens,
+        cache_creation_tokens=cache_creation_tokens,
+        cache_read_tokens=cache_read_tokens,
+        reasoning_output_tokens=usage_int(usage, "reasoning_output_tokens"),
+    )
+
+
 def aggregate_snapshots(snapshots: list[UsageSnapshot], path: Path, label: str) -> UsageSnapshot:
     if not snapshots:
         raise SystemExit(f"no {label} usage records found in {path}")
@@ -149,8 +200,9 @@ def aggregate_snapshots(snapshots: list[UsageSnapshot], path: Path, label: str) 
     )
 
 
-def codex_jsonl_snapshot(path: Path) -> UsageSnapshot:
-    snapshots: list[UsageSnapshot] = []
+def codex_jsonl_snapshot(path: Path, *, accounting_version: int = ACCOUNTING_VERSION) -> UsageSnapshot:
+    snapshots: list[tuple[str | None, UsageSnapshot]] = []
+    current_thread_id: str | None = None
     with path.open("r", encoding="utf-8") as handle:
         for line in handle:
             line = line.strip()
@@ -162,15 +214,45 @@ def codex_jsonl_snapshot(path: Path) -> UsageSnapshot:
                 continue
             if not isinstance(event, dict):
                 continue
+            if event.get("type") == "thread.started":
+                thread_id = event.get("thread_id")
+                if isinstance(thread_id, str) and thread_id.strip():
+                    current_thread_id = thread_id.strip()
+                continue
             if event.get("type") != "turn.completed":
                 continue
             usage = event.get("usage")
             if not isinstance(usage, dict):
                 continue
-            snapshot = usage_snapshot(usage)
+            snapshot = codex_usage_snapshot(
+                usage, cache_aware=accounting_version >= ACCOUNTING_VERSION
+            )
             if snapshot is not None:
-                snapshots.append(snapshot)
-    return aggregate_snapshots(snapshots, path, "turn.completed")
+                snapshots.append((current_thread_id, snapshot))
+    if accounting_version < ACCOUNTING_VERSION:
+        return aggregate_snapshots(
+            [snapshot for _thread_id, snapshot in snapshots], path, "turn.completed"
+        )
+    if not snapshots:
+        raise SystemExit(f"no turn.completed usage records found in {path}")
+
+    thread_ids = {thread_id for thread_id, _snapshot in snapshots if thread_id}
+    if len(thread_ids) > 1:
+        raise SystemExit(
+            f"multiple Codex threads found in {path}; use one JSONL file per run"
+        )
+    if thread_ids and any(thread_id is None for thread_id, _snapshot in snapshots):
+        raise SystemExit(f"unscoped Codex usage mixed with a thread in {path}")
+    if not thread_ids and len(snapshots) > 1:
+        raise SystemExit(
+            f"multiple unscoped turn.completed records found in {path}; "
+            "cannot determine whether usage is cumulative"
+        )
+
+    # codex exec emits the thread's cumulative usage at turn completion. A
+    # resumed thread can therefore appear more than once in an appended log;
+    # the latest snapshot replaces earlier cumulative snapshots.
+    return snapshots[-1][1]
 
 
 def codex_jsonl_total(path: Path) -> int:
@@ -190,8 +272,11 @@ def claude_usage_total(usage: dict[str, Any]) -> int | None:
     return usage_total(usage)
 
 
-def claude_jsonl_snapshot(path: Path) -> UsageSnapshot:
+def claude_jsonl_snapshot(
+    path: Path, *, accounting_version: int = ACCOUNTING_VERSION
+) -> UsageSnapshot:
     snapshots: list[UsageSnapshot] = []
+    identified: dict[str, UsageSnapshot] = {}
     with path.open("r", encoding="utf-8") as handle:
         for line in handle:
             line = line.strip()
@@ -212,8 +297,27 @@ def claude_jsonl_snapshot(path: Path) -> UsageSnapshot:
             if not isinstance(usage, dict):
                 continue
             snapshot = usage_snapshot(usage, claude=True)
-            if snapshot is not None:
-                snapshots.append(snapshot)
+            if snapshot is None:
+                continue
+            message_id = message.get("id") if isinstance(message, dict) else None
+            if not isinstance(message_id, str) or not message_id.strip():
+                message_id = event.get("requestId")
+            if (
+                accounting_version >= ACCOUNTING_VERSION
+                and isinstance(message_id, str)
+                and message_id.strip()
+            ):
+                stable_id = message_id.strip()
+                previous = identified.get(stable_id)
+                if previous is not None and previous != snapshot:
+                    raise SystemExit(
+                        "conflicting Claude usage records for message/request "
+                        f"{stable_id} in {path}"
+                    )
+                identified[stable_id] = snapshot
+                continue
+            snapshots.append(snapshot)
+    snapshots.extend(identified.values())
     return aggregate_snapshots(snapshots, path, "Claude Code message.usage")
 
 
@@ -221,13 +325,19 @@ def claude_jsonl_total(path: Path) -> int:
     return claude_jsonl_snapshot(path).total_tokens
 
 
-def read_snapshot(args: argparse.Namespace) -> UsageSnapshot:
+def read_snapshot(
+    args: argparse.Namespace, *, accounting_version: int = ACCOUNTING_VERSION
+) -> UsageSnapshot:
     if args.codex_jsonl and args.claude_jsonl:
         raise SystemExit("provide only one of --codex-jsonl or --claude-jsonl")
     if args.codex_jsonl:
-        return codex_jsonl_snapshot(Path(args.codex_jsonl))
+        return codex_jsonl_snapshot(
+            Path(args.codex_jsonl), accounting_version=accounting_version
+        )
     if args.claude_jsonl:
-        return claude_jsonl_snapshot(Path(args.claude_jsonl))
+        return claude_jsonl_snapshot(
+            Path(args.claude_jsonl), accounting_version=accounting_version
+        )
     if args.total_tokens is None:
         raise SystemExit("provide --total-tokens, --codex-jsonl, or --claude-jsonl")
     if args.total_tokens < 0:
@@ -262,12 +372,11 @@ def usage_source_for(tokens_source: str) -> str:
 
 
 def cmd_start(args: argparse.Namespace) -> int:
-    snapshot = read_snapshot(args)
+    snapshot = read_snapshot(args, accounting_version=ACCOUNTING_VERSION)
     tokens_source = tokens_source_from_args(args) or "codex_goal"
-    confidence = args.confidence or (
-        "parsed" if args.codex_jsonl or args.claude_jsonl else "exact"
-    )
+    confidence = args.confidence or "exact"
     state = {
+        "accounting_version": ACCOUNTING_VERSION,
         "baseline_total_tokens": snapshot.total_tokens,
         "baseline_usage": snapshot.components(),
         "confidence": confidence,
@@ -286,7 +395,10 @@ def current_run_usage(
     baseline = state.get("baseline_total_tokens")
     if not isinstance(baseline, int):
         raise SystemExit(f"invalid baseline_total_tokens in {args.state}")
-    snapshot = read_snapshot(args)
+    accounting_version = state.get("accounting_version", 1)
+    if not isinstance(accounting_version, int) or accounting_version < 1:
+        raise SystemExit(f"invalid accounting_version in {args.state}")
+    snapshot = read_snapshot(args, accounting_version=accounting_version)
     run_total = snapshot.total_tokens - baseline
     if run_total < 0:
         raise SystemExit(
@@ -364,6 +476,7 @@ def cmd_status(args: argparse.Namespace) -> int:
         json.dumps(
             {
                 "absolute_total_tokens": snapshot.total_tokens,
+                "accounting_version": state.get("accounting_version", 1),
                 "baseline_total_tokens": state["baseline_total_tokens"],
                 "source_run_total_tokens": snapshot.total_tokens
                 - state["baseline_total_tokens"],

@@ -1,11 +1,12 @@
 # Exact Token Accounting
 
-Every submission requires an exact, run-relative `--total-tokens` value. Full
-input, output, cache-write, and cache-read counters also let Scorebench derive a
-more accurate API-equivalent cost curve. Never submit zero, an estimate, an
-account-wide usage number, or a value copied from another session. If no exact
-run-scoped source is available after one quick check, stop before submitting
-and ask for a supervised runner that exposes usage.
+Every submission requires an exact, run-relative `--total-tokens` value. In
+Scorebench, **working tokens** are fresh input + output + cache writes. Cached
+input reads are excluded from that total, but retained separately so the cost
+curve can price them at the provider's cached-input rate. Never submit zero, an
+estimate, an account-wide usage number, or a value copied from another session.
+If no exact run-scoped source is available after one quick check, stop before
+submitting and ask for a supervised runner that exposes usage.
 
 Use the bundled helper:
 
@@ -45,13 +46,17 @@ python3 "$SCOREBENCH_TOKEN_HELPER" start \
   --state "$SCOREBENCH_TOKEN_STATE" \
   --codex-jsonl "$CODEX_EXEC_JSONL" \
   --source codex_exec_jsonl \
-  --confidence parsed
+  --confidence exact
 ```
 
-The helper sums completed-turn usage while keeping input, output, cached input,
-and reasoning-output counters separate. Cached input is excluded from the
-working-token total but retained for API cost accounting. Do not launch a
-nested `codex exec` from inside a solving agent.
+Codex reports `input_tokens` as an inclusive count: cached reads and cache-write
+tokens are subsets of it. The helper converts that payload into disjoint fresh
+input, cache-write, cache-read, and output counters. Its working total follows
+Codex's own definition, `input_tokens - cached_input_tokens + output_tokens`.
+`turn.completed` is cumulative for a thread, so the helper uses the latest
+snapshot instead of summing resumed snapshots. It rejects JSONL containing
+multiple thread IDs rather than guessing. Do not launch a nested `codex exec`
+from inside a solving agent.
 
 For a Codex TUI without `get_goal`, an exact current-session value visibly
 reported by `/status` is acceptable. Do not use `/usage`; it is account-wide.
@@ -65,14 +70,16 @@ python3 "$SCOREBENCH_TOKEN_HELPER" start \
   --state "$SCOREBENCH_TOKEN_STATE" \
   --claude-jsonl "$CLAUDE_CODE_JSONL" \
   --source claude_code_jsonl \
-  --confidence parsed
+  --confidence exact
 ```
 
 Only inspect the current project's transcript directory, and choose a file only
-when the active session is unambiguous. Otherwise ask for its path. The helper
-sums distinct `input_tokens`, `output_tokens`, and
-`cache_creation_input_tokens`. It deliberately excludes
-`cache_read_input_tokens`, which can count the same cached context repeatedly.
+when the active session is unambiguous. Otherwise ask for its path. Claude Code
+can serialize the same assistant message more than once; the helper deduplicates
+identical usage by stable message/request ID and fails if one ID carries
+conflicting counters. It sums fresh `input_tokens`, `output_tokens`, and
+`cache_creation_input_tokens`, while retaining but excluding
+`cache_read_input_tokens` from working tokens.
 
 For Gemini, use an exact current-session `/stats` total. For provider/API
 runners, sum the provider's usage fields for only this run and use
@@ -125,7 +132,7 @@ TOKEN_FLAGS="$(python3 "$SCOREBENCH_TOKEN_HELPER" flags \
   --state "$SCOREBENCH_TOKEN_STATE" \
   --codex-jsonl "$CODEX_EXEC_JSONL" \
   --source codex_exec_jsonl \
-  --confidence parsed)"
+  --confidence exact)"
 ```
 
 Claude Code JSONL:
@@ -135,14 +142,16 @@ TOKEN_FLAGS="$(python3 "$SCOREBENCH_TOKEN_HELPER" flags \
   --state "$SCOREBENCH_TOKEN_STATE" \
   --claude-jsonl "$CLAUDE_CODE_JSONL" \
   --source claude_code_jsonl \
-  --confidence parsed)"
+  --confidence exact)"
 ```
 
 The helper subtracts the run-start baseline and emits `--total-tokens`, the
 available run-relative component flags, `--usage-source`,
-`--usage-confidence`, and `--tokens-total-source`. Cache reads do not inflate
-the working-token total, but the server prices them at the model's cache-hit
-rate. Do not hand-write those flags unless the helper itself is unavailable.
+`--usage-confidence`, and `--tokens-total-source`. JSONL counters default to
+exact after schema validation and deduplication. Cache reads do not inflate the
+working-token total, but the server prices them at the model's cache-hit rate.
+Do not hand-write or pre-normalize those flags unless the helper itself is
+unavailable.
 
 Use the resulting flags in the same submission call:
 

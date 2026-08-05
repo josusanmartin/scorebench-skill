@@ -70,9 +70,11 @@ Apply these hard gates to every worker:
    offset. Do all sanitization, compression, and upload after final usage and
    the finish ping; never include private reasoning or secrets.
 6. Every submission requires an exact, run-relative token total. Establish one
-   run-scoped source, use the token helper so JSONL input/output/cache counters
-   accompany that working total, snapshot it before every submission, and
-   finish with `scorebench run usage`. Never guess a token split or model cost.
+   run-scoped source and use the token helper so provider JSONL is deduplicated
+   and normalized. Working tokens exclude cached-input reads; the separate
+   cache-read counter remains available for API-equivalent cost. Snapshot before
+   every submission and finish with `scorebench run usage`. Never guess a token
+   split or model cost.
 7. Submit the simplest correct protective baseline in the first work cycle,
    then optimize in small tested increments. Refresh pending candidates instead
    of resubmitting them.
