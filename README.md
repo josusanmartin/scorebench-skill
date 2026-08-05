@@ -155,8 +155,10 @@ Five hard rules for workers:
   trusted run-time origin; without it, reports fall back to first-submission
   time zero and cross-run timing comparisons become misleading.
 - **Use exact run-relative tokens.** Establish a baseline from the current
-  session, then use the bundled helper to generate submission flags. Never use
-  an estimate, account-wide usage, or an `agent_claim`.
+  session, then use the bundled helper to deduplicate and normalize provider
+  counters before generating submission flags. Working tokens exclude cached
+  reads; API-equivalent cost still includes them at the cached-input rate. Never
+  use an estimate, account-wide usage, or an `agent_claim`.
 - **Submit a protective baseline first.** Create, test, and submit the simplest
   correct candidate in the first work cycle, then optimize in bounded
   increments.

@@ -54,14 +54,18 @@ class TokenUsageTests(unittest.TestCase):
 
     def test_codex_jsonl_is_run_relative(self):
         log = self.root / "codex.jsonl"
+        thread_id = "019fc3d8-e800-7f62-be5f-78bfdbeea6ba"
         log.write_text(
-            json.dumps(
+            json.dumps({"type": "thread.started", "thread_id": thread_id})
+            + "\n"
+            + json.dumps(
                 {
                     "type": "turn.completed",
                     "usage": {
-                        "input_tokens": 10,
+                        "input_tokens": 110,
                         "output_tokens": 5,
                         "cached_input_tokens": 100,
+                        "cache_write_input_tokens": 0,
                         "reasoning_output_tokens": 2,
                     },
                 }
@@ -76,10 +80,13 @@ class TokenUsageTests(unittest.TestCase):
                     {
                         "type": "turn.completed",
                         "usage": {
-                            "input_tokens": 20,
-                            "output_tokens": 3,
-                            "cached_input_tokens": 50,
-                            "reasoning_output_tokens": 1,
+                            # Codex emits cumulative thread totals. input_tokens
+                            # includes the cached subset.
+                            "input_tokens": 180,
+                            "output_tokens": 8,
+                            "cached_input_tokens": 150,
+                            "cache_write_input_tokens": 0,
+                            "reasoning_output_tokens": 3,
                         },
                     }
                 )
@@ -91,15 +98,17 @@ class TokenUsageTests(unittest.TestCase):
         self.assertIn("--total-tokens 23", result.stdout)
         self.assertIn("--input-tokens 20", result.stdout)
         self.assertIn("--output-tokens 3", result.stdout)
+        self.assertIn("--cache-creation-tokens 0", result.stdout)
         self.assertIn("--cache-read-tokens 50", result.stdout)
         self.assertIn("--reasoning-output-tokens 1", result.stdout)
-        self.assertIn("--usage-confidence parsed", result.stdout)
+        self.assertIn("--usage-confidence exact", result.stdout)
         self.assertIn("--tokens-total-source codex_exec_jsonl", result.stdout)
 
     def test_claude_jsonl_excludes_cache_reads(self):
         log = self.root / "claude.jsonl"
         first = {
             "message": {
+                "id": "msg_first",
                 "usage": {
                     "input_tokens": 10,
                     "output_tokens": 2,
@@ -110,6 +119,7 @@ class TokenUsageTests(unittest.TestCase):
         }
         second = {
             "message": {
+                "id": "msg_second",
                 "usage": {
                     "input_tokens": 3,
                     "output_tokens": 4,
@@ -118,10 +128,12 @@ class TokenUsageTests(unittest.TestCase):
                 }
             }
         }
-        log.write_text(json.dumps(first) + "\n", encoding="utf-8")
+        # Claude Code can serialize the same assistant message several times.
+        # Stable message IDs make those records one billable provider response.
+        log.write_text(json.dumps(first) + "\n" + json.dumps(first) + "\n", encoding="utf-8")
         self.run_helper("start", "--claude-jsonl", str(log))
         with log.open("a", encoding="utf-8") as handle:
-            handle.write(json.dumps(second) + "\n")
+            handle.write(json.dumps(second) + "\n" + json.dumps(second) + "\n")
 
         result = self.run_helper("flags", "--claude-jsonl", str(log))
 
@@ -131,37 +143,111 @@ class TokenUsageTests(unittest.TestCase):
         self.assertIn("--cache-creation-tokens 0", result.stdout)
         self.assertIn("--cache-read-tokens 2000", result.stdout)
         self.assertIn("--usage-source claude_code", result.stdout)
-        self.assertIn("--usage-confidence parsed", result.stdout)
+        self.assertIn("--usage-confidence exact", result.stdout)
 
     def test_jsonl_breakdown_defines_scorebench_working_total(self):
         log = self.root / "codex-total.jsonl"
+        thread_id = "019fc3d8-e800-7f62-be5f-78bfdbeea6ba"
         first = {
             "type": "turn.completed",
             "usage": {
-                "total_tokens": 115,
-                "input_tokens": 10,
-                "output_tokens": 5,
+                "total_tokens": 117,
+                "input_tokens": 115,
+                "output_tokens": 2,
                 "cached_input_tokens": 100,
+                "cache_write_input_tokens": 5,
             },
         }
         second = {
             "type": "turn.completed",
             "usage": {
-                "total_tokens": 73,
-                "input_tokens": 20,
-                "output_tokens": 3,
-                "cached_input_tokens": 50,
+                "total_tokens": 149,
+                "input_tokens": 143,
+                "output_tokens": 6,
+                "cached_input_tokens": 120,
+                "cache_write_input_tokens": 8,
             },
         }
-        log.write_text(json.dumps(first) + "\n", encoding="utf-8")
+        log.write_text(
+            json.dumps({"type": "thread.started", "thread_id": thread_id})
+            + "\n"
+            + json.dumps(first)
+            + "\n",
+            encoding="utf-8",
+        )
         self.run_helper("start", "--codex-jsonl", str(log))
         with log.open("a", encoding="utf-8") as handle:
             handle.write(json.dumps(second) + "\n")
 
         result = self.run_helper("flags", "--codex-jsonl", str(log))
 
-        self.assertIn("--total-tokens 23", result.stdout)
-        self.assertIn("--cache-read-tokens 50", result.stdout)
+        self.assertIn("--total-tokens 12", result.stdout)
+        self.assertIn("--input-tokens 5", result.stdout)
+        self.assertIn("--output-tokens 4", result.stdout)
+        self.assertIn("--cache-creation-tokens 3", result.stdout)
+        self.assertIn("--cache-read-tokens 20", result.stdout)
+
+    def test_codex_real_schema_excludes_cached_input_from_working_total(self):
+        log = self.root / "codex-real.jsonl"
+        log.write_text(
+            json.dumps({"type": "thread.started", "thread_id": "thread-1"})
+            + "\n"
+            + json.dumps(
+                {
+                    "type": "turn.completed",
+                    "usage": {
+                        "input_tokens": 10_739,
+                        "cached_input_tokens": 7_936,
+                        "cache_write_input_tokens": 0,
+                        "output_tokens": 221,
+                        "reasoning_output_tokens": 201,
+                    },
+                }
+            )
+            + "\n",
+            encoding="utf-8",
+        )
+
+        started = json.loads(
+            self.run_helper("start", "--codex-jsonl", str(log)).stdout
+        )
+        self.assertEqual(started["baseline_total_tokens"], 3_024)
+        self.assertEqual(started["baseline_usage"]["input_tokens"], 2_803)
+        self.assertEqual(started["baseline_usage"]["cache_read_tokens"], 7_936)
+        status = json.loads(
+            self.run_helper("status", "--codex-jsonl", str(log)).stdout
+        )
+        self.assertEqual(status["absolute_total_tokens"], 3_024)
+        self.assertEqual(status["accounting_version"], 2)
+        self.assertEqual(status["run_usage"]["input_tokens"], 0)
+
+    def test_claude_conflicting_duplicate_usage_fails_loudly(self):
+        log = self.root / "claude-conflict.jsonl"
+        records = [
+            {"message": {"id": "msg_same", "usage": {"input_tokens": 10, "output_tokens": 2}}},
+            {"message": {"id": "msg_same", "usage": {"input_tokens": 10, "output_tokens": 3}}},
+        ]
+        log.write_text("\n".join(json.dumps(record) for record in records) + "\n", encoding="utf-8")
+
+        result = self.run_helper("start", "--claude-jsonl", str(log), check=False)
+
+        self.assertNotEqual(result.returncode, 0)
+        self.assertIn("conflicting Claude usage records", result.stderr)
+
+    def test_codex_multiple_threads_fail_loudly(self):
+        log = self.root / "codex-multiple.jsonl"
+        records = [
+            {"type": "thread.started", "thread_id": "thread-1"},
+            {"type": "turn.completed", "usage": {"input_tokens": 10, "cached_input_tokens": 0, "output_tokens": 1}},
+            {"type": "thread.started", "thread_id": "thread-2"},
+            {"type": "turn.completed", "usage": {"input_tokens": 10, "cached_input_tokens": 0, "output_tokens": 1}},
+        ]
+        log.write_text("\n".join(json.dumps(record) for record in records) + "\n", encoding="utf-8")
+
+        result = self.run_helper("start", "--codex-jsonl", str(log), check=False)
+
+        self.assertNotEqual(result.returncode, 0)
+        self.assertIn("multiple Codex threads", result.stderr)
 
     def test_old_state_without_component_baselines_remains_compatible(self):
         self.state.write_text(
@@ -191,6 +277,58 @@ class TokenUsageTests(unittest.TestCase):
 
         self.assertIn("--total-tokens 45", result.stdout)
         self.assertNotIn("--input-tokens", result.stdout)
+
+    def test_old_claude_state_keeps_legacy_parser_for_active_run(self):
+        first = {
+            "message": {
+                "id": "msg_first",
+                "usage": {
+                    "input_tokens": 10,
+                    "output_tokens": 2,
+                    "cache_creation_input_tokens": 0,
+                },
+            }
+        }
+        second = {
+            "message": {
+                "id": "msg_second",
+                "usage": {
+                    "input_tokens": 3,
+                    "output_tokens": 4,
+                    "cache_creation_input_tokens": 0,
+                },
+            }
+        }
+        log = self.root / "claude-legacy.jsonl"
+        log.write_text(
+            json.dumps(first) + "\n" + json.dumps(first) + "\n",
+            encoding="utf-8",
+        )
+        self.state.write_text(
+            json.dumps(
+                {
+                    "baseline_total_tokens": 24,
+                    "baseline_usage": {
+                        "input_tokens": 20,
+                        "output_tokens": 4,
+                        "cache_creation_tokens": 0,
+                    },
+                    "confidence": "parsed",
+                    "tokens_total_source": "claude_code_jsonl",
+                    "usage_source": "claude_code",
+                }
+            ),
+            encoding="utf-8",
+        )
+        with log.open("a", encoding="utf-8") as handle:
+            handle.write(json.dumps(second) + "\n" + json.dumps(second) + "\n")
+
+        result = self.run_helper("flags", "--claude-jsonl", str(log))
+
+        self.assertIn("--total-tokens 14", result.stdout)
+        self.assertIn("--input-tokens 6", result.stdout)
+        self.assertIn("--output-tokens 8", result.stdout)
+        self.assertIn("--usage-confidence parsed", result.stdout)
 
     def test_rejects_relative_state_path(self):
         """A relative --state follows cwd and silently loses the baseline.
