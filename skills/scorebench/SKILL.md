@@ -82,11 +82,14 @@ Apply these hard gates to every worker:
    reads and is not a valid Scorebench working-token total.
    Never guess a token split or model cost.
 7. Submit the simplest correct protective baseline in the first work cycle,
-   then optimize in small tested increments. Refresh pending candidates instead
-   of resubmitting them.
-8. Use `scorebench run progress` as the authoritative submitted timing/token
-   read. Never infer latest-run timing from dashboard HTML, ordinary elapsed
-   time, or `scorebench best`.
+   then submit materially different, validated improvements promptly. Never
+   create a new candidate for unchanged content; reuse the original idempotency
+   key only to recover an uncertain response and refresh pending candidates.
+8. Before each new candidate, use `scorebench run progress` to inspect the
+   authoritative submitted timing/token read and any `submission` allowance.
+   Honor `can_submit`, `retry_after_seconds`, and venue cooldowns while
+   continuing local work. Never infer latest-run timing from dashboard HTML,
+   ordinary elapsed time, or `scorebench best`.
 9. Do not use an external venue CLI, API, cookie, or credential. Route every
    submission and venue-visible read through Scorebench.
 10. Preserve exact harness errors, `trace_id`, `trust.warnings`, and immutable

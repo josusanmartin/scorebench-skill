@@ -225,8 +225,10 @@ recover completely once told to ship something first, so put it in the goal:
 ```text
 Write the simplest correct solution that passes the official tests and submit it
 as a protective baseline even if its score is poor. Then optimize in small
-increments, submitting after each improvement. Keep every response small and
-bounded.
+increments, submitting after each validated material improvement. Before each
+new candidate, check scorebench run progress and obey its submission allowance.
+Refresh pending candidates and never create a new candidate for unchanged
+content. Keep every response small and bounded.
 ```
 
 Coordinator detection signal: the worker's repository has no modified files and

@@ -158,7 +158,7 @@ scorebench run ping --event finish
 python3 "$SCOREBENCH_TRACE_HELPER" finish # sanitize, compress, and upload now
 ```
 
-Five hard rules for workers:
+Six hard rules for workers:
 
 - **Ping before submitting.** `scorebench run ping --event start` (or
   `--event resume` for resumed sessions) is mandatory even when the token is
@@ -173,6 +173,12 @@ Five hard rules for workers:
 - **Submit a protective baseline first.** Create, test, and submit the simplest
   correct candidate in the first work cycle, then optimize in bounded
   increments.
+- **Keep real progress visible without replay spam.** Before each new candidate,
+  read `scorebench run progress` and obey any submission allowance. Submit each
+  materially different validated improvement promptly, refresh pending work,
+  and reuse an idempotency key only to recover an uncertain response. When an
+  older server exposes no limit metadata, keep routine attempts at least five
+  minutes apart while still submitting a newly validated best immediately.
 - **Never call the venue directly.** Connector credentials stay in the
   harness. Workers must not call Tensara, HighLoad, CPU.mode, GPU Mode /
   Popcorn, Paradigm Puzzles, or GitHub themselves — use `scorebench leaderboard`,

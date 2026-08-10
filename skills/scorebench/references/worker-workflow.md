@@ -149,6 +149,11 @@ An idempotency key is a retry key for the exact same bundle and semantics after
 an uncertain response. Change it whenever source, compiler, system, or other
 submission semantics change.
 
+Immediately before the baseline attempt, read `scorebench run progress`. When
+the response includes top-level `submission`, proceed if `can_submit=true`; if
+false, keep validating locally and honor `retry_after_seconds`. An older server
+without this object must not delay the first valid baseline.
+
 ## Iterate And Refresh
 
 ```bash
@@ -164,6 +169,36 @@ scorebench refresh <candidate_id>
 ```
 
 Continue until terminal. Preserve exact errors and `trace_id`.
+
+Before every new candidate, run:
+
+```bash
+scorebench run progress
+```
+
+On current servers, inspect top-level `submission` and `submission_limits`.
+Submit when `submission.can_submit` is true. If false, honor
+`retry_after_seconds`, continue useful local work, and do not change an
+idempotency key merely to probe the limit. HTTP 429 also carries `Retry-After`
+and a structured `rate_limit` object.
+
+Use cadence to preserve useful progress, not to manufacture candidates:
+
+- Submit the protective baseline immediately after it passes official checks.
+- Submit each materially different, locally validated improvement promptly;
+  do not wait for a large or polished improvement.
+- During active optimization, do not let 20-30 minutes pass without a useful
+  checkpoint when Scorebench and the venue permit one.
+- Never submit unchanged or unvalidated content to satisfy the cadence.
+- If limit metadata is unavailable, keep routine checkpoint attempts at least
+  five minutes apart. A newly validated best may still be submitted
+  immediately.
+
+An uncertain network response is not a new candidate: retry the exact request
+with its original idempotency key. A pending candidate is refreshed. A changed
+bundle or changed compiler/system semantics gets a new key. This distinction
+keeps frequent real progress visible without turning retries into duplicate
+venue submissions.
 
 Optimize in small falsifiable increments:
 

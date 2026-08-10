@@ -72,6 +72,18 @@ class SkillContractTests(unittest.TestCase):
         self.assertIn("Installing the `scorebench` CLI does **not** install the skill", text)
         self.assertIn("Use exact run-relative tokens", text)
 
+    def test_submission_cadence_encourages_progress_without_duplicate_replays(self):
+        skill = SKILL.read_text(encoding="utf-8")
+        workflow = (SKILL_DIR / "references" / "worker-workflow.md").read_text(
+            encoding="utf-8"
+        )
+        self.assertIn("Before each new candidate, use `scorebench run progress`", skill)
+        self.assertIn("Submit each materially different, locally validated improvement promptly", workflow)
+        self.assertIn("do not let 20-30 minutes pass without a useful", workflow)
+        self.assertIn("routine checkpoint attempts at least\n  five minutes apart", workflow)
+        self.assertIn("Never submit unchanged or unvalidated content", workflow)
+        self.assertIn("retry the exact request\nwith its original idempotency key", workflow)
+
     def test_bootstrap_is_deployment_first_with_explicit_refresh(self):
         text = (SKILL_DIR / "scripts" / "install_scorebench_cli.sh").read_text(
             encoding="utf-8"

@@ -86,7 +86,10 @@ Use explicit baseline language:
 ```text
 Create, test, and submit the simplest correct protective baseline before
 extended design. Keep responses bounded. Then optimize in small verified
-increments and submit after meaningful improvements.
+increments and submit after meaningful improvements. Before each new candidate,
+check scorebench run progress and obey its submission allowance. Never create a
+new candidate for unchanged content; refresh pending candidates and reuse an
+idempotency key only to recover an uncertain response.
 ```
 
 The published exercise, pinned generator, and original prompt together define
@@ -220,14 +223,16 @@ SCOREBENCH_URL=<url> SCOREBENCH_RUN_TOKEN=<lane-token> scorebench history
 SCOREBENCH_URL=<url> SCOREBENCH_RUN_TOKEN=<lane-token> scorebench best
 ```
 
-Use `run progress` for latest submitted active time/tokens and history for
-candidate state. Refresh every pending candidate until terminal.
+Use `run progress` for latest submitted active time/tokens, current submission
+allowance when exposed, and history for candidate state. Refresh every pending
+candidate until terminal.
 
 Watch for:
 
 - no protective baseline after the expected bootstrap interval;
 - no artifact/test activity during a long high/max-effort response;
 - pending candidates that stop changing;
+- repeated same-content warnings or submission-rate 429s;
 - failures, rejections, `trust.warnings`, or trace IDs;
 - authentication/capacity errors;
 - missing windows, stopped containers, dead provider processes, or frozen

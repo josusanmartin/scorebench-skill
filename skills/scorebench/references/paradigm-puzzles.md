@@ -110,9 +110,11 @@ Before `nextSubmissionAt`, do not:
 - change only the idempotency key
 - create duplicate ScoreBench candidates to probe the cooldown
 
-After `nextSubmissionAt`, resubmit the exact same bundle with a new idempotency
-key. The original key is replay-only and will continue to return the locally
-failed preflight candidate without contacting Paradigm.
+After `nextSubmissionAt`, check `scorebench run progress`. When its submission
+allowance is open, resubmit the exact same bundle with a new idempotency key.
+The original key is replay-only and will continue to return the locally failed
+preflight candidate without contacting Paradigm. If Scorebench returns 429,
+honor its `Retry-After`; never probe either cooldown by rotating keys.
 
 ## Results And Refresh
 
