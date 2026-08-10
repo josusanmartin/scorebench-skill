@@ -68,7 +68,9 @@ Apply these hard gates to every worker:
    `--prompt-file`.
 4. Send a successful `scorebench run ping --event start` for a new worker
    session or `--event resume` for a resumed session before optimization and
-   before the first submission.
+   before the first submission. During active work, preserve server-side timing
+   evidence with `--event activity` at least every five minutes. Use the bundled
+   watcher for long autonomous runs; never emit activity while idle or complete.
 5. Immediately after that trusted ping, record the trace source and byte
    offset. Do all sanitization, compression, and upload after final usage and
    the finish ping; never include private reasoning or secrets.
@@ -86,7 +88,7 @@ Apply these hard gates to every worker:
    create a new candidate for unchanged content; reuse the original idempotency
    key only to recover an uncertain response and refresh pending candidates.
 8. Before each new candidate, use `scorebench run progress` to inspect the
-   authoritative submitted timing/token read and any `submission` allowance.
+   authoritative trusted timing/token read and any `submission` allowance.
    Honor `can_submit`, `retry_after_seconds`, and venue cooldowns while
    continuing local work. Never infer latest-run timing from dashboard HTML,
    ordinary elapsed time, or `scorebench best`.

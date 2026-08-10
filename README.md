@@ -129,7 +129,8 @@ Then ping, establish exact token accounting, and submit:
 
 ```bash
 scorebench run ping --event start  # mandatory before the first submission
-scorebench run progress            # canonical submitted timing and token progress
+scorebench run ping --event activity # repeat at least every 5m of active work
+scorebench run progress            # canonical trusted timing and token progress
 SCOREBENCH_TOKEN_HELPER="${CODEX_HOME:-$HOME/.codex}/skills/scorebench/scripts/token_usage.py"
 SCOREBENCH_TOKEN_STATE="/work/.scorebench-token-usage.json"
 SCOREBENCH_SKILL_DIR="${CODEX_HOME:-$HOME/.codex}/skills/scorebench"
@@ -164,7 +165,9 @@ Six hard rules for workers:
   `--event resume` for resumed sessions) is mandatory even when the token is
   already bound to a run. The dashboard uses that server timestamp as the
   trusted run-time origin; without it, reports fall back to first-submission
-  time zero and cross-run timing comparisons become misleading.
+  time zero and cross-run timing comparisons become misleading. During active
+  work, send `--event activity` at least every five minutes or use the bundled
+  busy-aware watcher. Do not ping while idle.
 - **Use exact run-relative tokens.** Establish a baseline from the current
   session, then use the bundled helper to deduplicate and normalize provider
   counters before generating submission flags. Working tokens exclude cached

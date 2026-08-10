@@ -18,8 +18,8 @@ target. Run recovery and progress modes in separate tmux windows.
 
 Use `scorebench run progress` field `progress.active_seconds`. Never stop from
 `progress.elapsed_seconds`, tmux/container age, wall-clock elapsed time,
-dashboard HTML, or `scorebench best`. Progress measures at the latest submitted
-candidate and can lag unsubmitted work.
+dashboard HTML, or `scorebench best`. Progress measures through the latest
+trusted candidate or activity ping and never advances merely because it is read.
 
 Both `active_marker` and `GOAL_COMPLETE` are monotonic evidence: the watcher never
 deletes either file. A premature completion marker is preserved and logged for
@@ -29,7 +29,7 @@ Put the exact contract in every goal:
 
 ```text
 Continue until /work/SCOREBENCH_ACTIVE_TARGET_REACHED exists. Do not create
-/work/GOAL_COMPLETE before then. Base completion only on this run's submitted
+/work/GOAL_COMPLETE before then. Base completion only on this run's trusted
 Scorebench active_seconds. Submit periodically. At target, refresh pending
 candidates, record final exact usage, verify the best valid terminal candidate,
 then create /work/GOAL_COMPLETE.
@@ -46,6 +46,7 @@ credentials, solution paths, or sibling code.
   "docker_command": ["sudo", "-n", "docker"],
   "recovery_poll_seconds": 30,
   "active_poll_seconds": 120,
+  "activity_heartbeat_seconds": 300,
   "target_active_seconds": 14400,
   "nudge_seconds": 300,
   "resume_cooldown_seconds": 300,
@@ -129,6 +130,13 @@ For each worker, active mode runs `scorebench run progress` inside that exact
 container. It rejects any response whose token scope or run ID differs from the
 configured worker.
 
+Before that read, a visibly busy worker emits a scoped `activity` ping no more
+often than `activity_heartbeat_seconds`. The default is five minutes, safely
+inside Scorebench's 15-minute unsupported-gap cap. The watcher withholds the ping
+for idle or completed workers and when the recent busy evidence has not changed;
+a frozen TUI therefore cannot manufacture indefinite active time. The ping and
+progress response must both match the exact configured run.
+
 It retains per-run high-water active time, elapsed time, and tokens. A transient
 regression cannot reverse target evidence. An existing active marker remains
 authoritative across watcher restarts.
@@ -165,9 +173,10 @@ If a separate repair monitor is unavoidable:
 
 Never repair from an expired host credential.
 
-Pane text is a heuristic, not proof of inference progress. Separately monitor
-exact process arguments, process presence, frozen retry counters, and scoped
-history. Sample retry counters twice before declaring a request wedged.
+Pane text remains bounded evidence, not proof of useful inference progress.
+Separately monitor exact process arguments, process presence, frozen retry
+counters, and scoped history. Sample retry counters twice before declaring a
+request wedged.
 
 ## Coordinator Verification
 

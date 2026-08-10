@@ -74,14 +74,27 @@ For a resumed worker:
 scorebench run ping --event resume --note "worker session resumed"
 ```
 
+While actively working, send a trusted liveness observation at least every five
+minutes:
+
+```bash
+scorebench run ping --event activity --note "actively optimizing"
+```
+
+Do not send activity pings during waits, cooldown sleeps, idle prompts, or after
+completion. For autonomous tmux runs, use the bundled watcher: it emits scoped,
+throttled activity only when the exact worker has changing recent busy evidence.
+This also covers long tool calls during which the agent cannot issue a command.
+
 Require the current run ID and a heartbeat with the requested event. A
 pre-bound token is not enough. Do not optimize or submit until the ping
 succeeds.
 
 Use `scorebench run progress` for authoritative run-scoped active time, elapsed
-time, tokens, sources, and measurement timestamps. It measures at the latest
-submitted candidate and does not create a heartbeat when polled. Never parse
-dashboard HTML or treat `scorebench best` as the latest timing point.
+time, tokens, sources, and measurement timestamps. Time advances through the
+latest trusted candidate or ping; tokens retain their own measurement timestamp.
+Polling progress never creates a heartbeat. Never parse dashboard HTML or treat
+`scorebench best` as the latest timing point.
 
 ## Capture The Trace Boundary
 
