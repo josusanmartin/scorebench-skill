@@ -325,11 +325,134 @@ def claude_jsonl_total(path: Path) -> int:
     return claude_jsonl_snapshot(path).total_tokens
 
 
+def grok_inference_snapshot(ctx: dict[str, Any]) -> UsageSnapshot:
+    inclusive_input = usage_int(ctx, "prompt_tokens")
+    output_tokens = usage_int(ctx, "completion_tokens")
+    cache_read_tokens = usage_int(ctx, "cached_prompt_tokens")
+    if None in (inclusive_input, output_tokens, cache_read_tokens):
+        raise SystemExit(
+            "invalid Grok inference usage: prompt_tokens, completion_tokens, "
+            "and cached_prompt_tokens are all required"
+        )
+    assert inclusive_input is not None
+    assert output_tokens is not None
+    assert cache_read_tokens is not None
+    if cache_read_tokens > inclusive_input:
+        raise SystemExit(
+            "invalid Grok inference usage: cached_prompt_tokens exceeds "
+            "prompt_tokens"
+        )
+    reasoning_tokens = usage_int(ctx, "reasoning_tokens")
+    if reasoning_tokens is not None and reasoning_tokens > output_tokens:
+        raise SystemExit(
+            "invalid Grok inference usage: reasoning_tokens exceeds "
+            "completion_tokens"
+        )
+    fresh_input_tokens = inclusive_input - cache_read_tokens
+    return UsageSnapshot(
+        total_tokens=fresh_input_tokens + output_tokens,
+        input_tokens=fresh_input_tokens,
+        output_tokens=output_tokens,
+        cache_creation_tokens=0,
+        cache_read_tokens=cache_read_tokens,
+        reasoning_output_tokens=reasoning_tokens,
+    )
+
+
+def grok_unified_log_path(updates_path: Path) -> Path:
+    for parent in updates_path.parents:
+        if parent.name == "sessions":
+            return parent.parent / "logs" / "unified.jsonl"
+    raise SystemExit(
+        f"cannot locate Grok unified log from {updates_path}; pass --grok-log"
+    )
+
+
+def grok_jsonl_snapshot(
+    path: Path, *, unified_log_path: Path | None = None
+) -> UsageSnapshot:
+    session_ids: set[str] = set()
+    with path.open("r", encoding="utf-8") as handle:
+        for line in handle:
+            line = line.strip()
+            if not line:
+                continue
+            try:
+                event = json.loads(line)
+            except json.JSONDecodeError:
+                continue
+            if not isinstance(event, dict):
+                continue
+            params = event.get("params")
+            if not isinstance(params, dict):
+                continue
+            session_id = params.get("sessionId")
+            if isinstance(session_id, str) and session_id.strip():
+                session_ids.add(session_id.strip())
+    if not session_ids:
+        raise SystemExit(f"no Grok sessionId found in {path}")
+    if len(session_ids) > 1:
+        raise SystemExit(
+            f"multiple Grok sessions found in {path}; use one updates.jsonl per run"
+        )
+    session_id = next(iter(session_ids))
+    log_path = unified_log_path or grok_unified_log_path(path)
+    identified: dict[tuple[Any, ...], UsageSnapshot] = {}
+    with log_path.open("r", encoding="utf-8") as handle:
+        for line in handle:
+            line = line.strip()
+            if not line:
+                continue
+            try:
+                event = json.loads(line)
+            except json.JSONDecodeError:
+                continue
+            if not isinstance(event, dict):
+                continue
+            if event.get("msg") != "shell.turn.inference_done":
+                continue
+            if event.get("sid") != session_id:
+                continue
+            ctx = event.get("ctx")
+            if not isinstance(ctx, dict):
+                raise SystemExit(
+                    f"Grok inference usage is missing ctx in {log_path}"
+                )
+            snapshot = grok_inference_snapshot(ctx)
+            timestamp = event.get("ts")
+            if not isinstance(timestamp, str) or not timestamp.strip():
+                raise SystemExit(
+                    f"Grok inference usage is missing a timestamp in {log_path}"
+                )
+            stable_id = (timestamp.strip(), ctx.get("loop_index"))
+            previous = identified.get(stable_id)
+            if previous is not None and previous != snapshot:
+                raise SystemExit(
+                    f"conflicting Grok inference records in {log_path}"
+                )
+            identified[stable_id] = snapshot
+    if not identified:
+        return UsageSnapshot(
+            total_tokens=0,
+            input_tokens=0,
+            output_tokens=0,
+            cache_creation_tokens=0,
+            cache_read_tokens=0,
+            reasoning_output_tokens=0,
+        )
+    return aggregate_snapshots(list(identified.values()), log_path, "Grok inference")
+
+
 def read_snapshot(
     args: argparse.Namespace, *, accounting_version: int = ACCOUNTING_VERSION
 ) -> UsageSnapshot:
-    if args.codex_jsonl and args.claude_jsonl:
-        raise SystemExit("provide only one of --codex-jsonl or --claude-jsonl")
+    jsonl_sources = [args.codex_jsonl, args.claude_jsonl, args.grok_jsonl]
+    if sum(bool(source) for source in jsonl_sources) > 1:
+        raise SystemExit(
+            "provide only one of --codex-jsonl, --claude-jsonl, or --grok-jsonl"
+        )
+    if args.grok_log and not args.grok_jsonl:
+        raise SystemExit("--grok-log requires --grok-jsonl")
     if args.codex_jsonl:
         return codex_jsonl_snapshot(
             Path(args.codex_jsonl), accounting_version=accounting_version
@@ -338,8 +461,15 @@ def read_snapshot(
         return claude_jsonl_snapshot(
             Path(args.claude_jsonl), accounting_version=accounting_version
         )
+    if args.grok_jsonl:
+        return grok_jsonl_snapshot(
+            Path(args.grok_jsonl),
+            unified_log_path=Path(args.grok_log) if args.grok_log else None,
+        )
     if args.total_tokens is None:
-        raise SystemExit("provide --total-tokens, --codex-jsonl, or --claude-jsonl")
+        raise SystemExit(
+            "provide --total-tokens, --codex-jsonl, --claude-jsonl, or --grok-jsonl"
+        )
     if args.total_tokens < 0:
         raise SystemExit("--total-tokens cannot be negative")
     return UsageSnapshot(total_tokens=args.total_tokens)
@@ -356,6 +486,8 @@ def tokens_source_from_args(args: argparse.Namespace) -> str | None:
         return "codex_exec_jsonl"
     if args.claude_jsonl:
         return "claude_code_jsonl"
+    if args.grok_jsonl:
+        return "grok_session_jsonl"
     return None
 
 
@@ -364,6 +496,8 @@ def usage_source_for(tokens_source: str) -> str:
         return "codex_usage"
     if tokens_source.startswith("claude_"):
         return "claude_code"
+    if tokens_source.startswith("grok_"):
+        return "grok_build"
     if tokens_source in {"provider_usage", "api_meter"}:
         return "api_meter"
     if tokens_source in {"runner_measured", "launcher"}:
@@ -424,6 +558,8 @@ def current_run_usage(
     required = (
         ("input_tokens", "output_tokens", "cache_creation_tokens")
         if args.claude_jsonl
+        else ("input_tokens", "output_tokens", "cache_read_tokens")
+        if args.grok_jsonl
         else ("input_tokens", "output_tokens")
         if args.codex_jsonl
         else ()
@@ -531,7 +667,9 @@ def add_total_args(parser: argparse.ArgumentParser) -> None:
     parser.add_argument("--total-tokens", type=int, help="current exact cumulative token count from the runner")
     parser.add_argument("--codex-jsonl", help="Codex exec --json event log to parse")
     parser.add_argument("--claude-jsonl", help="current Claude Code session JSONL transcript to parse")
-    parser.add_argument("--source", help="usage source, for example codex_goal, codex_exec_jsonl, claude_code_jsonl, provider_usage")
+    parser.add_argument("--grok-jsonl", help="current Grok session updates.jsonl to parse")
+    parser.add_argument("--grok-log", help="Grok unified.jsonl override; normally discovered from --grok-jsonl")
+    parser.add_argument("--source", help="usage source, for example codex_goal, codex_exec_jsonl, claude_code_jsonl, grok_session_jsonl, provider_usage")
     parser.add_argument("--confidence", choices=["exact", "parsed", "estimated"])
 
 

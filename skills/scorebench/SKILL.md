@@ -44,6 +44,9 @@ test -f "${CODEX_HOME:-$HOME/.codex}/skills/scorebench/SKILL.md"
 
 # Claude Code
 test -f "$HOME/.claude/skills/scorebench/SKILL.md"
+
+# Grok
+test -f "$HOME/.grok/skills/scorebench/SKILL.md"
 ```
 
 If absent, install `skills/scorebench` from
@@ -73,8 +76,11 @@ Apply these hard gates to every worker:
    run-scoped source and use the token helper so provider JSONL is deduplicated
    and normalized. Working tokens exclude cached-input reads; the separate
    cache-read counter remains available for API-equivalent cost. Snapshot before
-   every submission and finish with `scorebench run usage`. Never guess a token
-   split or model cost.
+   every submission and finish with `scorebench run usage`. Grok workers must
+   bind the active session through `updates.jsonl` and let the helper read its
+   exact unified inference log; Grok's aggregate `totalTokens` includes cached
+   reads and is not a valid Scorebench working-token total.
+   Never guess a token split or model cost.
 7. Submit the simplest correct protective baseline in the first work cycle,
    then optimize in small tested increments. Refresh pending candidates instead
    of resubmitting them.

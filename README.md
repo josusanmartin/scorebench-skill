@@ -60,6 +60,17 @@ rsync -a --delete \
 test -f "$HOME/.claude/skills/scorebench/SKILL.md"
 ```
 
+For Grok:
+
+```bash
+git clone https://github.com/josusanmartin/scorebench-skill.git "$HOME/scorebench-skill"
+mkdir -p "$HOME/.grok/skills/scorebench"
+rsync -a --delete \
+  "$HOME/scorebench-skill/skills/scorebench/" \
+  "$HOME/.grok/skills/scorebench/"
+test -f "$HOME/.grok/skills/scorebench/SKILL.md"
+```
+
 Restart the agent CLI after installing or updating the skill. To update an
 existing checkout:
 
@@ -258,9 +269,11 @@ Dashboards compare strategies by score per token and per API-equivalent cost,
 so submitted usage must be honest. The skill ships `scripts/token_usage.py`, a
 helper that baselines usage when the run starts and emits run-relative working
 tokens, available input/output/cache categories, and provenance before each
-submission. It parses Codex JSONL and Claude Code session JSONL exactly. Cache
+submission. It parses Codex, Claude Code, and Grok session JSONL exactly. Cache
 reads are excluded from working tokens but retained for the server's model-cost
-calculation.
+calculation. Grok's native aggregate includes cached reads, so Grok workers
+must use the helper's `--grok-jsonl` path rather than submit `totalTokens`
+directly.
 
 Run identity metadata (skills, model, effort, autonomy) is run-level: set it
 once with `scorebench run start`, not on every submission — the harness copies the
