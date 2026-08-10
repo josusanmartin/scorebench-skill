@@ -48,6 +48,7 @@ KNOWN_TOP_LEVEL = {
     "docker_command",
     "recovery_poll_seconds",
     "active_poll_seconds",
+    "activity_heartbeat_seconds",
     "target_active_seconds",
     "nudge_seconds",
     "resume_cooldown_seconds",
@@ -88,6 +89,7 @@ class Config:
     docker_command: Tuple[str, ...]
     recovery_poll_seconds: float
     active_poll_seconds: float
+    activity_heartbeat_seconds: float
     target_active_seconds: float
     nudge_seconds: float
     resume_cooldown_seconds: float
@@ -209,6 +211,9 @@ def load_config(path: Path) -> Config:
         docker_command=docker_command,
         recovery_poll_seconds=_positive_number(raw, "recovery_poll_seconds", 30),
         active_poll_seconds=_positive_number(raw, "active_poll_seconds", 120),
+        activity_heartbeat_seconds=_positive_number(
+            raw, "activity_heartbeat_seconds", 300
+        ),
         target_active_seconds=_positive_number(raw, "target_active_seconds", 14400),
         nudge_seconds=_positive_number(raw, "nudge_seconds", 300),
         resume_cooldown_seconds=_positive_number(
@@ -325,6 +330,12 @@ def is_worker_busy(pane_text: str) -> bool:
     return any(pattern in lowered for pattern in BUSY_PATTERNS)
 
 
+def busy_evidence_fingerprint(pane_text: str) -> str:
+    recent_lines = [line for line in pane_text.splitlines() if line.strip()]
+    evidence = "\n".join(recent_lines[-BUSY_STATUS_LINES:])
+    return hashlib.sha256(evidence.encode("utf-8")).hexdigest()
+
+
 def nudge_text(
     worker: Worker,
     active: float,
@@ -334,7 +345,7 @@ def nudge_text(
 ) -> str:
     return (
         f"Continue only the same existing ScoreBench run {worker.run_id}. "
-        f"Its own latest submitted active time is {format_number(active)} seconds "
+        f"Its own latest trusted active time is {format_number(active)} seconds "
         f"and submitted token total is {format_number(tokens)}; the active-time "
         f"target is {format_number(target)} seconds. Keep independently optimizing "
         "in this isolated workspace, run `scorebench run ping --event resume`, "
@@ -354,7 +365,7 @@ def finalize_text(
 ) -> str:
     return (
         f"Continue only the same existing ScoreBench run {worker.run_id}. "
-        f"Its latest submitted active time is {format_number(active)} seconds "
+        f"Its latest trusted active time is {format_number(active)} seconds "
         f"and submitted token total is {format_number(tokens)}. The target marker "
         f"{active_marker} exists. Run `scorebench run ping --event resume`, finish "
         "the current safe operation, refresh pending candidates, verify the best "
@@ -423,6 +434,10 @@ class Supervisor:
         self.last_resume = {
             worker.run_id: float("-inf") for worker in config.workers
         }
+        self.last_activity_heartbeat = {
+            worker.run_id: float("-inf") for worker in config.workers
+        }
+        self.last_activity_evidence = {worker.run_id: "" for worker in config.workers}
         self.high_water_active = {worker.run_id: 0.0 for worker in config.workers}
         self.high_water_elapsed = {worker.run_id: 0.0 for worker in config.workers}
         self.high_water_tokens = {worker.run_id: 0.0 for worker in config.workers}
@@ -495,6 +510,38 @@ class Supervisor:
                 "the ScoreBench deployment exposes /run/progress"
             )
         return parse_run_progress(result.stdout, worker.run_id)
+
+    def record_activity_heartbeat(self, worker: Worker) -> None:
+        result = self.docker(
+            "exec",
+            worker.container,
+            "scorebench",
+            "run",
+            "ping",
+            "--event",
+            "activity",
+            "--note",
+            "watcher observed exact worker pane busy",
+            "--meta",
+            "activity_evidence=watcher_busy",
+        )
+        if result.returncode != 0:
+            detail = (result.stderr or result.stdout).strip()
+            if len(detail) > 500:
+                detail = detail[-500:]
+            raise RuntimeError(
+                "scoped activity heartbeat failed"
+                + (f": {detail}" if detail else "")
+            )
+        try:
+            payload = json.loads(result.stdout)
+        except json.JSONDecodeError as exc:
+            raise RuntimeError(f"activity heartbeat did not return JSON: {exc}") from exc
+        heartbeat = payload.get("heartbeat") if isinstance(payload, dict) else None
+        if payload.get("run_id") != worker.run_id or not isinstance(heartbeat, dict):
+            raise RuntimeError("activity heartbeat response did not match the exact run")
+        if str(heartbeat.get("event") or "").lower() != "activity":
+            raise RuntimeError("activity heartbeat response has the wrong event")
 
     def container_running(self, worker: Worker) -> bool:
         result = self.docker(
@@ -629,6 +676,35 @@ class Supervisor:
         now = time.monotonic()
         for worker in self.config.workers:
             try:
+                completion_marker_exists = self.marker_exists(
+                    worker, self.config.completion_marker
+                )
+                recent = (
+                    ""
+                    if completion_marker_exists
+                    else self.capture_pane(worker, history=80)
+                )
+                busy = is_worker_busy(recent)
+                if (
+                    busy
+                    and now - self.last_activity_heartbeat[worker.run_id]
+                    >= self.config.activity_heartbeat_seconds
+                ):
+                    evidence = busy_evidence_fingerprint(recent)
+                    if evidence == self.last_activity_evidence[worker.run_id]:
+                        log(
+                            f"{worker.run_id} busy status has not changed; "
+                            "activity heartbeat withheld"
+                        )
+                    else:
+                        try:
+                            self.record_activity_heartbeat(worker)
+                        except Exception as exc:
+                            log(f"{worker.run_id} activity heartbeat failed: {exc}")
+                        else:
+                            self.last_activity_heartbeat[worker.run_id] = time.monotonic()
+                            self.last_activity_evidence[worker.run_id] = evidence
+
                 progress = self.worker_progress(worker)
                 observed_active = progress.active_seconds
                 observed_elapsed = progress.elapsed_seconds
@@ -666,10 +742,6 @@ class Supervisor:
                 active_marker_exists = self.marker_exists(
                     worker, self.config.active_marker
                 )
-                completion_marker_exists = self.marker_exists(
-                    worker, self.config.completion_marker
-                )
-
                 if (
                     active_marker_exists
                     or active >= self.config.target_active_seconds
@@ -692,8 +764,6 @@ class Supervisor:
                         )
                         continue
 
-                    recent = self.capture_pane(worker, history=80)
-                    busy = is_worker_busy(recent)
                     if (
                         not busy
                         and now - self.last_nudge[worker.run_id]
@@ -726,8 +796,6 @@ class Supervisor:
                     )
                     continue
 
-                recent = self.capture_pane(worker, history=80)
-                busy = is_worker_busy(recent)
                 if (
                     not busy
                     and now - self.last_nudge[worker.run_id]

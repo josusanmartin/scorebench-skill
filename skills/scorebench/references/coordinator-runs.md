@@ -223,7 +223,7 @@ SCOREBENCH_URL=<url> SCOREBENCH_RUN_TOKEN=<lane-token> scorebench history
 SCOREBENCH_URL=<url> SCOREBENCH_RUN_TOKEN=<lane-token> scorebench best
 ```
 
-Use `run progress` for latest submitted active time/tokens, current submission
+Use `run progress` for latest trusted active time/tokens, current submission
 allowance when exposed, and history for candidate state. Refresh every pending
 candidate until terminal.
 
@@ -267,7 +267,7 @@ repairs infrastructure, not solutions.
 ## Report And Tear Down
 
 Report each lane's verified runtime condition, best terminal candidate/score,
-pending/failing candidates, exact tokens/source, latest submitted
+pending/failing candidates, exact tokens/source, latest trusted
 `progress.active_seconds`, and auth/restart caveats.
 
 Before cleanup, archive only permitted final artifacts and record final usage.

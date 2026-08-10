@@ -51,6 +51,7 @@ class ConfigTests(unittest.TestCase):
     def test_loads_defaults(self):
         config = self.load(valid_config())
         self.assertEqual(config.target_active_seconds, 14400)
+        self.assertEqual(config.activity_heartbeat_seconds, 300)
         self.assertEqual(config.docker_command, ("docker",))
         self.assertTrue(config.enforce_active_gate)
         self.assertIsNone(config.report_url)
@@ -236,6 +237,7 @@ class SupervisorTests(unittest.TestCase):
             docker_command=("docker",),
             recovery_poll_seconds=30,
             active_poll_seconds=120,
+            activity_heartbeat_seconds=300,
             target_active_seconds=14400,
             nudge_seconds=300,
             resume_cooldown_seconds=300,
@@ -288,6 +290,152 @@ class SupervisorTests(unittest.TestCase):
                 )
             ],
         )
+
+    def test_activity_heartbeat_uses_scoped_cli_inside_exact_container(self):
+        class FakeSupervisor(WATCH.Supervisor):
+            def __init__(self, config):
+                super().__init__(config)
+                self.commands = []
+
+            def docker(self, *args):
+                self.commands.append(args)
+                return subprocess_result(
+                    stdout=json.dumps(
+                        {
+                            "run_id": "run-one",
+                            "heartbeat": {"event": "activity"},
+                        }
+                    )
+                )
+
+        supervisor = FakeSupervisor(self.config())
+        supervisor.record_activity_heartbeat(supervisor.config.workers[0])
+        self.assertEqual(
+            supervisor.commands,
+            [
+                (
+                    "exec",
+                    "container-one",
+                    "scorebench",
+                    "run",
+                    "ping",
+                    "--event",
+                    "activity",
+                    "--note",
+                    "watcher observed exact worker pane busy",
+                    "--meta",
+                    "activity_evidence=watcher_busy",
+                )
+            ],
+        )
+
+    def test_busy_worker_heartbeats_before_reading_progress(self):
+        class FakeSupervisor(WATCH.Supervisor):
+            def __init__(self, config):
+                super().__init__(config)
+                self.calls = []
+
+            def marker_exists(self, worker, marker):
+                return False
+
+            def capture_pane(self, worker, history=120):
+                return "Working (42s - esc to interrupt)"
+
+            def record_activity_heartbeat(self, worker):
+                self.calls.append(("heartbeat", worker.run_id))
+
+            def worker_progress(self, worker):
+                self.calls.append(("progress", worker.run_id))
+                return SupervisorTests.progress()
+
+        supervisor = FakeSupervisor(self.config())
+        supervisor.active_once()
+        self.assertEqual(
+            supervisor.calls[:2],
+            [("heartbeat", "run-one"), ("progress", "run-one")],
+        )
+
+    def test_idle_and_completed_workers_do_not_emit_activity_heartbeats(self):
+        class FakeSupervisor(WATCH.Supervisor):
+            def __init__(self, config, *, completed):
+                super().__init__(config)
+                self.completed = completed
+                self.heartbeats = []
+
+            def marker_exists(self, worker, marker):
+                return self.completed and marker == self.config.completion_marker
+
+            def capture_pane(self, worker, history=120):
+                return "Ready for another prompt"
+
+            def record_activity_heartbeat(self, worker):
+                self.heartbeats.append(worker.run_id)
+
+            def worker_progress(self, worker):
+                return SupervisorTests.progress()
+
+            def nudge(self, worker, active, tokens):
+                pass
+
+        for completed in (False, True):
+            with self.subTest(completed=completed):
+                supervisor = FakeSupervisor(self.config(), completed=completed)
+                supervisor.active_once()
+                self.assertEqual(supervisor.heartbeats, [])
+
+    def test_busy_activity_heartbeat_is_throttled(self):
+        class FakeSupervisor(WATCH.Supervisor):
+            def __init__(self, config):
+                super().__init__(config)
+                self.heartbeats = []
+
+            def marker_exists(self, worker, marker):
+                return False
+
+            def capture_pane(self, worker, history=120):
+                return "Thinking"
+
+            def record_activity_heartbeat(self, worker):
+                self.heartbeats.append(worker.run_id)
+
+            def worker_progress(self, worker):
+                return SupervisorTests.progress()
+
+        supervisor = FakeSupervisor(self.config())
+        with mock.patch.object(WATCH.time, "monotonic", return_value=1_000):
+            supervisor.active_once()
+            supervisor.active_once()
+        self.assertEqual(supervisor.heartbeats, ["run-one"])
+
+    def test_unchanged_busy_evidence_does_not_extend_activity(self):
+        class FakeSupervisor(WATCH.Supervisor):
+            def __init__(self, config):
+                super().__init__(config)
+                self.heartbeats = []
+
+            def marker_exists(self, worker, marker):
+                return False
+
+            def capture_pane(self, worker, history=120):
+                return "Thinking"
+
+            def record_activity_heartbeat(self, worker):
+                self.heartbeats.append(worker.run_id)
+
+            def worker_progress(self, worker):
+                return SupervisorTests.progress()
+
+        supervisor = FakeSupervisor(self.config())
+        supervisor.last_activity_heartbeat["run-one"] = 0
+        supervisor.last_activity_evidence["run-one"] = WATCH.busy_evidence_fingerprint(
+            "Thinking"
+        )
+        with mock.patch.object(WATCH.time, "monotonic", return_value=1_000):
+            with mock.patch.object(WATCH, "log") as watcher_log:
+                supervisor.active_once()
+        self.assertEqual(supervisor.heartbeats, [])
+        messages = "\n".join(call.args[0] for call in watcher_log.call_args_list)
+        self.assertIn("activity heartbeat withheld", messages)
 
     def test_premature_completion_is_preserved_and_not_nudged(self):
         class FakeSupervisor(WATCH.Supervisor):
