@@ -145,6 +145,174 @@ class TokenUsageTests(unittest.TestCase):
         self.assertIn("--usage-source claude_code", result.stdout)
         self.assertIn("--usage-confidence exact", result.stdout)
 
+    def test_grok_jsonl_sums_inferences_and_excludes_cache_reads(self):
+        grok_root = self.root / ".grok"
+        updates = grok_root / "sessions" / "%2Fwork" / "session-1" / "updates.jsonl"
+        unified = grok_root / "logs" / "unified.jsonl"
+        updates.parent.mkdir(parents=True)
+        unified.parent.mkdir(parents=True)
+        updates.write_text(
+            json.dumps(
+                {
+                    "method": "session/update",
+                    "params": {"sessionId": "session-1", "update": {}},
+                }
+            )
+            + "\n",
+            encoding="utf-8",
+        )
+
+        def inference(ts, prompt, cached, completion, reasoning, loop_index):
+            return {
+                "ts": ts,
+                "msg": "shell.turn.inference_done",
+                "sid": "session-1",
+                "ctx": {
+                    "prompt_tokens": prompt,
+                    "cached_prompt_tokens": cached,
+                    "completion_tokens": completion,
+                    "reasoning_tokens": reasoning,
+                    "loop_index": loop_index,
+                },
+            }
+
+        first = inference("2026-08-10T00:00:00Z", 17_038, 128, 50, 47, 0)
+        second = inference("2026-08-10T00:01:00Z", 26_253, 17_024, 22, 15, 1)
+        # An exact duplicate log line is a replay, not another provider call.
+        unified.write_text(
+            json.dumps(first) + "\n" + json.dumps(first) + "\n",
+            encoding="utf-8",
+        )
+        started = json.loads(
+            self.run_helper("start", "--grok-jsonl", str(updates)).stdout
+        )
+        self.assertEqual(started["baseline_total_tokens"], 16_960)
+        self.assertEqual(started["baseline_usage"]["input_tokens"], 16_910)
+        self.assertEqual(started["baseline_usage"]["cache_read_tokens"], 128)
+        with unified.open("a", encoding="utf-8") as handle:
+            handle.write(json.dumps(second) + "\n")
+
+        result = self.run_helper("flags", "--grok-jsonl", str(updates))
+
+        self.assertIn("--total-tokens 9251", result.stdout)
+        self.assertIn("--input-tokens 9229", result.stdout)
+        self.assertIn("--output-tokens 22", result.stdout)
+        self.assertIn("--cache-creation-tokens 0", result.stdout)
+        self.assertIn("--cache-read-tokens 17024", result.stdout)
+        self.assertIn("--reasoning-output-tokens 15", result.stdout)
+        self.assertIn("--usage-source grok_build", result.stdout)
+        self.assertIn("--usage-confidence exact", result.stdout)
+        self.assertIn("--tokens-total-source grok_session_jsonl", result.stdout)
+
+    def test_grok_conflicting_duplicate_inference_fails_loudly(self):
+        updates = self.root / "grok-conflict-updates.jsonl"
+        unified = self.root / "grok-conflict-unified.jsonl"
+        updates.write_text(
+            json.dumps({"params": {"sessionId": "session-1"}}) + "\n",
+            encoding="utf-8",
+        )
+        base = {
+            "ts": "2026-08-10T00:00:00Z",
+            "msg": "shell.turn.inference_done",
+            "sid": "session-1",
+            "ctx": {
+                "prompt_tokens": 100,
+                "cached_prompt_tokens": 90,
+                "completion_tokens": 3,
+                "loop_index": 0,
+            },
+        }
+        first = json.loads(json.dumps(base))
+        first["ctx"]["reasoning_tokens"] = 1
+        second = json.loads(json.dumps(base))
+        second["ctx"]["reasoning_tokens"] = 2
+        unified.write_text(
+            json.dumps(first) + "\n" + json.dumps(second) + "\n",
+            encoding="utf-8",
+        )
+
+        result = self.run_helper(
+            "start",
+            "--grok-jsonl",
+            str(updates),
+            "--grok-log",
+            str(unified),
+            check=False,
+        )
+
+        self.assertNotEqual(result.returncode, 0)
+        self.assertIn("conflicting Grok inference records", result.stderr)
+
+    def test_grok_jsonl_rejects_multiple_sessions_and_schema_drift(self):
+        multiple = self.root / "grok-multiple.jsonl"
+        multiple.write_text(
+            json.dumps({"params": {"sessionId": "session-1"}})
+            + "\n"
+            + json.dumps({"params": {"sessionId": "session-2"}})
+            + "\n",
+            encoding="utf-8",
+        )
+        result = self.run_helper(
+            "start", "--grok-jsonl", str(multiple), check=False
+        )
+        self.assertNotEqual(result.returncode, 0)
+        self.assertIn("multiple Grok sessions", result.stderr)
+
+        changed = self.root / "grok-schema-changed.jsonl"
+        changed.write_text(
+            json.dumps({"params": {"sessionId": "session-1"}}) + "\n",
+            encoding="utf-8",
+        )
+        changed_log = self.root / "grok-schema-changed-unified.jsonl"
+        changed_log.write_text(
+            json.dumps(
+                {
+                    "ts": "2026-08-10T00:00:00Z",
+                    "msg": "shell.turn.inference_done",
+                    "sid": "session-1",
+                    "ctx": {
+                        "prompt_tokens": 10,
+                        "cached_prompt_tokens": 11,
+                        "completion_tokens": 2,
+                    },
+                }
+            )
+            + "\n",
+            encoding="utf-8",
+        )
+        result = self.run_helper(
+            "start",
+            "--grok-jsonl",
+            str(changed),
+            "--grok-log",
+            str(changed_log),
+            check=False,
+        )
+        self.assertNotEqual(result.returncode, 0)
+        self.assertIn("cached_prompt_tokens exceeds", result.stderr)
+
+    def test_grok_empty_session_has_an_exact_zero_baseline(self):
+        updates = self.root / "grok-empty-updates.jsonl"
+        unified = self.root / "grok-empty-unified.jsonl"
+        updates.write_text(
+            json.dumps({"params": {"sessionId": "session-1"}}) + "\n",
+            encoding="utf-8",
+        )
+        unified.write_text("", encoding="utf-8")
+
+        started = json.loads(
+            self.run_helper(
+                "start",
+                "--grok-jsonl",
+                str(updates),
+                "--grok-log",
+                str(unified),
+            ).stdout
+        )
+
+        self.assertEqual(started["baseline_total_tokens"], 0)
+        self.assertEqual(started["baseline_usage"]["cache_read_tokens"], 0)
+
     def test_jsonl_breakdown_defines_scorebench_working_total(self):
         log = self.root / "codex-total.jsonl"
         thread_id = "019fc3d8-e800-7f62-be5f-78bfdbeea6ba"

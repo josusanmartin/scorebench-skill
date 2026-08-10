@@ -11,7 +11,12 @@ submitting and ask for a supervised runner that exposes usage.
 Use the bundled helper:
 
 ```bash
-SCOREBENCH_TOKEN_HELPER="${CODEX_HOME:-$HOME/.codex}/skills/scorebench/scripts/token_usage.py"
+SCOREBENCH_SKILL_DIR="${CODEX_HOME:-$HOME/.codex}/skills/scorebench"
+test -f "$SCOREBENCH_SKILL_DIR/scripts/token_usage.py" || \
+  SCOREBENCH_SKILL_DIR="$HOME/.claude/skills/scorebench"
+test -f "$SCOREBENCH_SKILL_DIR/scripts/token_usage.py" || \
+  SCOREBENCH_SKILL_DIR="$HOME/.grok/skills/scorebench"
+SCOREBENCH_TOKEN_HELPER="$SCOREBENCH_SKILL_DIR/scripts/token_usage.py"
 SCOREBENCH_TOKEN_STATE="/work/.scorebench-token-usage.json"
 ```
 
@@ -81,9 +86,37 @@ conflicting counters. It sums fresh `input_tokens`, `output_tokens`, and
 `cache_creation_input_tokens`, while retaining but excluding
 `cache_read_input_tokens` from working tokens.
 
+For Grok, parse the active session's native `updates.jsonl` file. The launcher
+or active Grok session must identify the session ID; do not select an unrelated
+session by scanning all history.
+
+```bash
+export GROK_SESSION_JSONL="$HOME/.grok/sessions/<encoded-cwd>/<session-id>/updates.jsonl"
+python3 "$SCOREBENCH_TOKEN_HELPER" start \
+  --state "$SCOREBENCH_TOKEN_STATE" \
+  --grok-jsonl "$GROK_SESSION_JSONL" \
+  --source grok_session_jsonl \
+  --confidence exact
+```
+
+Grok's native `inputTokens` includes `cachedReadTokens`, and `totalTokens`
+includes those cached reads too. Never pass Grok's aggregate `totalTokens`
+directly to Scorebench. `turn_completed` also arrives too late for submissions
+made during a live agent turn. The helper uses `updates.jsonl` only to bind the
+session ID, then reads that session's exact `shell.turn.inference_done` records
+from `~/.grok/logs/unified.jsonl`. It converts inclusive prompt input to
+disjoint fresh input and cache-read counters and fails on multiple session IDs,
+incomplete counters, or conflicting duplicate records. Working tokens are
+fresh input plus output; cached reads remain available for exact cost pricing.
+The unified log is discovered from the normal Grok directory layout; use
+`--grok-log /absolute/path/to/unified.jsonl` only when a supervised launcher
+stores it elsewhere.
+
 For Gemini, use an exact current-session `/stats` total. For provider/API
 runners, sum the provider's usage fields for only this run and use
-`provider_usage` or `runner_measured` provenance.
+`provider_usage` or `runner_measured` provenance. If a provider reports cached
+input inside an aggregate total, send disjoint input, output, and cache counters
+instead of that aggregate.
 
 Never broadly search `~/.codex`, `~/.claude`, browser profiles, shell snapshots,
 or old transcripts to infer usage.
@@ -142,6 +175,16 @@ TOKEN_FLAGS="$(python3 "$SCOREBENCH_TOKEN_HELPER" flags \
   --state "$SCOREBENCH_TOKEN_STATE" \
   --claude-jsonl "$CLAUDE_CODE_JSONL" \
   --source claude_code_jsonl \
+  --confidence exact)"
+```
+
+Grok session JSONL:
+
+```bash
+TOKEN_FLAGS="$(python3 "$SCOREBENCH_TOKEN_HELPER" flags \
+  --state "$SCOREBENCH_TOKEN_STATE" \
+  --grok-jsonl "$GROK_SESSION_JSONL" \
+  --source grok_session_jsonl \
   --confidence exact)"
 ```
 
