@@ -29,7 +29,8 @@ Before creating server state:
    volume. `--skills scorebench` is metadata, not an installer.
 5. Verify target run IDs, containers, volumes, tmux session, and windows do not
    exist.
-6. Resolve the actual provider model identifier and supported effort value.
+6. Resolve the actual coding harness, provider model identifier, and supported
+   effort value.
 
 Treat `scorebench admin launch --dry-run` as mutating: it creates run keys and
 prompt files but skips tmux. Use local help and file/identifier validation
@@ -51,7 +52,7 @@ prevents concurrent same-model/effort batches from colliding.
 Record:
 
 - connector, credential profile, and exercise;
-- model and effort;
+- model, coding harness, and effort;
 - autonomous, steered, or mixed operation;
 - solving skills actually used;
 - strategy, hypothesis, lane, and batch timestamp;
@@ -70,7 +71,8 @@ directory and use one per lane.
 
 Every goal must:
 
-- name exact run ID, lane, model, effort, autonomy, and solving skills;
+- name exact run ID, lane, model, coding harness, effort, autonomy, and solving
+  skills;
 - require context, exercise, current run, start/resume ping, and exact token
   baseline before optimization;
 - require a correct protective baseline in the first work cycle;
@@ -124,6 +126,7 @@ scorebench admin create-run-token \
   --notes "<batch and lane>" \
   --skills scorebench \
   --model <actual-model> \
+  --coding-harness <actual-coding-harness> \
   --effort <actual-effort> \
   --autonomy autonomous \
   --json > "<coordinator-secret-dir>/lane<N>.json"
@@ -132,6 +135,12 @@ scorebench admin create-run-token \
 Omit `--credential` for credentialless connectors such as `vliw`. Add solving
 skills and GPU only when used. Treat server-returned fields, including a
 normalized credential profile, as authoritative.
+
+The coding harness is the executable/interface, independent of model. Use
+`Claude Code` for Claude, `Codex` for GPT/OpenAI, `Grok Build` for Grok, `Kimi
+Code` for Kimi, `ZCode` for GLM, and the actual native harness for other models.
+A Claude model launched inside Codex records `Codex`; do not relabel it
+`Claude Code` merely because of the model name.
 
 Keep token JSON/manifests outside worker workspaces. Use a mode-700 directory
 and mode-600 files. Never print raw manifests or prompt files; redact tokens

@@ -37,6 +37,7 @@ complete original instructions:
 scorebench run start --id <unique-run-id> \
   --skills scorebench \
   --model <actual-model> \
+  --coding-harness <actual-coding-harness> \
   --effort <actual-effort> \
   --autonomy autonomous \
   --prompt-file /absolute/path/to/original-assignment.md
@@ -46,6 +47,23 @@ Do not summarize or rewrite the prompt. Add optional label, strategy,
 hypothesis, notes, and one fixed GPU when known. Include another skill only if
 the worker genuinely uses it. A no-solving-skill run records
 `--skills scorebench`.
+
+`--model` and `--coding-harness` report different facts. The model is the
+inference model; the coding harness is the agent executable/interface running
+it. Use the actual runtime:
+
+| Model family | Normal coding harness |
+| --- | --- |
+| Claude | `Claude Code` |
+| GPT/OpenAI | `Codex` |
+| Grok | `Grok Build` |
+| Kimi | `Kimi Code` |
+| GLM | `ZCode` |
+| Other | its actual native coding harness |
+
+Do not infer a crossed setup from the model. A Claude model deliberately run
+inside Codex records `--coding-harness Codex`; this applies to the historical
+`claude-codex-*` runs.
 
 If a pre-bound run lacks optional metadata and has no submissions, update that
 same ID with `run start`; do not create a replacement. If Scorebench reports a

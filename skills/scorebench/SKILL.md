@@ -64,7 +64,7 @@ Apply these hard gates to every worker:
    dedicated `vliw` connector is credentialless and appears as `ScoreBench
    main`, but still requires a scoped run token.
 3. Use exactly one run. Keep a pre-bound run; otherwise start one with the
-   actual model, effort, autonomy, skills, and complete original
+   actual model, coding harness, effort, autonomy, skills, and complete original
    `--prompt-file`.
 4. Send a successful `scorebench run ping --event start` for a new worker
    session or `--event resume` for a resumed session before optimization and
@@ -141,8 +141,13 @@ Distinguish lifecycle infrastructure from solving methodology:
 - Add `problem-agnostic-optimization` or another solving skill only when the
   worker genuinely uses it.
 
-Keep model, effort, autonomy, prompt, skills, GPU, strategy, and notes aligned
-with the actual runtime and experimental condition.
+Keep model, coding harness, effort, autonomy, prompt, skills, GPU, strategy,
+and notes aligned with the actual runtime and experimental condition. The
+coding harness is the agent interface that ran the model, not the model
+provider: normally Claude uses `Claude Code`, GPT/OpenAI uses `Codex`, Grok
+uses `Grok Build`, Kimi uses `Kimi Code`, GLM uses `ZCode`, and other models
+use their actual native coding harness. Record `Codex` for a Claude model run
+inside Codex, such as the historical `claude-codex-*` runs.
 
 ## Coordinator Invariants
 
@@ -154,8 +159,9 @@ Before launching a batch:
 4. Validate provider auth with a real bounded inference request.
 5. Install the skill in the actual worker image/state.
 6. Start every container before creating tmux attachment windows.
-7. Verify live process arguments and TUI headers match model, effort, and
-   permission/autonomy metadata before sending goals.
+7. Verify the executable, live process arguments, and TUI headers match coding
+   harness, model, effort, and permission/autonomy metadata before sending
+   goals.
 8. Monitor scoped progress/history, candidate states, auth, and process
    liveness with hard-bounded commands.
 9. Tear down only exact batch-owned names; never use prefix globs, Docker

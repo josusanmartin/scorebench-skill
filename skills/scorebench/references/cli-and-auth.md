@@ -52,11 +52,14 @@ Before coordinating a batch:
 ```bash
 scorebench admin create-run-token --help |
   grep -E -- '--prompt|--prompt-file'
+scorebench admin create-run-token --help | grep -F -- '--coding-harness'
+scorebench run start --help | grep -F -- '--coding-harness'
 scorebench run progress --help
 ```
 
-The token command must expose a required `--prompt` or `--prompt-file` choice.
-Stop and upgrade if either capability is absent.
+The token command must expose a required `--prompt` or `--prompt-file` choice,
+and token/run-start commands must expose `--coding-harness`. Stop and upgrade
+if any capability is absent.
 
 Inspect launch semantics:
 

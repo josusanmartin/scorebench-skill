@@ -120,6 +120,7 @@ complete original assignment:
 scorebench run start --id run001 \
   --skills scorebench \
   --model <actual-model> \
+  --coding-harness <actual-coding-harness> \
   --effort <actual-effort> \
   --autonomy autonomous \
   --prompt-file /path/to/original-assignment.md
@@ -239,6 +240,7 @@ scorebench admin launch \
   --run-prefix no-skill- \
   --skills scorebench \
   --model gpt-5-codex \
+  --coding-harness Codex \
   --effort high \
   --autonomy autonomous \
   --goal 'Solve leaky-relu for 3 hours. Do not use exploits. Use the scorebench skill to submit.'
@@ -284,9 +286,14 @@ calculation. Grok's native aggregate includes cached reads, so Grok workers
 must use the helper's `--grok-jsonl` path rather than submit `totalTokens`
 directly.
 
-Run identity metadata (skills, model, effort, autonomy) is run-level: set it
-once with `scorebench run start`, not on every submission — the harness copies the
-active run metadata onto each candidate automatically.
+Run identity metadata (skills, model, coding harness, effort, autonomy) is
+run-level: set it once with `scorebench run start`, not on every submission.
+The harness copies the active run metadata onto each candidate automatically.
+The model and coding harness are distinct: use `Claude Code` for Claude,
+`Codex` for GPT/OpenAI, `Grok Build` for Grok, `Kimi Code` for Kimi, `ZCode`
+for GLM, and the actual native coding harness for other models. If Claude was
+run inside Codex, record `Codex`; the historical `claude-codex-*` runs are the
+known crossed case.
 
 ## Repository layout
 

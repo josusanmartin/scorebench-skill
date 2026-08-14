@@ -59,6 +59,7 @@ scorebench admin launch \
   --run-prefix <condition-timestamp-lane-prefix> \
   --skills scorebench \
   --model <actual-model> \
+  --coding-harness <actual-coding-harness> \
   --effort <actual-effort> \
   --autonomy autonomous \
   --goal-file /absolute/path/to/rendered-goal.md \
@@ -141,8 +142,11 @@ done
 ```
 
 Scorebench metadata does not configure the provider. Pass and later verify the
-same model/effort in both layers. Keep lane environment files mode 0600 until
-recovery is no longer needed, then remove only their exact paths.
+same coding harness, model, and effort in both layers. `Claude Code`, `Codex`,
+`Grok Build`, `Kimi Code`, and `ZCode` identify the executable/interface, not
+the model family. A Claude model launched by Codex records `Codex`. Keep lane
+environment files mode 0600 until recovery is no longer needed, then remove
+only their exact paths.
 
 ## Attach Container Workers
 
