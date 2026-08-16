@@ -137,8 +137,9 @@ skills and GPU only when used. Treat server-returned fields, including a
 normalized credential profile, as authoritative.
 
 The coding harness is the executable/interface, independent of model. Use
-`Claude Code` for Claude, `Codex` for GPT/OpenAI, `Grok Build` for Grok, `Kimi
-Code` for Kimi, `ZCode` for GLM, and the actual native harness for other models.
+`Claude Code` for Claude, `Codex` for GPT/OpenAI, `Deep Code` for DeepSeek,
+`Grok Build` for Grok, `Kimi Code` for Kimi (including model ID `k3`), `ZCode`
+for GLM, and the actual native harness for other models.
 A Claude model launched inside Codex records `Codex`; do not relabel it
 `Claude Code` merely because of the model name.
 

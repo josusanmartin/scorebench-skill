@@ -143,8 +143,9 @@ done
 
 Scorebench metadata does not configure the provider. Pass and later verify the
 same coding harness, model, and effort in both layers. `Claude Code`, `Codex`,
-`Grok Build`, `Kimi Code`, and `ZCode` identify the executable/interface, not
-the model family. A Claude model launched by Codex records `Codex`. Keep lane
+`Deep Code`, `Grok Build`, `Kimi Code`, and `ZCode` identify the
+executable/interface, not the model family. A Claude model launched by Codex
+records `Codex`. Keep lane
 environment files mode 0600 until recovery is no longer needed, then remove
 only their exact paths.
 

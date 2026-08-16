@@ -144,9 +144,10 @@ Distinguish lifecycle infrastructure from solving methodology:
 Keep model, coding harness, effort, autonomy, prompt, skills, GPU, strategy,
 and notes aligned with the actual runtime and experimental condition. The
 coding harness is the agent interface that ran the model, not the model
-provider: normally Claude uses `Claude Code`, GPT/OpenAI uses `Codex`, Grok
-uses `Grok Build`, Kimi uses `Kimi Code`, GLM uses `ZCode`, and other models
-use their actual native coding harness. Record `Codex` for a Claude model run
+provider: normally Claude uses `Claude Code`, GPT/OpenAI uses `Codex`, DeepSeek
+uses `Deep Code`, Grok uses `Grok Build`, Kimi (including model ID `k3`) uses
+`Kimi Code`, GLM uses `ZCode`, and other models use their actual native coding
+harness. Record `Codex` for a Claude model run
 inside Codex, such as the historical `claude-codex-*` runs.
 
 ## Coordinator Invariants

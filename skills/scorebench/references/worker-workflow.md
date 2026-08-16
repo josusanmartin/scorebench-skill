@@ -56,8 +56,9 @@ it. Use the actual runtime:
 | --- | --- |
 | Claude | `Claude Code` |
 | GPT/OpenAI | `Codex` |
+| DeepSeek | `Deep Code` |
 | Grok | `Grok Build` |
-| Kimi | `Kimi Code` |
+| Kimi, including model ID `k3` | `Kimi Code` |
 | GLM | `ZCode` |
 | Other | its actual native coding harness |
 
