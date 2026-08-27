@@ -170,4 +170,7 @@ Before launching a batch:
 
 Read [Coordinator runs](references/coordinator-runs.md) before issuing admin
 commands. `scorebench admin launch --dry-run` still creates keys and prompt
-files; it is not a side-effect-free validator.
+files; it is not a side-effect-free validator. For strategy x model matrices,
+prefer a YAML run plan: `scorebench admin plan plan.yaml` expands the cross
+product into per-cell tokens and prompts, and its `--dry-run` validates
+without creating anything.

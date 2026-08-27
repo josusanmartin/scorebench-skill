@@ -35,7 +35,9 @@ Before creating server state:
 Treat `scorebench admin launch --dry-run` as mutating: it creates run keys and
 prompt files but skips tmux. Use local help and file/identifier validation
 before the first token-creating command. Do not repeat a dry run with the same
-run IDs merely to test shape.
+run IDs merely to test shape. The exception is `scorebench admin plan
+--dry-run`, which only validates and prints the expanded matrix and creates
+nothing.
 
 ## Define Identities And Conditions
 
@@ -158,6 +160,44 @@ lanes.
 `scorebench admin launch` can create multiple tokens and prompt files. Use its
 JSON manifest as secret material. Persistent `/goal` or custom-container runs
 must also follow [tmux goal sessions](tmux-goal-sessions.md).
+
+For a strategy x model matrix, prefer one YAML run plan over repeated
+`create-run-token`/`launch` invocations:
+
+```yaml
+plan: <batch-name>
+connector: <connector>          # plus credential: unless credentialless
+exercise: <exercise>            # or exercises: [...]
+count: <lanes per cell>
+defaults:
+  effort: <effort>
+  autonomy: autonomous
+  skills: [scorebench]
+  goal_file: goals/shared.md    # paths resolve relative to the plan file
+models:
+  - <model-id>
+  - name: <model-id>
+    coding_harness: <harness>
+    effort: <override>
+strategies:
+  - name: <condition>
+    hypothesis: <hypothesis>
+    goal_file: goals/<condition>.md
+```
+
+`scorebench admin plan plan.yaml --dry-run` validates every cell and prints the
+matrix without creating anything. Without `--dry-run` it mints one token per
+cell (run ID `<strategy>-<model>`, exercise-prefixed for multi-exercise plans,
+`-NN` suffixes when `count > 1`), writes one rendered `prompt.md` per run, and
+saves a manifest containing every token — treat the workspace root as secret
+material like a launch manifest. Overrides merge defaults, then the model
+entry, then the strategy entry; the whole plan is rejected before any minting
+on unknown keys, missing goals, missing credentials, or run-ID collisions.
+Re-running an identical plan reuses the same run IDs, so rename the plan or
+strategies for a fresh batch. A `launch:` section starts tmux windows exactly
+like `admin launch`; omit it (or pass `--no-launch`) to hand prompt files to
+workers yourself. Goal rendering rules above apply unchanged: every cell's
+resolved goal becomes that token's stored `original_prompt`.
 
 ## Validate Provider Authentication
 
