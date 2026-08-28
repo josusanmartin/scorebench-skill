@@ -25,6 +25,7 @@ triggered by the task:
 | Solve a Paradigm Puzzles exercise | [Paradigm Puzzles](references/paradigm-puzzles.md), plus connector guidance |
 | Launch persistent interactive workers in tmux | [tmux goal sessions](references/tmux-goal-sessions.md) |
 | Supervise long-running tmux workers | [tmux watchers](references/tmux-watchers.md) |
+| Collect low-overhead timing-v2 shadow evidence | [passive timing observer](references/timing-observer.md) |
 | Build isolated workers without prior artifacts | [Clean-room Docker](references/clean-room-docker.md) |
 
 ## Required Installation Gate
@@ -68,9 +69,11 @@ Apply these hard gates to every worker:
    `--prompt-file`.
 4. Send a successful `scorebench run ping --event start` for a new worker
    session or `--event resume` for a resumed session before optimization and
-   before the first submission. During active work, preserve server-side timing
-   evidence with `--event activity` at least every five minutes. Use the bundled
-   watcher for long autonomous runs; never emit activity while idle or complete.
+   before the first submission. Then register the bundled passive timing observer
+   once; it runs outside the model loop and consumes no model tokens. Timing v2
+   is shadow-only, so keep the existing v1 activity pings until migration. Use
+   the host-side watcher for long autonomous runs instead of asking the model to
+   self-report on a timer; never emit activity while idle or complete.
 5. Immediately after that trusted ping, record the trace source and byte
    offset. Do all sanitization, compression, and upload after final usage and
    the finish ping; never include private reasoning or secrets.
@@ -88,7 +91,8 @@ Apply these hard gates to every worker:
    create a new candidate for unchanged content; reuse the original idempotency
    key only to recover an uncertain response and refresh pending candidates.
 8. Before each new candidate, use `scorebench run progress` to inspect the
-   authoritative trusted timing/token read and any `submission` allowance.
+   authoritative top-level v1 timing/token read and any `submission` allowance.
+   Treat nested `timing_v2` as diagnostic shadow evidence only.
    Honor `can_submit`, `retry_after_seconds`, and venue cooldowns while
    continuing local work. Never infer latest-run timing from dashboard HTML,
    ordinary elapsed time, or `scorebench best`.
@@ -119,7 +123,7 @@ the original.
 Follow the detailed worker, accounting, and trace references:
 
 ```text
-context -> exercise -> current/start -> ping -> trace boundary -> token baseline
+context -> exercise -> current/start -> ping -> passive observer -> trace boundary -> token baseline
 -> correct baseline -> submit -> refresh -> iterate -> final usage -> finish ping
 -> sanitized trace upload
 ```

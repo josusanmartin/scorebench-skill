@@ -259,6 +259,7 @@ Require evidence of:
 - installed skill;
 - `scorebench context`, exercise, and exact current run;
 - successful start/resume ping;
+- registered passive timing observer with no unresolved setup error;
 - exact token baseline;
 - tested protective baseline progressing to submission.
 

@@ -21,6 +21,12 @@ Use `scorebench run progress` field `progress.active_seconds`. Never stop from
 dashboard HTML, or `scorebench best`. Progress measures through the latest
 trusted candidate or activity ping and never advances merely because it is read.
 
+This is the authoritative v1 contract during the timing-v2 shadow. Nested
+`progress.timing_v2` is diagnostic only: log its bounds and coverage when useful,
+but do not create or delete markers from it. Each worker should separately
+register the [passive timing observer](timing-observer.md); that observer does not
+replace this completion watcher until an explicit migration.
+
 Both `active_marker` and `GOAL_COMPLETE` are monotonic evidence: the watcher never
 deletes either file. A premature completion marker is preserved and logged for
 operator review.
@@ -136,6 +142,10 @@ inside Scorebench's 15-minute unsupported-gap cap. The watcher withholds the pin
 for idle or completed workers and when the recent busy evidence has not changed;
 a frozen TUI therefore cannot manufacture indefinite active time. The ping and
 progress response must both match the exact configured run.
+
+Activity pings are a temporary v1 compatibility responsibility of this host-side
+watcher, not a recurring task for the model. Do not add prompt-based five-minute
+status reports when the watcher is running.
 
 It retains per-run high-water active time, elapsed time, and tokens. A transient
 regression cannot reverse target evidence. An existing active marker remains
