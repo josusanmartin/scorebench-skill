@@ -118,6 +118,37 @@ runners, sum the provider's usage fields for only this run and use
 input inside an aggregate total, send disjoint input, output, and cache counters
 instead of that aggregate.
 
+### OpenRouter (any harness, with USD cost)
+
+OpenRouter exposes exact tokens only in each response's `usage` object — never as
+a per-key total — so they must be captured at the response layer, independently
+of the harness. Start the bundled proxy once, point the harness's OpenAI-compatible
+base URL at it, and it records exact tokens plus OpenRouter's authoritative USD
+`cost` for every call, streaming or not:
+
+```bash
+export OPENROUTER_API_KEY=sk-or-...
+SCOREBENCH_OPENROUTER_LOG="/work/.scorebench-openrouter.jsonl"
+python3 "$SCOREBENCH_SKILL_DIR/scripts/openrouter_proxy.py" \
+  --log "$SCOREBENCH_OPENROUTER_LOG" --port 8787 &
+# then point the harness at the proxy (its own base-URL setting; OPENAI_BASE_URL for most):
+export OPENAI_BASE_URL="http://127.0.0.1:8787/api/v1"
+```
+
+Baseline and snapshot exactly like any other source, with `--openrouter-jsonl`.
+The helper adds an exact `--cost-usd` to the flags automatically, so the dollar
+cost is submitted with each candidate alongside the tokens — no token-price
+estimate, one key, any harness:
+
+```bash
+python3 "$SCOREBENCH_TOKEN_HELPER" start \
+  --state "$SCOREBENCH_TOKEN_STATE" --openrouter-jsonl "$SCOREBENCH_OPENROUTER_LOG"
+# before each submit:
+TOKEN_FLAGS="$(python3 "$SCOREBENCH_TOKEN_HELPER" flags \
+  --state "$SCOREBENCH_TOKEN_STATE" --openrouter-jsonl "$SCOREBENCH_OPENROUTER_LOG")"
+scorebench submit path/to/solution --label short-name $TOKEN_FLAGS
+```
+
 Never broadly search `~/.codex`, `~/.claude`, browser profiles, shell snapshots,
 or old transcripts to infer usage.
 

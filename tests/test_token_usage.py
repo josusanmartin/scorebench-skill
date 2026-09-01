@@ -645,6 +645,61 @@ class TokenUsageTests(unittest.TestCase):
             "confidence changed after the run baseline", wrong_confidence.stderr
         )
 
+    def test_openrouter_jsonl_is_run_relative_with_disjoint_components_and_cost(self):
+        log = self.root / "or.jsonl"
+        log.write_text("", encoding="utf-8")  # proxy creates the log before any calls
+        self.run_helper("start", "--openrouter-jsonl", str(log))
+        with log.open("a", encoding="utf-8") as handle:
+            handle.write(json.dumps({"id": "gen-1", "usage": {
+                "prompt_tokens": 1000, "completion_tokens": 200, "total_tokens": 1200, "cost": 0.05,
+                "prompt_tokens_details": {"cached_tokens": 100, "cache_write_tokens": 50},
+                "completion_tokens_details": {"reasoning_tokens": 30},
+            }}) + "\n")
+            handle.write(json.dumps({"id": "gen-2", "usage": {
+                "prompt_tokens": 500, "completion_tokens": 100, "total_tokens": 600, "cost": 0.02,
+                "prompt_tokens_details": {"cached_tokens": 0, "cache_write_tokens": 0},
+                "completion_tokens_details": {"reasoning_tokens": 10},
+            }}) + "\n")
+
+        result = self.run_helper("flags", "--openrouter-jsonl", str(log))
+
+        # prompt_tokens is inclusive of cached + cache-write; components disjoint.
+        self.assertIn("--input-tokens 1350", result.stdout)   # (1000-100-50) + 500
+        self.assertIn("--output-tokens 300", result.stdout)
+        self.assertIn("--cache-creation-tokens 50", result.stdout)
+        self.assertIn("--cache-read-tokens 100", result.stdout)  # excluded from working total
+        self.assertIn("--reasoning-output-tokens 40", result.stdout)
+        self.assertIn("--total-tokens 1700", result.stdout)   # input+output+cache-creation
+        self.assertIn("--cost-usd 0.07", result.stdout)       # authoritative summed USD
+        self.assertIn("--usage-source openrouter", result.stdout)
+        self.assertIn("--usage-confidence exact", result.stdout)
+        self.assertIn("--tokens-total-source openrouter_usage", result.stdout)
+
+    def test_openrouter_empty_log_is_a_zero_baseline_then_bills_only_the_run(self):
+        log = self.root / "or.jsonl"
+        # A pre-existing call from an earlier run is the baseline and must not
+        # be billed to this run.
+        log.write_text(json.dumps({"usage": {"prompt_tokens": 900, "completion_tokens": 100, "cost": 0.30}}) + "\n", encoding="utf-8")
+        self.run_helper("start", "--openrouter-jsonl", str(log))
+        with log.open("a", encoding="utf-8") as handle:
+            handle.write(json.dumps({"usage": {"prompt_tokens": 200, "completion_tokens": 50, "cost": 0.04}}) + "\n")
+        result = self.run_helper("flags", "--openrouter-jsonl", str(log))
+        self.assertIn("--cost-usd 0.04", result.stdout)       # only this run's spend
+        self.assertIn("--total-tokens 250", result.stdout)
+
+    def test_openrouter_invalid_usage_fails_loudly(self):
+        log = self.root / "or.jsonl"
+        log.write_text("", encoding="utf-8")
+        self.run_helper("start", "--openrouter-jsonl", str(log))
+        with log.open("a", encoding="utf-8") as handle:
+            handle.write(json.dumps({"usage": {
+                "prompt_tokens": 100, "completion_tokens": 10, "cost": 0.01,
+                "prompt_tokens_details": {"cached_tokens": 80, "cache_write_tokens": 40},  # 120 > 100
+            }}) + "\n")
+        result = self.run_helper("flags", "--openrouter-jsonl", str(log), check=False)
+        self.assertNotEqual(result.returncode, 0)
+        self.assertIn("cached plus cache-write tokens exceed prompt_tokens", result.stderr)
+
 
 if __name__ == "__main__":
     unittest.main()
