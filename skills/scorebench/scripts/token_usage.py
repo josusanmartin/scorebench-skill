@@ -32,6 +32,9 @@ class UsageSnapshot:
     cache_creation_tokens: int | None = None
     cache_read_tokens: int | None = None
     reasoning_output_tokens: int | None = None
+    # Authoritative USD cost, when the source reports one (OpenRouter). Kept out
+    # of components() because it is a float, not a token count.
+    cost_usd: float | None = None
 
     def components(self) -> dict[str, int]:
         return {
@@ -443,16 +446,122 @@ def grok_jsonl_snapshot(
     return aggregate_snapshots(list(identified.values()), log_path, "Grok inference")
 
 
+def usage_cost(usage: dict[str, Any]) -> float | None:
+    value = usage.get("cost")
+    if isinstance(value, bool):
+        return None
+    if isinstance(value, (int, float)) and value >= 0:
+        return float(value)
+    return None
+
+
+def openrouter_usage_snapshot(usage: dict[str, Any]) -> UsageSnapshot | None:
+    """Normalize one OpenRouter response usage object into disjoint components.
+
+    OpenRouter reports prompt_tokens inclusive of cache reads and cache writes
+    (the OpenAI convention), so we split them out the same way Codex usage is
+    handled: cache reads stay out of the working total, and every category is
+    counted exactly once. `cost` is OpenRouter's authoritative USD figure.
+    """
+    prompt_tokens = usage_int(usage, "prompt_tokens", "input_tokens")
+    output_tokens = usage_int(usage, "completion_tokens", "output_tokens")
+    if prompt_tokens is None or output_tokens is None:
+        return None
+    prompt_details = usage.get("prompt_tokens_details")
+    cache_read_tokens = None
+    cache_creation_tokens = None
+    if isinstance(prompt_details, dict):
+        cache_read_tokens = usage_int(prompt_details, "cached_tokens")
+        cache_creation_tokens = usage_int(prompt_details, "cache_write_tokens")
+    completion_details = usage.get("completion_tokens_details")
+    reasoning_tokens = None
+    if isinstance(completion_details, dict):
+        reasoning_tokens = usage_int(completion_details, "reasoning_tokens")
+    cache_read_tokens = cache_read_tokens or 0
+    cache_creation_tokens = cache_creation_tokens or 0
+    categorized_input = cache_read_tokens + cache_creation_tokens
+    if categorized_input > prompt_tokens:
+        raise SystemExit(
+            "invalid OpenRouter usage: cached plus cache-write tokens exceed prompt_tokens"
+        )
+    fresh_input_tokens = prompt_tokens - categorized_input
+    return UsageSnapshot(
+        total_tokens=fresh_input_tokens + cache_creation_tokens + output_tokens,
+        input_tokens=fresh_input_tokens,
+        output_tokens=output_tokens,
+        cache_creation_tokens=cache_creation_tokens,
+        cache_read_tokens=cache_read_tokens,
+        reasoning_output_tokens=reasoning_tokens,
+        cost_usd=usage_cost(usage),
+    )
+
+
+def openrouter_jsonl_snapshot(path: Path) -> UsageSnapshot:
+    """Sum every per-response usage record the OpenRouter proxy has logged.
+
+    Each line is one response (a bare usage object, or a record with a "usage"
+    key). An empty log is a legitimate zero baseline: the proxy creates the file
+    when it starts, before any calls have been made.
+    """
+    snapshots: list[UsageSnapshot] = []
+    total_cost = 0.0
+    have_cost = False
+    with path.open("r", encoding="utf-8") as handle:
+        for line in handle:
+            line = line.strip()
+            if not line:
+                continue
+            try:
+                record = json.loads(line)
+            except json.JSONDecodeError:
+                # Tolerate a partial final line while the proxy is appending.
+                continue
+            if not isinstance(record, dict):
+                continue
+            usage = record.get("usage")
+            if not isinstance(usage, dict):
+                usage = record
+            snapshot = openrouter_usage_snapshot(usage)
+            if snapshot is None:
+                continue
+            snapshots.append(snapshot)
+            if snapshot.cost_usd is not None:
+                total_cost += snapshot.cost_usd
+                have_cost = True
+    if not snapshots:
+        return UsageSnapshot(
+            total_tokens=0,
+            input_tokens=0,
+            output_tokens=0,
+            cache_creation_tokens=0,
+            cache_read_tokens=0,
+            reasoning_output_tokens=0,
+            cost_usd=0.0,
+        )
+    aggregated = aggregate_snapshots(snapshots, path, "OpenRouter usage")
+    return UsageSnapshot(
+        total_tokens=aggregated.total_tokens,
+        input_tokens=aggregated.input_tokens,
+        output_tokens=aggregated.output_tokens,
+        cache_creation_tokens=aggregated.cache_creation_tokens,
+        cache_read_tokens=aggregated.cache_read_tokens,
+        reasoning_output_tokens=aggregated.reasoning_output_tokens,
+        cost_usd=round(total_cost, 6) if have_cost else None,
+    )
+
+
 def read_snapshot(
     args: argparse.Namespace, *, accounting_version: int = ACCOUNTING_VERSION
 ) -> UsageSnapshot:
-    jsonl_sources = [args.codex_jsonl, args.claude_jsonl, args.grok_jsonl]
+    jsonl_sources = [args.codex_jsonl, args.claude_jsonl, args.grok_jsonl, args.openrouter_jsonl]
     if sum(bool(source) for source in jsonl_sources) > 1:
         raise SystemExit(
-            "provide only one of --codex-jsonl, --claude-jsonl, or --grok-jsonl"
+            "provide only one of --codex-jsonl, --claude-jsonl, --grok-jsonl, or --openrouter-jsonl"
         )
     if args.grok_log and not args.grok_jsonl:
         raise SystemExit("--grok-log requires --grok-jsonl")
+    if args.openrouter_jsonl:
+        return openrouter_jsonl_snapshot(Path(args.openrouter_jsonl))
     if args.codex_jsonl:
         return codex_jsonl_snapshot(
             Path(args.codex_jsonl), accounting_version=accounting_version
@@ -488,6 +597,8 @@ def tokens_source_from_args(args: argparse.Namespace) -> str | None:
         return "claude_code_jsonl"
     if args.grok_jsonl:
         return "grok_session_jsonl"
+    if args.openrouter_jsonl:
+        return "openrouter_usage"
     return None
 
 
@@ -498,6 +609,8 @@ def usage_source_for(tokens_source: str) -> str:
         return "claude_code"
     if tokens_source.startswith("grok_"):
         return "grok_build"
+    if tokens_source.startswith("openrouter"):
+        return "openrouter"
     if tokens_source in {"provider_usage", "api_meter"}:
         return "api_meter"
     if tokens_source in {"runner_measured", "launcher"}:
@@ -517,6 +630,8 @@ def cmd_start(args: argparse.Namespace) -> int:
         "tokens_total_source": tokens_source,
         "usage_source": usage_source_for(tokens_source),
     }
+    if snapshot.cost_usd is not None:
+        state["baseline_cost_usd"] = snapshot.cost_usd
     write_state(resolve_state_path(args.state), state)
     print(json.dumps({"ok": True, **state}, indent=2, sort_keys=True))
     return 0
@@ -524,7 +639,7 @@ def cmd_start(args: argparse.Namespace) -> int:
 
 def current_run_usage(
     args: argparse.Namespace,
-) -> tuple[dict[str, Any], UsageSnapshot, int, dict[str, int]]:
+) -> tuple[dict[str, Any], UsageSnapshot, int, dict[str, int], float | None]:
     state = load_state(resolve_state_path(args.state))
     baseline = state.get("baseline_total_tokens")
     if not isinstance(baseline, int):
@@ -572,11 +687,23 @@ def current_run_usage(
             + run_components["output_tokens"]
             + run_components.get("cache_creation_tokens", 0)
         )
-    return state, snapshot, run_total, run_components
+
+    run_cost: float | None = None
+    if snapshot.cost_usd is not None:
+        baseline_cost = state.get("baseline_cost_usd")
+        baseline_cost = baseline_cost if isinstance(baseline_cost, (int, float)) else 0.0
+        cost_delta = snapshot.cost_usd - baseline_cost
+        if cost_delta < 0:
+            raise SystemExit(
+                "current OpenRouter cost is lower than the stored baseline; do not submit. "
+                "Start a new harness run or recreate the token baseline."
+            )
+        run_cost = round(cost_delta, 6)
+    return state, snapshot, run_total, run_components, run_cost
 
 
 def current_run_total(args: argparse.Namespace) -> tuple[dict[str, Any], int, int]:
-    state, snapshot, run_total, _run_components = current_run_usage(args)
+    state, snapshot, run_total, _run_components, _run_cost = current_run_usage(args)
     return state, snapshot.total_tokens, run_total
 
 
@@ -606,31 +733,28 @@ def current_provenance(
 
 
 def cmd_status(args: argparse.Namespace) -> int:
-    state, snapshot, run_total, run_components = current_run_usage(args)
+    state, snapshot, run_total, run_components, run_cost = current_run_usage(args)
     tokens_source, usage_source, confidence = current_provenance(args, state)
-    print(
-        json.dumps(
-            {
-                "absolute_total_tokens": snapshot.total_tokens,
-                "accounting_version": state.get("accounting_version", 1),
-                "baseline_total_tokens": state["baseline_total_tokens"],
-                "source_run_total_tokens": snapshot.total_tokens
-                - state["baseline_total_tokens"],
-                "run_total_tokens": run_total,
-                "run_usage": run_components,
-                "tokens_total_source": tokens_source,
-                "usage_source": usage_source,
-                "confidence": confidence,
-            },
-            indent=2,
-            sort_keys=True,
-        )
-    )
+    payload = {
+        "absolute_total_tokens": snapshot.total_tokens,
+        "accounting_version": state.get("accounting_version", 1),
+        "baseline_total_tokens": state["baseline_total_tokens"],
+        "source_run_total_tokens": snapshot.total_tokens
+        - state["baseline_total_tokens"],
+        "run_total_tokens": run_total,
+        "run_usage": run_components,
+        "tokens_total_source": tokens_source,
+        "usage_source": usage_source,
+        "confidence": confidence,
+    }
+    if run_cost is not None:
+        payload["run_cost_usd"] = run_cost
+    print(json.dumps(payload, indent=2, sort_keys=True))
     return 0
 
 
 def cmd_flags(args: argparse.Namespace) -> int:
-    state, _snapshot, run_total, run_components = current_run_usage(args)
+    state, _snapshot, run_total, run_components, run_cost = current_run_usage(args)
     tokens_source, usage_source, confidence = current_provenance(args, state)
     component_flags = {
         "input_tokens": "--input-tokens",
@@ -645,6 +769,10 @@ def cmd_flags(args: argparse.Namespace) -> int:
         for field in COMPONENT_FIELDS
         if field in run_components
     )
+    if run_cost is not None:
+        # Authoritative USD cost; the server treats a reported cost as ground
+        # truth and skips its token-price estimate.
+        flags.append(f"--cost-usd {run_cost}")
     flags.extend(
         [
             f"--usage-source {usage_source}",
@@ -669,7 +797,8 @@ def add_total_args(parser: argparse.ArgumentParser) -> None:
     parser.add_argument("--claude-jsonl", help="current Claude Code session JSONL transcript to parse")
     parser.add_argument("--grok-jsonl", help="current Grok session updates.jsonl to parse")
     parser.add_argument("--grok-log", help="Grok unified.jsonl override; normally discovered from --grok-jsonl")
-    parser.add_argument("--source", help="usage source, for example codex_goal, codex_exec_jsonl, claude_code_jsonl, grok_session_jsonl, provider_usage")
+    parser.add_argument("--openrouter-jsonl", help="OpenRouter usage log written by openrouter_proxy.py; carries exact tokens and USD cost for any harness")
+    parser.add_argument("--source", help="usage source, for example codex_goal, codex_exec_jsonl, claude_code_jsonl, grok_session_jsonl, openrouter_usage, provider_usage")
     parser.add_argument("--confidence", choices=["exact", "parsed", "estimated"])
 
 
