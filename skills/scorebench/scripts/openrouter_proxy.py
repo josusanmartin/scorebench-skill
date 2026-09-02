@@ -136,7 +136,11 @@ class Handler(BaseHTTPRequestHandler):
         if isinstance(obj, dict):
             # Persist usage before exposing the response status/body. A client
             # disconnect after OpenRouter bills must not make the run cheaper.
-            self.server.usage_log.record(obj)  # type: ignore[attr-defined]
+            response = obj.get("response")
+            if isinstance(obj.get("usage"), dict):
+                self.server.usage_log.record(obj)  # type: ignore[attr-defined]
+            elif isinstance(response, dict):
+                self.server.usage_log.record(response)  # type: ignore[attr-defined]
 
     def _pump_stream(self, upstream, *, record_usage: bool) -> None:
         buffer = b""
@@ -178,13 +182,20 @@ class Handler(BaseHTTPRequestHandler):
         if not isinstance(obj, dict):
             return
         message = obj.get("message") if isinstance(obj.get("message"), dict) else {}
+        response = obj.get("response") if isinstance(obj.get("response"), dict) else {}
         usage = obj.get("usage")
         if not isinstance(usage, dict):
             usage = message.get("usage")
+        if not isinstance(usage, dict):
+            usage = response.get("usage")
         if isinstance(usage, dict):
             self._merge_usage(response_obj["usage"], usage)
-        response_obj["id"] = obj.get("id") or message.get("id") or response_obj.get("id")
-        response_obj["model"] = obj.get("model") or message.get("model") or response_obj.get("model")
+        response_obj["id"] = (
+            obj.get("id") or message.get("id") or response.get("id") or response_obj.get("id")
+        )
+        response_obj["model"] = (
+            obj.get("model") or message.get("model") or response.get("model") or response_obj.get("model")
+        )
 
     @staticmethod
     def _merge_usage(target: dict, update: dict) -> None:

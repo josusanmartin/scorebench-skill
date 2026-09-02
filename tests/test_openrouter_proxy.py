@@ -46,6 +46,17 @@ ANTHROPIC_STREAM_CHUNKS = [
     b'data: {"type":"message_delta","usage":{"output_tokens":8,"cost":0.01}}\n\n',
 ]
 
+RESPONSES_STREAM_CHUNKS = [
+    b'event: response.created\n',
+    b'data: {"type":"response.created","response":{"id":"resp-codex",'
+    b'"model":"openai/gpt-codex","usage":null}}\n\n',
+    b'event: response.completed\n',
+    b'data: {"type":"response.completed","response":{"id":"resp-codex",'
+    b'"model":"openai/gpt-codex","usage":{"input_tokens":140,"output_tokens":12,'
+    b'"total_tokens":152,"cost":0.003,"input_tokens_details":{"cached_tokens":90},'
+    b'"output_tokens_details":{"reasoning_tokens":4}}}}\n\n',
+]
+
 
 class FakeUpstream(BaseHTTPRequestHandler):
     def log_message(self, *a):
@@ -79,7 +90,12 @@ class FakeUpstream(BaseHTTPRequestHandler):
             self.send_header("Content-Type", "text/event-stream")
             self.send_header("X-Seen-Auth", auth)
             self.end_headers()
-            chunks = ANTHROPIC_STREAM_CHUNKS if self.path.endswith("/v1/messages") else STREAM_CHUNKS
+            if self.path.endswith("/v1/messages"):
+                chunks = ANTHROPIC_STREAM_CHUNKS
+            elif self.path.endswith("/responses"):
+                chunks = RESPONSES_STREAM_CHUNKS
+            else:
+                chunks = STREAM_CHUNKS
             for chunk in chunks:
                 self.wfile.write(chunk)
                 self.wfile.flush()
@@ -135,6 +151,26 @@ class OpenRouterProxyTests(unittest.TestCase):
         self.assertEqual(lines[0]["usage"]["cost"], 0.01)
         self.assertEqual(lines[0]["id"], "gen-nonstream")
 
+    def test_nonstreaming_responses_envelope_usage_capture(self):
+        body = json.dumps({
+            "type": "response.completed",
+            "response": {
+                "id": "resp-nonstream",
+                "model": "openai/gpt-codex",
+                "usage": {"input_tokens": 20, "output_tokens": 3, "total_tokens": 23, "cost": 0.001},
+            },
+        }).encode()
+        self.proxy.usage_log.path.write_text("")
+        # Exercise the parser directly because the fake upstream's normal
+        # nonstream response is a chat-completions body.
+        handler = object.__new__(orp.Handler)
+        handler.server = self.proxy
+        handler._record_body_usage(body)
+        lines = self._log_lines()
+        self.assertEqual(len(lines), 1)
+        self.assertEqual(lines[0]["id"], "resp-nonstream")
+        self.assertEqual(lines[0]["usage"]["cost"], 0.001)
+
     def test_streaming_passthrough_and_final_chunk_usage_capture(self):
         status, headers, body = self._post({"model": "anthropic/claude", "messages": [], "stream": True})
         self.assertEqual(status, 200)
@@ -165,6 +201,22 @@ class OpenRouterProxyTests(unittest.TestCase):
         self.assertEqual(snapshot.input_tokens, 100)
         self.assertEqual(snapshot.cache_creation_tokens, 20)
         self.assertEqual(snapshot.cache_read_tokens, 70)
+
+    def test_responses_stream_nested_usage_is_captured(self):
+        request = urllib.request.Request(
+            self.base + "/responses",
+            data=json.dumps({"model": "openai/gpt-codex", "input": [], "stream": True}).encode(),
+            headers={"Content-Type": "application/json", "Authorization": "Bearer placeholder"},
+            method="POST",
+        )
+        with urllib.request.urlopen(request, timeout=10) as response:
+            self.assertEqual(response.read(), b"".join(RESPONSES_STREAM_CHUNKS))
+        lines = self._log_lines()
+        self.assertEqual(len(lines), 1)
+        self.assertEqual(lines[0]["id"], "resp-codex")
+        self.assertEqual(lines[0]["model"], "openai/gpt-codex")
+        self.assertEqual(lines[0]["usage"]["total_tokens"], 152)
+        self.assertEqual(lines[0]["usage"]["cost"], 0.003)
 
     def test_token_usage_reads_the_proxy_log(self):
         # baseline on the empty log, then two calls, then flags -> exact tokens + cost

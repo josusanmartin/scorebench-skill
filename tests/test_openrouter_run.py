@@ -91,6 +91,27 @@ class OpenRouterRunTests(unittest.TestCase):
             'model_providers.router.base_url="http://127.0.0.1:1234/api/v1"',
         ])
 
+    def test_codex_command_base_override_is_replaced_not_shadowed(self):
+        env = {"OPENROUTER_API_KEY": "secret"}
+        original = "https://openrouter.ai/api/v1"
+        command = [
+            "codex",
+            "-c",
+            'model_provider="router"',
+            "--config",
+            f'model_providers.router.base_url="{original}"',
+            "exec",
+            "prompt",
+        ]
+        routed = runner._route_child(
+            "Codex", command, env, "openai", "http://127.0.0.1:4321"
+        )
+        self.assertEqual(
+            routed[4],
+            'model_providers.router.base_url="http://127.0.0.1:4321/api/v1"',
+        )
+        self.assertNotIn(original, " ".join(routed))
+
     def test_inactive_launcher_executes_command_unchanged(self):
         with tempfile.TemporaryDirectory() as root:
             completed = subprocess.run(

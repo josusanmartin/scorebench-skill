@@ -71,6 +71,30 @@ def _codex_overrides(command: Sequence[str]) -> dict[str, str]:
     return result
 
 
+def _replace_codex_override(command: Sequence[str], key: str, value: str) -> tuple[list[str], bool]:
+    """Replace every command-line Codex override for ``key`` in place."""
+    result = list(command)
+    replacement = f'{key}="{value}"'
+    replaced = False
+    index = 1
+    while index < len(result):
+        argument = result[index]
+        if argument in {"-c", "--config"} and index + 1 < len(result):
+            assignment = result[index + 1]
+            if assignment.split("=", 1)[0].strip() == key:
+                result[index + 1] = replacement
+                replaced = True
+            index += 2
+            continue
+        if argument.startswith("--config="):
+            assignment = argument.split("=", 1)[1]
+            if assignment.split("=", 1)[0].strip() == key:
+                result[index] = f"--config={replacement}"
+                replaced = True
+        index += 1
+    return result, replaced
+
+
 def _codex_config(env: Mapping[str, str]) -> tuple[str, dict[str, str]]:
     config_path = Path(env.get("CODEX_HOME", str(Path.home() / ".codex"))) / "config.toml"
     try:
@@ -169,10 +193,16 @@ def _route_child(
     if "codex" in harness.lower():
         provider = _codex_openrouter_provider(command, env)
         if provider:
+            provider_base_key = f"model_providers.{provider}.base_url"
+            routed_command, replaced_override = _replace_codex_override(
+                command, provider_base_key, openai_base
+            )
+            if replaced_override:
+                return routed_command
             return [
                 command[0],
                 "-c",
-                f'model_providers.{provider}.base_url="{openai_base}"',
+                f'{provider_base_key}="{openai_base}"',
                 *command[1:],
             ]
         if not replaced:

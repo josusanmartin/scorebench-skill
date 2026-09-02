@@ -138,9 +138,12 @@ or `SCOREBENCH_OPENROUTER=0` to disable wrapping explicitly. A detected route
 without a key fails closed.
 
 The launcher selects OpenRouter's native Anthropic skin for Claude Code and its
-OpenAI-compatible skin for Codex and other harnesses. It creates private,
-workspace-local `SCOREBENCH_OPENROUTER_LOG` and `SCOREBENCH_TOKEN_STATE` paths.
-Use one launcher and workspace per parallel worker. Never share a usage log.
+OpenAI-compatible Responses API for Codex and other harnesses. It replaces an
+existing Codex provider `base_url` override in place so a later command-line
+value cannot bypass accounting. Both top-level usage objects and the
+`response.completed` envelope are captured. It creates private, workspace-local
+`SCOREBENCH_OPENROUTER_LOG` and `SCOREBENCH_TOKEN_STATE` paths. Use one launcher
+and workspace per parallel worker. Never share a usage log.
 
 The helper automatically reads `$SCOREBENCH_OPENROUTER_LOG`; do not also pass a
 Codex, Claude, or Grok transcript source. Baseline and snapshot normally reduce
