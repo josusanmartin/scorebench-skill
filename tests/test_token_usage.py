@@ -25,12 +25,13 @@ class TokenUsageTests(unittest.TestCase):
     def tearDown(self):
         self.tempdir.cleanup()
 
-    def run_helper(self, *args, check=True):
+    def run_helper(self, *args, check=True, env=None):
         return subprocess.run(
             [sys.executable, str(SCRIPT), *args, "--state", str(self.state)],
             text=True,
             capture_output=True,
             check=check,
+            env=env,
         )
 
     def test_flags_preserve_baseline_provenance_and_confidence(self):
@@ -893,6 +894,48 @@ class TokenUsageTests(unittest.TestCase):
         result = self.run_helper("flags", "--openrouter-jsonl", str(log), check=False)
         self.assertNotEqual(result.returncode, 0)
         self.assertIn("cached plus cache-write tokens exceed prompt_tokens", result.stderr)
+
+    def test_openrouter_log_environment_is_automatic_and_authoritative(self):
+        log = self.root / "openrouter.jsonl"
+        log.write_text("", encoding="utf-8")
+        env = {**os.environ, "SCOREBENCH_OPENROUTER_LOG": str(log)}
+        self.run_helper("start", env=env)
+        log.write_text(
+            json.dumps({
+                "usage": {
+                    "input_tokens": 100,
+                    "output_tokens": 20,
+                    "cache_read_input_tokens": 70,
+                    "cache_creation_input_tokens": 10,
+                    "cost": 0.012345678901,
+                }
+            }) + "\n",
+            encoding="utf-8",
+        )
+        result = self.run_helper("flags", env=env)
+        self.assertIn("--total-tokens 130", result.stdout)
+        self.assertIn("--input-tokens 100", result.stdout)
+        self.assertIn("--cache-read-tokens 70", result.stdout)
+        self.assertIn("--cache-creation-tokens 10", result.stdout)
+        self.assertIn("--cost-usd 0.012345678901", result.stdout)
+        self.assertIn("--usage-source openrouter", result.stdout)
+
+    def test_openrouter_corrupt_complete_line_fails_closed(self):
+        log = self.root / "openrouter.jsonl"
+        log.write_text('{"usage": nope}\n', encoding="utf-8")
+        result = self.run_helper(
+            "start", "--openrouter-jsonl", str(log), check=False
+        )
+        self.assertNotEqual(result.returncode, 0)
+        self.assertIn("invalid OpenRouter usage JSONL", result.stderr)
+
+    def test_openrouter_partial_final_line_is_tolerated(self):
+        log = self.root / "openrouter.jsonl"
+        log.write_text('{"usage":', encoding="utf-8")
+        result = self.run_helper(
+            "start", "--openrouter-jsonl", str(log), check=True
+        )
+        self.assertIn('"baseline_total_tokens": 0', result.stdout)
 
 
 if __name__ == "__main__":

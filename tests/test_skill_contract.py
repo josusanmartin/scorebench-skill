@@ -94,6 +94,17 @@ class SkillContractTests(unittest.TestCase):
         self.assertIn("--prompt-file", text)
         self.assertIn("run progress --help", text)
 
+    def test_agent_mediated_login_keeps_one_request_and_verifies_whoami(self):
+        text = (SKILL_DIR / "references" / "cli-and-auth.md").read_text(
+            encoding="utf-8"
+        )
+        self.assertIn("always use `--no-browser`", text)
+        self.assertIn("Keep the login process running", text)
+        self.assertIn("reply `done`", text)
+        self.assertIn("Do not start a second login", text)
+        self.assertIn("continue waiting on the same process", text)
+        self.assertIn("`whoami` is the final\nconnection check", text)
+
     def test_clean_room_installs_current_cli_and_skill(self):
         text = (SKILL_DIR / "references" / "clean-room-docker.md").read_text(
             encoding="utf-8"

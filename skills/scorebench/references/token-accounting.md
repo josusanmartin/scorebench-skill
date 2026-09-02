@@ -124,36 +124,65 @@ runners, sum the provider's usage fields for only this run and use
 input inside an aggregate total, send disjoint input, output, and cache counters
 instead of that aggregate.
 
-### OpenRouter (any harness, with USD cost)
+### OpenRouter (automatic detection, with authoritative USD cost)
 
-OpenRouter exposes exact tokens only in each response's `usage` object — never as
-a per-key total — so they must be captured at the response layer, independently
-of the harness. Start the bundled proxy once, point the harness's OpenAI-compatible
-base URL at it, and it records exact tokens plus OpenRouter's authoritative USD
-`cost` for every call, streaming or not:
+OpenRouter exposes exact tokens and billed cost in each response's `usage`
+object. Capture them from the first request; an already-running harness cannot
+be measured retroactively. Start the coding harness through the bundled launcher:
 
 ```bash
 export OPENROUTER_API_KEY=sk-or-...
-SCOREBENCH_OPENROUTER_LOG="/work/.scorebench-openrouter.jsonl"
-python3 "$SCOREBENCH_SKILL_DIR/scripts/openrouter_proxy.py" \
-  --log "$SCOREBENCH_OPENROUTER_LOG" --port 8787 &
-# then point the harness at the proxy (its own base-URL setting; OPENAI_BASE_URL for most):
-export OPENAI_BASE_URL="http://127.0.0.1:8787/api/v1"
+python3 "$SCOREBENCH_SKILL_DIR/scripts/openrouter_run.py" \
+  --harness "Codex" --workspace "$PWD" -- codex
 ```
 
-Baseline and snapshot exactly like any other source, with `--openrouter-jsonl`.
-The helper adds an exact `--cost-usd` to the flags automatically, so the dollar
-cost is submitted with each candidate alongside the tokens — no token-price
-estimate, one key, any harness:
+In `auto` mode, the launcher activates only when the configured base URL, Codex
+provider, or selected model identifies OpenRouter. The presence of
+`OPENROUTER_API_KEY` alone is deliberately insufficient. Use
+`SCOREBENCH_OPENROUTER=1` for a custom harness whose route cannot be inspected,
+or `SCOREBENCH_OPENROUTER=0` to disable wrapping explicitly. A detected route
+without a key fails closed.
+
+The launcher selects OpenRouter's native Anthropic skin for Claude Code and its
+OpenAI-compatible Responses API for Codex and other harnesses. It replaces an
+existing Codex provider `base_url` override in place so a later command-line
+value cannot bypass accounting. Both top-level usage objects and the
+`response.completed` envelope are captured. It creates private, workspace-local
+`SCOREBENCH_OPENROUTER_LOG` and `SCOREBENCH_TOKEN_STATE` paths. Use one launcher
+and workspace per parallel worker. Never share a usage log.
+
+The helper automatically reads `$SCOREBENCH_OPENROUTER_LOG`; do not also pass a
+Codex, Claude, or Grok transcript source. Baseline and snapshot normally reduce
+to:
 
 ```bash
 python3 "$SCOREBENCH_TOKEN_HELPER" start \
-  --state "$SCOREBENCH_TOKEN_STATE" --openrouter-jsonl "$SCOREBENCH_OPENROUTER_LOG"
+  --state "$SCOREBENCH_TOKEN_STATE"
 # before each submit:
 TOKEN_FLAGS="$(python3 "$SCOREBENCH_TOKEN_HELPER" flags \
-  --state "$SCOREBENCH_TOKEN_STATE" --openrouter-jsonl "$SCOREBENCH_OPENROUTER_LOG")"
+  --state "$SCOREBENCH_TOKEN_STATE")"
 scorebench submit path/to/solution --label short-name $TOKEN_FLAGS
 ```
+
+`TOKEN_FLAGS` includes exact, run-relative token components and OpenRouter's
+authoritative `--cost-usd`; ScoreBench does not substitute list-price estimates.
+The low-level `openrouter_proxy.py` remains available for supervised custom
+launchers, but direct proxy setup is not the normal worker flow.
+
+For a cost-budget run, refresh the server-side budget before reading progress:
+
+```bash
+CURRENT_TOKEN_FLAGS="$(python3 "$SCOREBENCH_TOKEN_HELPER" flags \
+  --state "$SCOREBENCH_TOKEN_STATE")"
+scorebench run usage $CURRENT_TOKEN_FLAGS \
+  --note "OpenRouter budget checkpoint"
+scorebench run progress
+```
+
+This is a local ledger read plus one ScoreBench request; it does not make an
+extra model call. A single in-flight model response can still cross the budget,
+so stop starting new inference when the remaining amount is smaller than a
+normal request for that run.
 
 Never broadly search `~/.codex`, `~/.claude`, browser profiles, shell snapshots,
 or old transcripts to infer usage.

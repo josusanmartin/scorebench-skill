@@ -115,6 +115,25 @@ scorebench admin login \
   --no-browser
 ```
 
+When an agent is mediating browser login, always use `--no-browser` and run the
+login command by itself in the foreground:
+
+1. Keep the login process running. It will print a short-lived authorization
+   URL and verification code, then wait.
+2. Relay the URL and code to the user exactly. Ask them to sign in, confirm the
+   matching code, click **Authorize CLI login**, and reply `done`.
+3. Treat waiting for approval as expected, not as a failed or stalled command.
+   Do not start a second login while the first request is pending.
+4. After the user replies `done`, continue waiting on the same process. The
+   command completes automatically when it receives the approval.
+5. Only after the login command exits successfully, run `scorebench admin
+   whoami` with the same profile and verify the intended account.
+
+If the request expires or times out, tell the user the old URL and code must not
+be reused, create one new request, and repeat the handoff. A browser click by
+itself is not sufficient evidence that setup completed; `whoami` is the final
+connection check.
+
 For supervised automation, pass a password through standard input rather than
 shell arguments:
 

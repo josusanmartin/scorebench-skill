@@ -98,6 +98,7 @@ credentials or connector secrets:
 ```bash
 export SCOREBENCH_URL=https://scorebench.dev/
 export SCOREBENCH_RUN_TOKEN=hrun_...
+export SCOREBENCH_TIMING_OBSERVER_TOKEN=hobs_... # supplied by pair/handoff/launcher
 ```
 
 Then the whole loop goes through the `scorebench` CLI (legacy alias `harness`):
@@ -130,14 +131,16 @@ Then ping, establish exact token accounting, and submit:
 
 ```bash
 scorebench run ping --event start  # mandatory before the first submission
-scorebench run ping --event activity # repeat at least every 5m of active work
-scorebench run progress            # canonical trusted timing and token progress
+scorebench run ping --event activity # temporary v1 clock; prefer host watcher
+scorebench run progress            # top-level v1 authoritative; v2 is shadow
 SCOREBENCH_TOKEN_HELPER="${CODEX_HOME:-$HOME/.codex}/skills/scorebench/scripts/token_usage.py"
 SCOREBENCH_TOKEN_STATE="/work/.scorebench-token-usage.json"
 SCOREBENCH_SKILL_DIR="${CODEX_HOME:-$HOME/.codex}/skills/scorebench"
 test -f "$SCOREBENCH_SKILL_DIR/scripts/run_trace.py" || \
   SCOREBENCH_SKILL_DIR="$HOME/.claude/skills/scorebench"
 SCOREBENCH_TRACE_HELPER="$SCOREBENCH_SKILL_DIR/scripts/run_trace.py"
+SCOREBENCH_OBSERVER="$SCOREBENCH_SKILL_DIR/scripts/scorebench_observer.py"
+python3 "$SCOREBENCH_OBSERVER" register --provider auto --cwd "$PWD"
 python3 "$SCOREBENCH_TRACE_HELPER" start # records one file offset; no background work
 python3 "$SCOREBENCH_TOKEN_HELPER" start \
   --state "$SCOREBENCH_TOKEN_STATE" \
@@ -157,18 +160,24 @@ FINAL_TOKEN_FLAGS="$(python3 "$SCOREBENCH_TOKEN_HELPER" flags \
   --source codex_goal)"
 scorebench run usage $FINAL_TOKEN_FLAGS
 scorebench run ping --event finish
+python3 "$SCOREBENCH_OBSERVER" unregister --cwd "$PWD"
 python3 "$SCOREBENCH_TRACE_HELPER" finish # sanitize, compress, and upload now
 ```
 
-Six hard rules for workers:
+Seven hard rules for workers:
 
 - **Ping before submitting.** `scorebench run ping --event start` (or
   `--event resume` for resumed sessions) is mandatory even when the token is
   already bound to a run. The dashboard uses that server timestamp as the
   trusted run-time origin; without it, reports fall back to first-submission
   time zero and cross-run timing comparisons become misleading. During active
-  work, send `--event activity` at least every five minutes or use the bundled
-  busy-aware watcher. Do not ping while idle.
+  work, the v1 clock still needs `--event activity` at least every five minutes.
+  Prefer the bundled host-side watcher so the model does not report on a timer.
+  Do not ping while idle.
+- **Register passive timing once.** The bundled observer reads only local
+  structured event boundaries and uses no model prompts or tokens. Its nested
+  `progress.timing_v2` bounds are shadow diagnostics; top-level
+  `progress.active_seconds` remains authoritative until migration.
 - **Use exact run-relative tokens.** Establish a baseline from the current
   session, then use the bundled helper to deduplicate and normalize provider
   counters before generating submission flags. Working tokens exclude cached

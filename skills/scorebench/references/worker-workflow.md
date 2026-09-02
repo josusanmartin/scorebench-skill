@@ -7,6 +7,7 @@ Do not use coordinator admin credentials from a worker.
 
 - [Verify scope and establish the run](#verify-scope-and-establish-the-run)
 - [Create a trusted session timestamp](#create-a-trusted-session-timestamp)
+- [Register passive timing](#register-passive-timing)
 - [Capture the trace boundary](#capture-the-trace-boundary)
 - [Initialize exact token accounting](#initialize-exact-token-accounting)
 - [Submit a protective baseline](#submit-a-protective-baseline)
@@ -93,27 +94,44 @@ For a resumed worker:
 scorebench run ping --event resume --note "worker session resumed"
 ```
 
-While actively working, send a trusted liveness observation at least every five
-minutes:
+During the timing-v2 shadow, the existing v1 clock still needs a trusted
+liveness observation at least every five minutes of active work:
 
 ```bash
 scorebench run ping --event activity --note "actively optimizing"
 ```
 
 Do not send activity pings during waits, cooldown sleeps, idle prompts, or after
-completion. For autonomous tmux runs, use the bundled watcher: it emits scoped,
-throttled activity only when the exact worker has changing recent busy evidence.
-This also covers long tool calls during which the agent cannot issue a command.
+completion. For autonomous tmux runs, use the bundled host-side watcher so the
+model does not spend turns or tokens reporting status. This temporary v1
+compatibility path is separate from the passive observer below.
 
 Require the current run ID and a heartbeat with the requested event. A
 pre-bound token is not enough. Do not optimize or submit until the ping
 succeeds.
 
-Use `scorebench run progress` for authoritative run-scoped active time, elapsed
-time, tokens, sources, and measurement timestamps. Time advances through the
-latest trusted candidate or ping; tokens retain their own measurement timestamp.
-Polling progress never creates a heartbeat. Never parse dashboard HTML or treat
-`scorebench best` as the latest timing point.
+Use the top-level fields from `scorebench run progress` for authoritative v1
+run-scoped active time, elapsed time, tokens, sources, and measurement
+timestamps. Nested `progress.timing_v2` is diagnostic shadow evidence only.
+Polling progress never creates active evidence in either policy. Never parse
+dashboard HTML or treat `scorebench best` as the latest timing point.
+
+## Register Passive Timing
+
+Read [passive timing observer](timing-observer.md), then register once:
+
+```bash
+SCOREBENCH_SKILL_DIR="${CODEX_HOME:-$HOME/.codex}/skills/scorebench"
+test -f "$SCOREBENCH_SKILL_DIR/scripts/scorebench_observer.py" || \
+  SCOREBENCH_SKILL_DIR="$HOME/.claude/skills/scorebench"
+SCOREBENCH_OBSERVER="$SCOREBENCH_SKILL_DIR/scripts/scorebench_observer.py"
+python3 "$SCOREBENCH_OBSERVER" register --provider auto --cwd "$PWD"
+```
+
+This starts one event-driven host process and adds no recurring model action.
+It uploads timestamps and categorical metadata only. If registration is not
+supported, preserve the exact error and continue because v2 is not yet
+authoritative; do not delay the protective baseline with repeated setup work.
 
 ## Capture The Trace Boundary
 
@@ -299,7 +317,13 @@ Before exit:
 4. Snapshot the original exact token source.
 5. Run `scorebench run usage $FINAL_TOKEN_FLAGS`.
 6. Run `scorebench run ping --event finish --note "worker session finished"`.
-7. Resolve the helper path again, then sanitize, compress, and upload the frozen
+7. Flush and disable the passive timing registration:
+
+```bash
+python3 "$SCOREBENCH_OBSERVER" unregister --cwd "$PWD"
+```
+
+8. Resolve the helper path again, then sanitize, compress, and upload the frozen
    session segment:
 
 ```bash
@@ -309,7 +333,7 @@ test -f "$SCOREBENCH_TRACE_HELPER" || \
 python3 "$SCOREBENCH_TRACE_HELPER" finish
 ```
 
-8. Only then create a coordinator-defined completion marker.
+9. Only then create a coordinator-defined completion marker.
 
 The trace upload is idempotent and best effort. If it fails, keep the local
 artifact path and exact error so the same upload can be retried; never change a
