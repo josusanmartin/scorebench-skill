@@ -22,7 +22,8 @@ SCOREBENCH_TOKEN_STATE="/work/.scorebench-token-usage.json"
 
 Use a unique absolute state path per lane. The helper has no built-in state
 path; set one absolute path once or pass it on every call. Never reuse another
-run's state file.
+run's state file. The helper also binds that state to the resolved native log
+path and refuses to switch transcripts after the baseline.
 
 ## Contents
 
@@ -163,6 +164,10 @@ TOKEN_FLAGS="$(python3 "$SCOREBENCH_TOKEN_HELPER" flags \
   --total-tokens <current_total_tokens> \
   --source codex_goal)"
 ```
+
+Generated flags include the helper's accounting schema version. ScoreBench
+uses that version to apply strict monotonicity checks without changing legacy
+runs that began under an older accounting contract.
 
 Codex JSONL:
 

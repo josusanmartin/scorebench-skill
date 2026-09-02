@@ -48,9 +48,63 @@ class TokenUsageTests(unittest.TestCase):
 
         self.assertEqual(
             result.stdout.strip(),
-            "--total-tokens 45 --usage-source api_meter "
+            "--total-tokens 45 --accounting-version 3 --usage-source api_meter "
             "--usage-confidence parsed --tokens-total-source provider_usage",
         )
+
+    def test_jsonl_source_is_bound_to_baseline_path(self):
+        first = self.root / "first-codex.jsonl"
+        second = self.root / "second-codex.jsonl"
+        event = {
+            "type": "turn.completed",
+            "usage": {
+                "input_tokens": 110,
+                "cached_input_tokens": 100,
+                "output_tokens": 5,
+            },
+        }
+        for path in (first, second):
+            path.write_text(
+                json.dumps({"type": "thread.started", "thread_id": "thread-1"})
+                + "\n"
+                + json.dumps(event)
+                + "\n",
+                encoding="utf-8",
+            )
+        self.run_helper("start", "--codex-jsonl", str(first))
+
+        result = self.run_helper(
+            "flags", "--codex-jsonl", str(second), check=False
+        )
+
+        self.assertNotEqual(result.returncode, 0)
+        self.assertIn("source file changed after the run baseline", result.stderr)
+
+    def test_jsonl_source_binding_uses_resolved_path(self):
+        log = self.root / "codex.jsonl"
+        log.write_text(
+            json.dumps({"type": "thread.started", "thread_id": "thread-1"})
+            + "\n"
+            + json.dumps(
+                {
+                    "type": "turn.completed",
+                    "usage": {
+                        "input_tokens": 110,
+                        "cached_input_tokens": 100,
+                        "output_tokens": 5,
+                    },
+                }
+            )
+            + "\n",
+            encoding="utf-8",
+        )
+        self.run_helper("start", "--codex-jsonl", str(log))
+
+        result = self.run_helper(
+            "flags", "--codex-jsonl", str(self.root / "." / "codex.jsonl")
+        )
+
+        self.assertIn("--accounting-version 3", result.stdout)
 
     def test_codex_jsonl_is_run_relative(self):
         log = self.root / "codex.jsonl"

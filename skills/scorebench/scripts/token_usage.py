@@ -507,6 +507,17 @@ def tokens_source_from_args(args: argparse.Namespace) -> str | None:
     return None
 
 
+def source_binding_from_args(args: argparse.Namespace) -> dict[str, Any] | None:
+    paths: list[tuple[str, str]] = []
+    for name in ("codex_jsonl", "claude_jsonl", "grok_jsonl", "grok_log"):
+        raw = getattr(args, name, None)
+        if raw:
+            paths.append((name, str(Path(raw).expanduser().resolve())))
+    if not paths:
+        return None
+    return {"paths": dict(paths)}
+
+
 def usage_source_for(tokens_source: str) -> str:
     if tokens_source.startswith("codex_"):
         return "codex_usage"
@@ -533,6 +544,9 @@ def cmd_start(args: argparse.Namespace) -> int:
         "tokens_total_source": tokens_source,
         "usage_source": usage_source_for(tokens_source),
     }
+    source_binding = source_binding_from_args(args)
+    if source_binding is not None:
+        state["source_binding"] = source_binding
     write_state(resolve_state_path(args.state), state)
     print(json.dumps({"ok": True, **state}, indent=2, sort_keys=True))
     return 0
@@ -548,6 +562,13 @@ def current_run_usage(
     accounting_version = state.get("accounting_version", 1)
     if not isinstance(accounting_version, int) or accounting_version < 1:
         raise SystemExit(f"invalid accounting_version in {args.state}")
+    stored_binding = state.get("source_binding")
+    current_binding = source_binding_from_args(args)
+    if isinstance(stored_binding, dict) and current_binding != stored_binding:
+        raise SystemExit(
+            "token usage source file changed after the run baseline; do not submit. "
+            "Use the exact same native session log for start, status, and flags."
+        )
     snapshot = read_snapshot(args, accounting_version=accounting_version)
     run_total = snapshot.total_tokens - baseline
     if run_total < 0:
@@ -655,7 +676,10 @@ def cmd_flags(args: argparse.Namespace) -> int:
         "cache_read_tokens": "--cache-read-tokens",
         "reasoning_output_tokens": "--reasoning-output-tokens",
     }
-    flags = [f"--total-tokens {run_total}"]
+    flags = [
+        f"--total-tokens {run_total}",
+        f"--accounting-version {state.get('accounting_version', 1)}",
+    ]
     flags.extend(
         f"{component_flags[field]} {run_components[field]}"
         for field in COMPONENT_FIELDS
