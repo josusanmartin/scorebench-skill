@@ -15,6 +15,8 @@ from typing import Any
 # SCOREBENCH_TOKEN_STATE once; everyone else passes --state explicitly.
 STATE_ENV_VAR = "SCOREBENCH_TOKEN_STATE"
 DEFAULT_STATE = os.environ.get(STATE_ENV_VAR, "")
+OPENROUTER_LOG_ENV_VAR = "SCOREBENCH_OPENROUTER_LOG"
+DEFAULT_OPENROUTER_LOG = os.environ.get(OPENROUTER_LOG_ENV_VAR, "")
 ACCOUNTING_VERSION = 2
 COST_DECIMAL_PLACES = 12
 COMPONENT_FIELDS = (
@@ -460,14 +462,16 @@ def usage_cost(usage: dict[str, Any]) -> float | None:
 def openrouter_usage_snapshot(usage: dict[str, Any]) -> UsageSnapshot | None:
     """Normalize one OpenRouter response usage object into disjoint components.
 
-    OpenRouter reports prompt_tokens inclusive of cache reads and cache writes
-    (the OpenAI convention), so we split them out the same way Codex usage is
-    handled: cache reads stay out of the working total, and every category is
-    counted exactly once. `cost` is OpenRouter's authoritative USD figure.
+    OpenRouter's OpenAI skin reports prompt_tokens inclusive of cache reads and
+    writes, while its Anthropic skin reports disjoint input_tokens,
+    cache_read_input_tokens, and cache_creation_input_tokens. Normalize either
+    convention without counting cache reads as working tokens. `cost` is
+    OpenRouter's authoritative USD figure.
     """
-    prompt_tokens = usage_int(usage, "prompt_tokens", "input_tokens")
+    prompt_tokens = usage_int(usage, "prompt_tokens")
+    input_tokens = usage_int(usage, "input_tokens")
     output_tokens = usage_int(usage, "completion_tokens", "output_tokens")
-    if prompt_tokens is None or output_tokens is None:
+    if (prompt_tokens is None and input_tokens is None) or output_tokens is None:
         return None
     prompt_details = usage.get("prompt_tokens_details")
     cache_read_tokens = None
@@ -475,18 +479,25 @@ def openrouter_usage_snapshot(usage: dict[str, Any]) -> UsageSnapshot | None:
     if isinstance(prompt_details, dict):
         cache_read_tokens = usage_int(prompt_details, "cached_tokens")
         cache_creation_tokens = usage_int(prompt_details, "cache_write_tokens")
+    if cache_read_tokens is None:
+        cache_read_tokens = usage_int(usage, "cache_read_input_tokens")
+    if cache_creation_tokens is None:
+        cache_creation_tokens = usage_int(usage, "cache_creation_input_tokens")
     completion_details = usage.get("completion_tokens_details")
     reasoning_tokens = None
     if isinstance(completion_details, dict):
         reasoning_tokens = usage_int(completion_details, "reasoning_tokens")
     cache_read_tokens = cache_read_tokens or 0
     cache_creation_tokens = cache_creation_tokens or 0
-    categorized_input = cache_read_tokens + cache_creation_tokens
-    if categorized_input > prompt_tokens:
-        raise SystemExit(
-            "invalid OpenRouter usage: cached plus cache-write tokens exceed prompt_tokens"
-        )
-    fresh_input_tokens = prompt_tokens - categorized_input
+    if prompt_tokens is not None:
+        categorized_input = cache_read_tokens + cache_creation_tokens
+        if categorized_input > prompt_tokens:
+            raise SystemExit(
+                "invalid OpenRouter usage: cached plus cache-write tokens exceed prompt_tokens"
+            )
+        fresh_input_tokens = prompt_tokens - categorized_input
+    else:
+        fresh_input_tokens = input_tokens or 0
     return UsageSnapshot(
         total_tokens=fresh_input_tokens + cache_creation_tokens + output_tokens,
         input_tokens=fresh_input_tokens,
@@ -507,27 +518,34 @@ def openrouter_jsonl_snapshot(path: Path) -> UsageSnapshot:
     """
     snapshots: list[UsageSnapshot] = []
     costs: list[float] = []
-    with path.open("r", encoding="utf-8") as handle:
-        for line in handle:
-            line = line.strip()
-            if not line:
+    raw = path.read_text(encoding="utf-8")
+    lines = raw.splitlines()
+    for line_number, line in enumerate(lines, start=1):
+        line = line.strip()
+        if not line:
+            continue
+        try:
+            record = json.loads(line)
+        except json.JSONDecodeError as exc:
+            # A concurrent append can expose only the final line halfway
+            # through its write. Any earlier corruption makes objective
+            # accounting incomplete, so fail closed.
+            if line_number == len(lines) and not raw.endswith("\n"):
                 continue
-            try:
-                record = json.loads(line)
-            except json.JSONDecodeError:
-                # Tolerate a partial final line while the proxy is appending.
-                continue
-            if not isinstance(record, dict):
-                continue
-            usage = record.get("usage")
-            if not isinstance(usage, dict):
-                usage = record
-            snapshot = openrouter_usage_snapshot(usage)
-            if snapshot is None:
-                continue
-            snapshots.append(snapshot)
-            if snapshot.cost_usd is not None:
-                costs.append(snapshot.cost_usd)
+            raise SystemExit(
+                f"invalid OpenRouter usage JSONL at {path}:{line_number}: {exc.msg}"
+            ) from exc
+        if not isinstance(record, dict):
+            continue
+        usage = record.get("usage")
+        if not isinstance(usage, dict):
+            usage = record
+        snapshot = openrouter_usage_snapshot(usage)
+        if snapshot is None:
+            continue
+        snapshots.append(snapshot)
+        if snapshot.cost_usd is not None:
+            costs.append(snapshot.cost_usd)
     if not snapshots:
         return UsageSnapshot(
             total_tokens=0,
@@ -799,7 +817,14 @@ def add_total_args(parser: argparse.ArgumentParser) -> None:
     parser.add_argument("--claude-jsonl", help="current Claude Code session JSONL transcript to parse")
     parser.add_argument("--grok-jsonl", help="current Grok session updates.jsonl to parse")
     parser.add_argument("--grok-log", help="Grok unified.jsonl override; normally discovered from --grok-jsonl")
-    parser.add_argument("--openrouter-jsonl", help="OpenRouter usage log written by openrouter_proxy.py; carries exact tokens and USD cost for any harness")
+    parser.add_argument(
+        "--openrouter-jsonl",
+        default=DEFAULT_OPENROUTER_LOG,
+        help=(
+            "OpenRouter usage log written by openrouter_run.py/openrouter_proxy.py; "
+            f"defaults to ${OPENROUTER_LOG_ENV_VAR} and carries exact tokens and USD cost"
+        ),
+    )
     parser.add_argument("--source", help="usage source, for example codex_goal, codex_exec_jsonl, claude_code_jsonl, grok_session_jsonl, openrouter_usage, provider_usage")
     parser.add_argument("--confidence", choices=["exact", "parsed", "estimated"])
 

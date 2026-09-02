@@ -85,7 +85,10 @@ Apply these hard gates to every worker:
    bind the active session through `updates.jsonl` and let the helper read its
    exact unified inference log; Grok's aggregate `totalTokens` includes cached
    reads and is not a valid Scorebench working-token total.
-   Never guess a token split or model cost.
+   Never guess a token split or model cost. If the coding harness is configured
+   for OpenRouter, it must be started through `scripts/openrouter_run.py`; that
+   launcher detects the configured route, captures OpenRouter's response-level
+   usage and billed cost, and gives each parallel worker an isolated ledger.
 7. Submit the simplest correct protective baseline in the first work cycle,
    then submit materially different, validated improvements promptly. Never
    create a new candidate for unchanged content; reuse the original idempotency

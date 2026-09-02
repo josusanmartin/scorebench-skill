@@ -89,66 +89,82 @@ class Handler(BaseHTTPRequestHandler):
         try:
             upstream = urllib.request.urlopen(request, timeout=600)  # nosec B310 (fixed upstream host)
         except urllib.error.HTTPError as exc:
-            # Forward the upstream error unchanged; errors carry no usage.
-            self._relay(exc, record_usage=False)
+            # Some provider failures can still report billable usage.
+            self._relay(exc, record_usage=True)
             return
         except (urllib.error.URLError, TimeoutError, OSError) as exc:
+            body = json.dumps({"error": f"openrouter proxy upstream failure: {exc}"}).encode()
             self.send_response(502)
             self.send_header("Content-Type", "application/json")
+            self.send_header("Content-Length", str(len(body)))
+            self.send_header("Connection", "close")
             self.end_headers()
-            self.wfile.write(json.dumps({"error": f"openrouter proxy upstream failure: {exc}"}).encode())
+            self.wfile.write(body)
+            self.close_connection = True
             return
         self._relay(upstream, record_usage=True)
 
     def _relay(self, upstream, *, record_usage: bool) -> None:
         status = getattr(upstream, "status", None) or upstream.getcode() or 200
         content_type = upstream.headers.get("Content-Type", "")
+        streaming = "text/event-stream" in content_type.lower()
+        body = None if streaming else upstream.read()
+        if body is not None and record_usage:
+            self._record_body_usage(body)
         self.send_response(status)
         for key, value in upstream.headers.items():
             if key.lower() in _SKIP_RESPONSE_HEADERS:
                 continue
             self.send_header(key, value)
-        streaming = "text/event-stream" in content_type.lower()
         self.send_header("Connection", "close")
         self.end_headers()
         try:
             if streaming:
                 self._pump_stream(upstream, record_usage=record_usage)
             else:
-                self._pump_body(upstream, record_usage=record_usage)
+                self.wfile.write(body or b"")
         except (BrokenPipeError, ConnectionResetError):
             pass
         finally:
             self.close_connection = True
 
-    def _pump_body(self, upstream, *, record_usage: bool) -> None:
-        body = upstream.read()
-        self.wfile.write(body)
-        if not record_usage:
-            return
+    def _record_body_usage(self, body: bytes) -> None:
         try:
             obj = json.loads(body)
         except (ValueError, TypeError):
             return
         if isinstance(obj, dict):
+            # Persist usage before exposing the response status/body. A client
+            # disconnect after OpenRouter bills must not make the run cheaper.
             self.server.usage_log.record(obj)  # type: ignore[attr-defined]
 
     def _pump_stream(self, upstream, *, record_usage: bool) -> None:
         buffer = b""
+        client_connected = True
+        response_obj: dict = {"usage": {}}
         while True:
             chunk = upstream.read(65536)
             if not chunk:
                 break
-            self.wfile.write(chunk)
-            self.wfile.flush()
-            if not record_usage:
-                continue
-            buffer += chunk
-            while b"\n" in buffer:
-                line, buffer = buffer.split(b"\n", 1)
-                self._scan_sse_line(line)
+            if record_usage:
+                buffer += chunk
+                while b"\n" in buffer:
+                    line, buffer = buffer.split(b"\n", 1)
+                    self._scan_sse_line(line, response_obj)
+            if client_connected:
+                try:
+                    self.wfile.write(chunk)
+                    self.wfile.flush()
+                except (BrokenPipeError, ConnectionResetError):
+                    # Keep draining the billed upstream response so the final
+                    # SSE usage event is still captured.
+                    client_connected = False
+        if record_usage and buffer:
+            self._scan_sse_line(buffer, response_obj)
+        if record_usage and response_obj["usage"]:
+            self.server.usage_log.record(response_obj)  # type: ignore[attr-defined]
 
-    def _scan_sse_line(self, line: bytes) -> None:
+    def _scan_sse_line(self, line: bytes, response_obj: dict) -> None:
         line = line.strip()
         if not line.startswith(b"data:"):
             return
@@ -159,8 +175,31 @@ class Handler(BaseHTTPRequestHandler):
             obj = json.loads(payload)
         except (ValueError, TypeError):
             return
-        if isinstance(obj, dict) and isinstance(obj.get("usage"), dict):
-            self.server.usage_log.record(obj)  # type: ignore[attr-defined]
+        if not isinstance(obj, dict):
+            return
+        message = obj.get("message") if isinstance(obj.get("message"), dict) else {}
+        usage = obj.get("usage")
+        if not isinstance(usage, dict):
+            usage = message.get("usage")
+        if isinstance(usage, dict):
+            self._merge_usage(response_obj["usage"], usage)
+        response_obj["id"] = obj.get("id") or message.get("id") or response_obj.get("id")
+        response_obj["model"] = obj.get("model") or message.get("model") or response_obj.get("model")
+
+    @staticmethod
+    def _merge_usage(target: dict, update: dict) -> None:
+        """Merge cumulative stream counters from OpenAI and Anthropic skins."""
+        for key, value in update.items():
+            if isinstance(value, dict):
+                nested = target.setdefault(key, {})
+                if isinstance(nested, dict):
+                    Handler._merge_usage(nested, value)
+                continue
+            if isinstance(value, (int, float)) and not isinstance(value, bool):
+                previous = target.get(key)
+                target[key] = max(previous, value) if isinstance(previous, (int, float)) else value
+            elif value is not None:
+                target[key] = value
 
     do_POST = _handle
     do_GET = _handle

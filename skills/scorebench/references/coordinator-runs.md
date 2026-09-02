@@ -236,6 +236,14 @@ Repeatedly copying an expired host credential cannot recover a worker.
 
 For isolated batches, read [Clean-room Docker](clean-room-docker.md).
 
+If a worker's coding harness is configured for OpenRouter, launch that harness
+through the installed skill's `scripts/openrouter_run.py`. The launcher detects
+the configured route and otherwise executes the harness unchanged. It must run
+outside the coding harness, before the first provider request. Give every worker
+its own workspace so its usage log and token baseline cannot mix with sibling
+runs. A key being present does not by itself prove OpenRouter is active; custom
+harnesses can opt in with `SCOREBENCH_OPENROUTER=1`.
+
 1. Create and verify fresh lane-specific work and agent-state volumes.
 2. Seed only allowlisted files, installed skills, bootstrap, token helper, and
    staged goal.
