@@ -14,7 +14,9 @@ from typing import Any
 # SCOREBENCH_TOKEN_STATE once; everyone else passes --state explicitly.
 STATE_ENV_VAR = "SCOREBENCH_TOKEN_STATE"
 DEFAULT_STATE = os.environ.get(STATE_ENV_VAR, "")
-ACCOUNTING_VERSION = 2
+ACCOUNTING_VERSION = 3
+CACHE_AWARE_ACCOUNTING_VERSION = 2
+CODEX_PER_TURN_ACCOUNTING_VERSION = 3
 COMPONENT_FIELDS = (
     "input_tokens",
     "output_tokens",
@@ -225,11 +227,12 @@ def codex_jsonl_snapshot(path: Path, *, accounting_version: int = ACCOUNTING_VER
             if not isinstance(usage, dict):
                 continue
             snapshot = codex_usage_snapshot(
-                usage, cache_aware=accounting_version >= ACCOUNTING_VERSION
+                usage,
+                cache_aware=accounting_version >= CACHE_AWARE_ACCOUNTING_VERSION,
             )
             if snapshot is not None:
                 snapshots.append((current_thread_id, snapshot))
-    if accounting_version < ACCOUNTING_VERSION:
+    if accounting_version < CACHE_AWARE_ACCOUNTING_VERSION:
         return aggregate_snapshots(
             [snapshot for _thread_id, snapshot in snapshots], path, "turn.completed"
         )
@@ -249,10 +252,17 @@ def codex_jsonl_snapshot(path: Path, *, accounting_version: int = ACCOUNTING_VER
             "cannot determine whether usage is cumulative"
         )
 
-    # codex exec emits the thread's cumulative usage at turn completion. A
-    # resumed thread can therefore appear more than once in an appended log;
-    # the latest snapshot replaces earlier cumulative snapshots.
-    return snapshots[-1][1]
+    if accounting_version < CODEX_PER_TURN_ACCOUNTING_VERSION:
+        # Accounting v2 treated turn.completed as cumulative. Preserve that
+        # interpretation for an already-running lane so upgrading the helper
+        # cannot create an artificial token jump mid-run.
+        return snapshots[-1][1]
+
+    # Current Codex exec emits usage for each completed turn, including after
+    # resume. Sum every turn from the one thread to obtain session totals.
+    return aggregate_snapshots(
+        [snapshot for _thread_id, snapshot in snapshots], path, "turn.completed"
+    )
 
 
 def codex_jsonl_total(path: Path) -> int:
@@ -288,6 +298,12 @@ def claude_jsonl_snapshot(
                 continue
             if not isinstance(event, dict):
                 continue
+            if event.get("type") == "result" and isinstance(event.get("usage"), dict):
+                raise SystemExit(
+                    "Claude stream-json output is not an exact session transcript; "
+                    "its assistant usage can be provisional. Use the persisted "
+                    "~/.claude/projects/.../<session>.jsonl file instead."
+                )
             message = event.get("message")
             usage = None
             if isinstance(message, dict):
@@ -303,7 +319,7 @@ def claude_jsonl_snapshot(
             if not isinstance(message_id, str) or not message_id.strip():
                 message_id = event.get("requestId")
             if (
-                accounting_version >= ACCOUNTING_VERSION
+                accounting_version >= CACHE_AWARE_ACCOUNTING_VERSION
                 and isinstance(message_id, str)
                 and message_id.strip()
             ):
