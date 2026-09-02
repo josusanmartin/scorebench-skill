@@ -58,10 +58,11 @@ Codex reports `input_tokens` as an inclusive count: cached reads and cache-write
 tokens are subsets of it. The helper converts that payload into disjoint fresh
 input, cache-write, cache-read, and output counters. Its working total follows
 Codex's own definition, `input_tokens - cached_input_tokens + output_tokens`.
-`turn.completed` is cumulative for a thread, so the helper uses the latest
-snapshot instead of summing resumed snapshots. It rejects JSONL containing
-multiple thread IDs rather than guessing. Do not launch a nested `codex exec`
-from inside a solving agent.
+Each `turn.completed` record contains usage for that turn, including turns
+emitted by `codex exec resume`, so the helper sums every record for the thread.
+Append resumed `--json` output to the same run log. The helper rejects JSONL
+containing multiple thread IDs rather than guessing. Do not launch a nested
+`codex exec` from inside a solving agent.
 
 For a Codex TUI without `get_goal`, an exact current-session value visibly
 reported by `/status` is acceptable. Do not use `/usage`; it is account-wide.
@@ -85,6 +86,11 @@ identical usage by stable message/request ID and fails if one ID carries
 conflicting counters. It sums fresh `input_tokens`, `output_tokens`, and
 `cache_creation_input_tokens`, while retaining but excluding
 `cache_read_input_tokens` from working tokens.
+
+Use Claude Code's persisted project transcript, not captured
+`--output-format stream-json` stdout. The stream can expose provisional
+per-message usage before its final `result` summary, so the helper rejects that
+shape rather than report an apparently exact undercount.
 
 For Grok, parse the active session's native `updates.jsonl` file. The launcher
 or active Grok session must identify the session ID; do not select an unrelated

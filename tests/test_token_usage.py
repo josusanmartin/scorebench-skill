@@ -80,7 +80,7 @@ class TokenUsageTests(unittest.TestCase):
                     {
                         "type": "turn.completed",
                         "usage": {
-                            # Codex emits cumulative thread totals. input_tokens
+                            # Codex emits usage for this turn. input_tokens
                             # includes the cached subset.
                             "input_tokens": 180,
                             "output_tokens": 8,
@@ -95,14 +95,97 @@ class TokenUsageTests(unittest.TestCase):
 
         result = self.run_helper("flags", "--codex-jsonl", str(log))
 
-        self.assertIn("--total-tokens 23", result.stdout)
-        self.assertIn("--input-tokens 20", result.stdout)
-        self.assertIn("--output-tokens 3", result.stdout)
+        self.assertIn("--total-tokens 38", result.stdout)
+        self.assertIn("--input-tokens 30", result.stdout)
+        self.assertIn("--output-tokens 8", result.stdout)
         self.assertIn("--cache-creation-tokens 0", result.stdout)
-        self.assertIn("--cache-read-tokens 50", result.stdout)
-        self.assertIn("--reasoning-output-tokens 1", result.stdout)
+        self.assertIn("--cache-read-tokens 150", result.stdout)
+        self.assertIn("--reasoning-output-tokens 3", result.stdout)
         self.assertIn("--usage-confidence exact", result.stdout)
         self.assertIn("--tokens-total-source codex_exec_jsonl", result.stdout)
+
+    def test_codex_resumed_live_turns_are_summed(self):
+        cases = (
+            (
+                "gpt-5.6-sol",
+                (
+                    (17_125, 11_008, 7, 0),
+                    (17_145, 16_128, 7, 0),
+                    (17_166, 16_128, 8, 0),
+                ),
+                6_124,
+                {
+                    "input_tokens": 2_055,
+                    "output_tokens": 15,
+                    "cache_read_tokens": 32_256,
+                    "reasoning_output_tokens": 0,
+                },
+                2_070,
+            ),
+            (
+                "gpt-5.4-mini",
+                (
+                    (14_501, 4_352, 21, 12),
+                    (16_311, 14_080, 20, 11),
+                    (20_280, 16_128, 23, 13),
+                ),
+                10_170,
+                {
+                    "input_tokens": 6_383,
+                    "output_tokens": 43,
+                    "cache_read_tokens": 30_208,
+                    "reasoning_output_tokens": 24,
+                },
+                6_426,
+            ),
+        )
+        for model, turns, baseline, expected_usage, expected_total in cases:
+            with self.subTest(model=model):
+                log = self.root / f"{model}.jsonl"
+                thread_id = f"thread-{model}"
+
+                def event(turn):
+                    inclusive_input, cached_input, output, reasoning = turn
+                    return {
+                        "type": "turn.completed",
+                        "usage": {
+                            "input_tokens": inclusive_input,
+                            "cached_input_tokens": cached_input,
+                            "cache_write_input_tokens": 0,
+                            "output_tokens": output,
+                            "reasoning_output_tokens": reasoning,
+                        },
+                    }
+
+                log.write_text(
+                    json.dumps({"type": "thread.started", "thread_id": thread_id})
+                    + "\n"
+                    + json.dumps(event(turns[0]))
+                    + "\n",
+                    encoding="utf-8",
+                )
+                started = json.loads(
+                    self.run_helper("start", "--codex-jsonl", str(log)).stdout
+                )
+                self.assertEqual(started["baseline_total_tokens"], baseline)
+                with log.open("a", encoding="utf-8") as handle:
+                    for turn in turns[1:]:
+                        handle.write(
+                            json.dumps(
+                                {"type": "thread.started", "thread_id": thread_id}
+                            )
+                            + "\n"
+                            + json.dumps(event(turn))
+                            + "\n"
+                        )
+
+                status = json.loads(
+                    self.run_helper("status", "--codex-jsonl", str(log)).stdout
+                )
+
+                self.assertEqual(status["run_total_tokens"], expected_total)
+                for field, value in expected_usage.items():
+                    self.assertEqual(status["run_usage"][field], value)
 
     def test_claude_jsonl_excludes_cache_reads(self):
         log = self.root / "claude.jsonl"
@@ -144,6 +227,46 @@ class TokenUsageTests(unittest.TestCase):
         self.assertIn("--cache-read-tokens 2000", result.stdout)
         self.assertIn("--usage-source claude_code", result.stdout)
         self.assertIn("--usage-confidence exact", result.stdout)
+
+    def test_claude_stream_json_output_is_rejected(self):
+        log = self.root / "claude-stream.jsonl"
+        log.write_text(
+            json.dumps(
+                {
+                    "type": "assistant",
+                    "message": {
+                        "id": "msg_partial",
+                        "usage": {
+                            "input_tokens": 2,
+                            "output_tokens": 1,
+                            "cache_creation_input_tokens": 76,
+                            "cache_read_input_tokens": 2865,
+                        },
+                    },
+                }
+            )
+            + "\n"
+            + json.dumps(
+                {
+                    "type": "result",
+                    "usage": {
+                        "input_tokens": 2,
+                        "output_tokens": 11,
+                        "cache_creation_input_tokens": 76,
+                        "cache_read_input_tokens": 2865,
+                    },
+                }
+            )
+            + "\n",
+            encoding="utf-8",
+        )
+
+        result = self.run_helper(
+            "start", "--claude-jsonl", str(log), check=False
+        )
+
+        self.assertNotEqual(result.returncode, 0)
+        self.assertIn("stream-json output is not an exact session transcript", result.stderr)
 
     def test_grok_jsonl_sums_inferences_and_excludes_cache_reads(self):
         grok_root = self.root / ".grok"
@@ -349,11 +472,11 @@ class TokenUsageTests(unittest.TestCase):
 
         result = self.run_helper("flags", "--codex-jsonl", str(log))
 
-        self.assertIn("--total-tokens 12", result.stdout)
-        self.assertIn("--input-tokens 5", result.stdout)
-        self.assertIn("--output-tokens 4", result.stdout)
-        self.assertIn("--cache-creation-tokens 3", result.stdout)
-        self.assertIn("--cache-read-tokens 20", result.stdout)
+        self.assertIn("--total-tokens 29", result.stdout)
+        self.assertIn("--input-tokens 15", result.stdout)
+        self.assertIn("--output-tokens 6", result.stdout)
+        self.assertIn("--cache-creation-tokens 8", result.stdout)
+        self.assertIn("--cache-read-tokens 120", result.stdout)
 
     def test_codex_real_schema_excludes_cached_input_from_working_total(self):
         log = self.root / "codex-real.jsonl"
@@ -386,8 +509,61 @@ class TokenUsageTests(unittest.TestCase):
             self.run_helper("status", "--codex-jsonl", str(log)).stdout
         )
         self.assertEqual(status["absolute_total_tokens"], 3_024)
-        self.assertEqual(status["accounting_version"], 2)
+        self.assertEqual(status["accounting_version"], 3)
         self.assertEqual(status["run_usage"]["input_tokens"], 0)
+
+    def test_codex_v2_state_keeps_cumulative_snapshot_semantics(self):
+        log = self.root / "codex-v2.jsonl"
+        first = {
+            "type": "turn.completed",
+            "usage": {
+                "input_tokens": 110,
+                "cached_input_tokens": 100,
+                "output_tokens": 5,
+            },
+        }
+        second = {
+            "type": "turn.completed",
+            "usage": {
+                "input_tokens": 180,
+                "cached_input_tokens": 150,
+                "output_tokens": 8,
+            },
+        }
+        log.write_text(
+            json.dumps({"type": "thread.started", "thread_id": "thread-v2"})
+            + "\n"
+            + json.dumps(first)
+            + "\n"
+            + json.dumps(second)
+            + "\n",
+            encoding="utf-8",
+        )
+        self.state.write_text(
+            json.dumps(
+                {
+                    "accounting_version": 2,
+                    "baseline_total_tokens": 15,
+                    "baseline_usage": {
+                        "input_tokens": 10,
+                        "output_tokens": 5,
+                        "cache_creation_tokens": 0,
+                        "cache_read_tokens": 100,
+                    },
+                    "confidence": "exact",
+                    "tokens_total_source": "codex_exec_jsonl",
+                    "usage_source": "codex_usage",
+                }
+            ),
+            encoding="utf-8",
+        )
+
+        result = self.run_helper("flags", "--codex-jsonl", str(log))
+
+        self.assertIn("--total-tokens 23", result.stdout)
+        self.assertIn("--input-tokens 20", result.stdout)
+        self.assertIn("--output-tokens 3", result.stdout)
+        self.assertIn("--cache-read-tokens 50", result.stdout)
 
     def test_claude_conflicting_duplicate_usage_fails_loudly(self):
         log = self.root / "claude-conflict.jsonl"
