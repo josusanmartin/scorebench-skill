@@ -4,6 +4,7 @@ from __future__ import annotations
 import argparse
 from dataclasses import dataclass
 import json
+import math
 import os
 from pathlib import Path
 from typing import Any
@@ -15,6 +16,7 @@ from typing import Any
 STATE_ENV_VAR = "SCOREBENCH_TOKEN_STATE"
 DEFAULT_STATE = os.environ.get(STATE_ENV_VAR, "")
 ACCOUNTING_VERSION = 2
+COST_DECIMAL_PLACES = 12
 COMPONENT_FIELDS = (
     "input_tokens",
     "output_tokens",
@@ -504,8 +506,7 @@ def openrouter_jsonl_snapshot(path: Path) -> UsageSnapshot:
     when it starts, before any calls have been made.
     """
     snapshots: list[UsageSnapshot] = []
-    total_cost = 0.0
-    have_cost = False
+    costs: list[float] = []
     with path.open("r", encoding="utf-8") as handle:
         for line in handle:
             line = line.strip()
@@ -526,8 +527,7 @@ def openrouter_jsonl_snapshot(path: Path) -> UsageSnapshot:
                 continue
             snapshots.append(snapshot)
             if snapshot.cost_usd is not None:
-                total_cost += snapshot.cost_usd
-                have_cost = True
+                costs.append(snapshot.cost_usd)
     if not snapshots:
         return UsageSnapshot(
             total_tokens=0,
@@ -546,7 +546,9 @@ def openrouter_jsonl_snapshot(path: Path) -> UsageSnapshot:
         cache_creation_tokens=aggregated.cache_creation_tokens,
         cache_read_tokens=aggregated.cache_read_tokens,
         reasoning_output_tokens=aggregated.reasoning_output_tokens,
-        cost_usd=round(total_cost, 6) if have_cost else None,
+        cost_usd=(
+            round(math.fsum(costs), COST_DECIMAL_PLACES) if costs else None
+        ),
     )
 
 
@@ -698,7 +700,7 @@ def current_run_usage(
                 "current OpenRouter cost is lower than the stored baseline; do not submit. "
                 "Start a new harness run or recreate the token baseline."
             )
-        run_cost = round(cost_delta, 6)
+        run_cost = round(cost_delta, COST_DECIMAL_PLACES)
     return state, snapshot, run_total, run_components, run_cost
 
 

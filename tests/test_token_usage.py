@@ -687,6 +687,24 @@ class TokenUsageTests(unittest.TestCase):
         self.assertIn("--cost-usd 0.04", result.stdout)       # only this run's spend
         self.assertIn("--total-tokens 250", result.stdout)
 
+    def test_openrouter_preserves_sub_microdollar_cost_precision(self):
+        log = self.root / "or.jsonl"
+        log.write_text("", encoding="utf-8")
+        self.run_helper("start", "--openrouter-jsonl", str(log))
+        with log.open("a", encoding="utf-8") as handle:
+            for generation_id in ("gen-1", "gen-2"):
+                handle.write(json.dumps({"id": generation_id, "usage": {
+                    "prompt_tokens": 8,
+                    "completion_tokens": 1,
+                    "total_tokens": 9,
+                    "cost": 0.0000018,
+                }}) + "\n")
+
+        result = self.run_helper("flags", "--openrouter-jsonl", str(log))
+
+        self.assertIn("--total-tokens 18", result.stdout)
+        self.assertIn("--cost-usd 3.6e-06", result.stdout)
+
     def test_openrouter_invalid_usage_fails_loudly(self):
         log = self.root / "or.jsonl"
         log.write_text("", encoding="utf-8")
