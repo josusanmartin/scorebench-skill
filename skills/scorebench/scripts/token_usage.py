@@ -835,7 +835,8 @@ def cmd_start(args: argparse.Namespace) -> int:
 def current_run_usage(
     args: argparse.Namespace,
 ) -> tuple[dict[str, Any], UsageSnapshot, int, dict[str, int], float | None]:
-    state = load_state(resolve_state_path(args.state))
+    state_path = resolve_state_path(args.state)
+    state = supervised_baseline(args, state_path) or load_state(state_path)
     baseline = state.get("baseline_total_tokens")
     if not isinstance(baseline, int):
         raise SystemExit(f"invalid baseline_total_tokens in {args.state}")

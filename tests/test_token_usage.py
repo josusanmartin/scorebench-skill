@@ -986,6 +986,14 @@ class TokenUsageTests(unittest.TestCase):
         self.assertNotEqual(result.returncode, 0)
         self.assertIn("baseline is not zero", result.stderr)
 
+        flags = self.run_helper(
+            "flags", "--codex-jsonl", str(log),
+            "--source", "codex_session_jsonl",
+            env=self.supervised_env(), check=False,
+        )
+        self.assertNotEqual(flags.returncode, 0)
+        self.assertIn("baseline is not zero", flags.stderr)
+
     def test_supervised_start_rejects_source_mismatch(self):
         pinned = self.root / "native-session.jsonl"
         other = self.root / "other-session.jsonl"
