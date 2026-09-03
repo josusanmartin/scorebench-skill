@@ -917,6 +917,91 @@ class TokenUsageTests(unittest.TestCase):
         )
         self.assertIn("--total-tokens 150", result.stdout)
 
+    def supervised_env(self):
+        env = dict(os.environ)
+        env["SCOREBENCH_ACCOUNTING_SUPERVISED"] = "1"
+        return env
+
+    def write_supervised_state(self, source: Path, **updates):
+        state = {
+            "accounting_version": 3,
+            "baseline_total_tokens": 0,
+            "baseline_usage": {
+                "input_tokens": 0,
+                "output_tokens": 0,
+                "cache_creation_tokens": 0,
+                "cache_read_tokens": 0,
+                "reasoning_output_tokens": 0,
+            },
+            "confidence": "exact",
+            "tokens_total_source": "codex_session_jsonl",
+            "usage_source": "codex_usage",
+            "source_binding": {"paths": {"codex_jsonl": str(source.resolve())}},
+            "supervisor_managed": True,
+        }
+        state.update(updates)
+        self.state.write_text(json.dumps(state, indent=2) + "\n", encoding="utf-8")
+
+    def test_supervised_start_reuses_exact_zero_baseline_without_rewriting(self):
+        log = self.root / "native-session.jsonl"
+        log.write_text("", encoding="utf-8")
+        self.write_supervised_state(log)
+        before = self.state.read_bytes()
+        before_mtime = self.state.stat().st_mtime_ns
+
+        result = self.run_helper(
+            "start",
+            "--codex-jsonl", str(log),
+            "--source", "codex_session_jsonl",
+            "--confidence", "exact",
+            "--allow-empty",
+            env=self.supervised_env(),
+        )
+
+        payload = json.loads(result.stdout)
+        self.assertTrue(payload["reused_supervisor_baseline"])
+        self.assertEqual(self.state.read_bytes(), before)
+        self.assertEqual(self.state.stat().st_mtime_ns, before_mtime)
+
+    def test_supervised_start_fails_when_baseline_is_missing(self):
+        result = self.run_helper(
+            "start", "--total-tokens", "10",
+            env=self.supervised_env(), check=False,
+        )
+
+        self.assertNotEqual(result.returncode, 0)
+        self.assertIn("supervisor token baseline is not ready", result.stderr)
+
+    def test_supervised_start_rejects_nonzero_baseline(self):
+        log = self.root / "native-session.jsonl"
+        log.write_text("", encoding="utf-8")
+        self.write_supervised_state(log, baseline_total_tokens=1)
+
+        result = self.run_helper(
+            "start", "--codex-jsonl", str(log),
+            "--source", "codex_session_jsonl",
+            env=self.supervised_env(), check=False,
+        )
+
+        self.assertNotEqual(result.returncode, 0)
+        self.assertIn("baseline is not zero", result.stderr)
+
+    def test_supervised_start_rejects_source_mismatch(self):
+        pinned = self.root / "native-session.jsonl"
+        other = self.root / "other-session.jsonl"
+        pinned.write_text("", encoding="utf-8")
+        other.write_text("", encoding="utf-8")
+        self.write_supervised_state(pinned)
+
+        result = self.run_helper(
+            "start", "--codex-jsonl", str(other),
+            "--source", "codex_session_jsonl",
+            env=self.supervised_env(), check=False,
+        )
+
+        self.assertNotEqual(result.returncode, 0)
+        self.assertIn("supervisor-pinned native session", result.stderr)
+
     def test_absolute_state_survives_a_cwd_change(self):
         """start and flags must agree even when run from different directories."""
         other = self.root / "elsewhere"

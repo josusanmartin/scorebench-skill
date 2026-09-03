@@ -15,6 +15,7 @@ from typing import Any
 # SCOREBENCH_TOKEN_STATE once; everyone else passes --state explicitly.
 STATE_ENV_VAR = "SCOREBENCH_TOKEN_STATE"
 DEFAULT_STATE = os.environ.get(STATE_ENV_VAR, "")
+SUPERVISED_ENV_VAR = "SCOREBENCH_ACCOUNTING_SUPERVISED"
 OPENROUTER_LOG_ENV_VAR = "SCOREBENCH_OPENROUTER_LOG"
 DEFAULT_OPENROUTER_LOG = os.environ.get(OPENROUTER_LOG_ENV_VAR, "")
 ACCOUNTING_VERSION = 3
@@ -740,7 +741,76 @@ def usage_source_for(tokens_source: str) -> str:
     return tokens_source
 
 
+def supervised_baseline(args: argparse.Namespace, path: Path) -> dict[str, Any] | None:
+    """Reuse, but never replace, a container supervisor's zero baseline."""
+    if os.environ.get(SUPERVISED_ENV_VAR) != "1":
+        return None
+    if not path.exists():
+        raise SystemExit(
+            "container supervisor token baseline is not ready; wait for "
+            "$SCOREBENCH_SESSION_READY and do not create or replace the baseline"
+        )
+
+    state = load_state(path)
+    if state.get("supervisor_managed") is not True:
+        raise SystemExit(
+            "container token baseline is not supervisor-managed; do not submit"
+        )
+    if state.get("accounting_version") != ACCOUNTING_VERSION:
+        raise SystemExit(
+            "container supervisor token baseline has an unexpected accounting version; "
+            "do not submit"
+        )
+    if state.get("baseline_total_tokens") != 0:
+        raise SystemExit(
+            "container supervisor token baseline is not zero; do not submit"
+        )
+    baseline_usage = state.get("baseline_usage")
+    if not isinstance(baseline_usage, dict) or any(
+        baseline_usage.get(field) != 0 for field in COMPONENT_FIELDS
+    ):
+        raise SystemExit(
+            "container supervisor component token baselines are not zero; do not submit"
+        )
+    if state.get("confidence") != "exact":
+        raise SystemExit(
+            "container supervisor token baseline is not exact; do not submit"
+        )
+
+    stored_binding = state.get("source_binding")
+    current_binding = source_binding_from_args(args)
+    if not isinstance(stored_binding, dict) or current_binding != stored_binding:
+        raise SystemExit(
+            "container token source differs from the supervisor-pinned native session; "
+            "do not submit"
+        )
+    stored_source = state.get("tokens_total_source")
+    requested_source = tokens_source_from_args(args)
+    if requested_source != stored_source:
+        raise SystemExit(
+            "container token source provenance differs from the supervisor baseline; "
+            "do not submit"
+        )
+    if args.confidence and args.confidence != "exact":
+        raise SystemExit(
+            "container token confidence differs from the exact supervisor baseline; "
+            "do not submit"
+        )
+    return state
+
+
 def cmd_start(args: argparse.Namespace) -> int:
+    state_path = resolve_state_path(args.state)
+    if (state := supervised_baseline(args, state_path)) is not None:
+        print(
+            json.dumps(
+                {"ok": True, "reused_supervisor_baseline": True, **state},
+                indent=2,
+                sort_keys=True,
+            )
+        )
+        return 0
+
     snapshot = read_snapshot(args, accounting_version=ACCOUNTING_VERSION)
     tokens_source = tokens_source_from_args(args) or "codex_goal"
     confidence = args.confidence or "exact"
@@ -757,7 +827,7 @@ def cmd_start(args: argparse.Namespace) -> int:
     source_binding = source_binding_from_args(args)
     if source_binding is not None:
         state["source_binding"] = source_binding
-    write_state(resolve_state_path(args.state), state)
+    write_state(state_path, state)
     print(json.dumps({"ok": True, **state}, indent=2, sort_keys=True))
     return 0
 

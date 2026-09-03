@@ -33,6 +33,14 @@ path and refuses to switch transcripts after the baseline.
 
 ## Establish The Baseline
 
+When `SCOREBENCH_ACCOUNTING_SUPERVISED=1`, the container supervisor owns this
+step. Wait until `$SCOREBENCH_SESSION_READY` exists before using token flags or
+submitting. Do not create, delete, or replace `$SCOREBENCH_TOKEN_STATE`. If the
+normal workflow invokes `token_usage.py start` with the supervisor-pinned
+native session, the helper validates and reuses the exact-zero baseline without
+rewriting it. A missing, nonzero, inexact, or differently bound baseline fails
+closed. The supervisor checks the same invariant again at shutdown.
+
 Immediately after the Scorebench run is established, capture the first exact
 source available:
 

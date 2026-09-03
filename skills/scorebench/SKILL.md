@@ -131,6 +131,11 @@ context -> exercise -> current/start -> ping -> passive observer -> trace bounda
 -> sanitized trace upload
 ```
 
+In a container with `SCOREBENCH_ACCOUNTING_SUPERVISED=1`, wait for
+`$SCOREBENCH_SESSION_READY` and reuse the supervisor-managed token baseline.
+Never replace `$SCOREBENCH_TOKEN_STATE`; the supervisor performs final usage
+reconciliation and rejects a changed baseline.
+
 Trace capture is best-effort observability. A trace failure never changes a
 candidate score, validity, status, or run completion; preserve the local
 artifact and exact error for a later retry.
