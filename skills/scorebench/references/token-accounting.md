@@ -55,6 +55,24 @@ python3 "$SCOREBENCH_TOKEN_HELPER" start \
   --confidence exact
 ```
 
+Codex's persisted native session JSONL is also supported. This is the preferred
+source while a long-running `codex exec` process is still active because its
+cumulative `token_usage_record` entries are written after each provider
+response, before the outer process emits its terminal `turn.completed` event:
+
+```bash
+python3 "$SCOREBENCH_TOKEN_HELPER" start \
+  --state "$SCOREBENCH_TOKEN_STATE" \
+  --codex-jsonl "$CODEX_SESSION_JSONL" \
+  --source codex_session_jsonl \
+  --confidence exact \
+  --allow-empty
+```
+
+Use one native session file per run. The helper rejects mixed thread IDs,
+decreasing cumulative counters, and files that combine native cumulative
+records with `codex exec --json` per-turn records.
+
 Codex reports `input_tokens` as an inclusive count: cached reads and cache-write
 tokens are subsets of it. The helper converts that payload into disjoint fresh
 input, cache-write, cache-read, and output counters. Its working total follows

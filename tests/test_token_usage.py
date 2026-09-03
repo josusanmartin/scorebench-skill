@@ -283,6 +283,110 @@ class TokenUsageTests(unittest.TestCase):
         self.assertIn("--usage-source claude_code", result.stdout)
         self.assertIn("--usage-confidence exact", result.stdout)
 
+    def test_codex_native_session_uses_latest_cumulative_usage(self):
+        log = self.root / "codex-native.jsonl"
+
+        def event(total_input, cached_input, output, reasoning):
+            return {
+                "type": "token_usage_record",
+                "payload": {
+                    "thread_id": "thread-native",
+                    "session_id": "thread-native",
+                    "thread_token_usage": {
+                        "input_tokens": total_input,
+                        "cached_input_tokens": cached_input,
+                        "cache_write_input_tokens": 0,
+                        "output_tokens": output,
+                        "reasoning_output_tokens": reasoning,
+                        "total_tokens": total_input + output,
+                    },
+                },
+            }
+
+        log.write_text(json.dumps(event(100, 80, 10, 3)) + "\n", encoding="utf-8")
+        self.run_helper(
+            "start",
+            "--codex-jsonl",
+            str(log),
+            "--source",
+            "codex_session_jsonl",
+            "--confidence",
+            "exact",
+        )
+        with log.open("a", encoding="utf-8") as handle:
+            handle.write(json.dumps(event(250, 190, 30, 8)) + "\n")
+
+        result = self.run_helper(
+            "flags",
+            "--codex-jsonl",
+            str(log),
+            "--source",
+            "codex_session_jsonl",
+            "--confidence",
+            "exact",
+        )
+
+        self.assertIn("--total-tokens 60", result.stdout)
+        self.assertIn("--input-tokens 40", result.stdout)
+        self.assertIn("--output-tokens 20", result.stdout)
+        self.assertIn("--cache-read-tokens 110", result.stdout)
+        self.assertIn("--reasoning-output-tokens 5", result.stdout)
+        self.assertIn("--tokens-total-source codex_session_jsonl", result.stdout)
+
+    def test_empty_native_log_can_only_establish_an_explicit_zero_baseline(self):
+        log = self.root / "codex-native-empty.jsonl"
+        log.write_text("", encoding="utf-8")
+
+        rejected = self.run_helper(
+            "start", "--codex-jsonl", str(log), check=False
+        )
+        self.assertNotEqual(rejected.returncode, 0)
+
+        started = json.loads(
+            self.run_helper(
+                "start",
+                "--codex-jsonl",
+                str(log),
+                "--source",
+                "codex_session_jsonl",
+                "--confidence",
+                "exact",
+                "--allow-empty",
+            ).stdout
+        )
+        self.assertEqual(started["baseline_total_tokens"], 0)
+        self.assertEqual(started["baseline_usage"]["cache_read_tokens"], 0)
+
+        flags = self.run_helper(
+            "flags", "--codex-jsonl", str(log), check=False
+        )
+        self.assertNotEqual(flags.returncode, 0)
+
+    def test_codex_native_session_rejects_counter_regression(self):
+        log = self.root / "codex-native-reset.jsonl"
+        rows = [
+            {
+                "type": "token_usage_record",
+                "payload": {
+                    "thread_id": "thread-native",
+                    "thread_token_usage": {
+                        "input_tokens": value,
+                        "cached_input_tokens": 0,
+                        "output_tokens": 1,
+                    },
+                },
+            }
+            for value in (100, 90)
+        ]
+        log.write_text("".join(json.dumps(row) + "\n" for row in rows), encoding="utf-8")
+
+        result = self.run_helper(
+            "start", "--codex-jsonl", str(log), check=False
+        )
+
+        self.assertNotEqual(result.returncode, 0)
+        self.assertIn("cumulative total_tokens decreased", result.stderr)
+
     def test_claude_stream_json_output_is_rejected(self):
         log = self.root / "claude-stream.jsonl"
         log.write_text(

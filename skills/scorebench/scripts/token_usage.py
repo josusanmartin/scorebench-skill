@@ -209,8 +209,14 @@ def aggregate_snapshots(snapshots: list[UsageSnapshot], path: Path, label: str) 
     )
 
 
-def codex_jsonl_snapshot(path: Path, *, accounting_version: int = ACCOUNTING_VERSION) -> UsageSnapshot:
+def codex_jsonl_snapshot(
+    path: Path,
+    *,
+    accounting_version: int = ACCOUNTING_VERSION,
+    allow_empty: bool = False,
+) -> UsageSnapshot:
     snapshots: list[tuple[str | None, UsageSnapshot]] = []
+    native_snapshots: list[tuple[str, UsageSnapshot]] = []
     current_thread_id: str | None = None
     with path.open("r", encoding="utf-8") as handle:
         for line in handle:
@@ -222,6 +228,25 @@ def codex_jsonl_snapshot(path: Path, *, accounting_version: int = ACCOUNTING_VER
             except json.JSONDecodeError:
                 continue
             if not isinstance(event, dict):
+                continue
+            if event.get("type") == "token_usage_record":
+                payload = event.get("payload")
+                if not isinstance(payload, dict):
+                    continue
+                thread_id = payload.get("thread_id") or payload.get("session_id")
+                usage = payload.get("thread_token_usage")
+                if not isinstance(thread_id, str) or not thread_id.strip():
+                    raise SystemExit(
+                        f"unscoped Codex token_usage_record found in {path}"
+                    )
+                if not isinstance(usage, dict):
+                    continue
+                snapshot = codex_usage_snapshot(
+                    usage,
+                    cache_aware=accounting_version >= CACHE_AWARE_ACCOUNTING_VERSION,
+                )
+                if snapshot is not None:
+                    native_snapshots.append((thread_id.strip(), snapshot))
                 continue
             if event.get("type") == "thread.started":
                 thread_id = event.get("thread_id")
@@ -239,9 +264,43 @@ def codex_jsonl_snapshot(path: Path, *, accounting_version: int = ACCOUNTING_VER
             )
             if snapshot is not None:
                 snapshots.append((current_thread_id, snapshot))
+    if snapshots and native_snapshots:
+        raise SystemExit(
+            f"mixed Codex exec and native session usage records found in {path}"
+        )
+    if native_snapshots:
+        thread_ids = {thread_id for thread_id, _snapshot in native_snapshots}
+        if len(thread_ids) != 1:
+            raise SystemExit(
+                f"multiple Codex threads found in {path}; use one JSONL file per run"
+            )
+        previous: UsageSnapshot | None = None
+        for _thread_id, snapshot in native_snapshots:
+            if previous is not None:
+                for field in ("total_tokens", *COMPONENT_FIELDS):
+                    before = getattr(previous, field)
+                    after = getattr(snapshot, field)
+                    if isinstance(before, int) and isinstance(after, int) and after < before:
+                        raise SystemExit(
+                            f"Codex cumulative {field} decreased in {path}; "
+                            "do not submit from a reset or mixed session log"
+                        )
+            previous = snapshot
+        # Native Codex session records carry cumulative thread usage. Taking
+        # the latest record avoids double-counting each intermediate response.
+        return native_snapshots[-1][1]
     if accounting_version < CACHE_AWARE_ACCOUNTING_VERSION:
         return aggregate_snapshots(
             [snapshot for _thread_id, snapshot in snapshots], path, "turn.completed"
+        )
+    if not snapshots and allow_empty:
+        return UsageSnapshot(
+            total_tokens=0,
+            input_tokens=0,
+            output_tokens=0,
+            cache_creation_tokens=0,
+            cache_read_tokens=0,
+            reasoning_output_tokens=0,
         )
     if not snapshots:
         raise SystemExit(f"no turn.completed usage records found in {path}")
@@ -290,7 +349,10 @@ def claude_usage_total(usage: dict[str, Any]) -> int | None:
 
 
 def claude_jsonl_snapshot(
-    path: Path, *, accounting_version: int = ACCOUNTING_VERSION
+    path: Path,
+    *,
+    accounting_version: int = ACCOUNTING_VERSION,
+    allow_empty: bool = False,
 ) -> UsageSnapshot:
     snapshots: list[UsageSnapshot] = []
     identified: dict[str, UsageSnapshot] = {}
@@ -341,6 +403,15 @@ def claude_jsonl_snapshot(
                 continue
             snapshots.append(snapshot)
     snapshots.extend(identified.values())
+    if not snapshots and allow_empty:
+        return UsageSnapshot(
+            total_tokens=0,
+            input_tokens=0,
+            output_tokens=0,
+            cache_creation_tokens=0,
+            cache_read_tokens=0,
+            reasoning_output_tokens=0,
+        )
     return aggregate_snapshots(snapshots, path, "Claude Code message.usage")
 
 
@@ -600,11 +671,15 @@ def read_snapshot(
         return openrouter_jsonl_snapshot(Path(args.openrouter_jsonl))
     if args.codex_jsonl:
         return codex_jsonl_snapshot(
-            Path(args.codex_jsonl), accounting_version=accounting_version
+            Path(args.codex_jsonl),
+            accounting_version=accounting_version,
+            allow_empty=bool(getattr(args, "allow_empty", False)),
         )
     if args.claude_jsonl:
         return claude_jsonl_snapshot(
-            Path(args.claude_jsonl), accounting_version=accounting_version
+            Path(args.claude_jsonl),
+            accounting_version=accounting_version,
+            allow_empty=bool(getattr(args, "allow_empty", False)),
         )
     if args.grok_jsonl:
         return grok_jsonl_snapshot(
@@ -846,7 +921,7 @@ def cmd_flags(args: argparse.Namespace) -> int:
     return 0
 
 
-def add_total_args(parser: argparse.ArgumentParser) -> None:
+def add_total_args(parser: argparse.ArgumentParser, *, allow_empty: bool = False) -> None:
     parser.add_argument(
         "--state",
         default=DEFAULT_STATE,
@@ -867,6 +942,15 @@ def add_total_args(parser: argparse.ArgumentParser) -> None:
     )
     parser.add_argument("--source", help="usage source, for example codex_goal, codex_exec_jsonl, claude_code_jsonl, grok_session_jsonl, openrouter_usage, provider_usage")
     parser.add_argument("--confidence", choices=["exact", "parsed", "estimated"])
+    if allow_empty:
+        parser.add_argument(
+            "--allow-empty",
+            action="store_true",
+            help=(
+                "allow a newly created native Codex/Claude session log to establish "
+                "an exact zero baseline before its first usage record"
+            ),
+        )
 
 
 def main() -> int:
@@ -874,7 +958,7 @@ def main() -> int:
     sub = parser.add_subparsers(dest="command", required=True)
 
     start = sub.add_parser("start", help="store the token baseline immediately after the harness run is established")
-    add_total_args(start)
+    add_total_args(start, allow_empty=True)
     start.set_defaults(func=cmd_start)
 
     status = sub.add_parser("status", help="print current run-relative token usage")
