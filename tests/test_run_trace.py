@@ -228,6 +228,66 @@ class RunTraceTests(unittest.TestCase):
         self.assertIn("I will test the candidate.", rendered)
         self.assertIn("12 passed", rendered)
 
+    def test_finish_uses_scoped_cli_pairing_without_exporting_token(self):
+        source = self.root / "codex-paired.jsonl"
+        append_jsonl(
+            source,
+            {
+                "timestamp": "2026-09-03T10:00:00Z",
+                "type": "session_meta",
+                "payload": {"cwd": str(self.root), "session_id": "paired-session"},
+            },
+        )
+        self.start(source, "codex")
+        append_jsonl(
+            source,
+            {
+                "timestamp": "2026-09-03T10:00:01Z",
+                "type": "event_msg",
+                "payload": {"type": "agent_message", "message": "done"},
+            },
+        )
+        config = self.root / "cli.json"
+        config.write_text(
+            json.dumps(
+                {
+                    "paired_workspaces": {
+                        str(self.root): {
+                            "url": "https://staging.scorebench.dev/",
+                            "run_token": "hrun_scoped_container_token",
+                        }
+                    }
+                }
+            ),
+            encoding="utf-8",
+        )
+        args = type(
+            "Args",
+            (),
+            {
+                "cwd": self.root,
+                "state": self.state,
+                "output": None,
+                "max_event_bytes": 64 * 1024,
+                "max_trace_bytes": 256 * 1024,
+                "no_upload": False,
+                "url": None,
+                "timeout": 10.0,
+                "retries": 0,
+            },
+        )()
+
+        with mock.patch.dict(
+            "os.environ",
+            {"SCOREBENCH_CLI_CONFIG": str(config)},
+            clear=True,
+        ), mock.patch.object(TRACE, "upload_trace", return_value={"ok": True}) as upload:
+            result = TRACE.trace_finish(args)
+
+        self.assertTrue(result["uploaded"])
+        self.assertEqual(upload.call_args.kwargs["base_url"], "https://staging.scorebench.dev/")
+        self.assertEqual(upload.call_args.kwargs["token"], "hrun_scoped_container_token")
+
     def test_repeated_start_preserves_the_original_boundary(self):
         source = self.root / "codex-retry.jsonl"
         append_jsonl(

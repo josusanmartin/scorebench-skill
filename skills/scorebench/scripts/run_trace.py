@@ -95,6 +95,34 @@ def state_root() -> Path:
     return root / "scorebench" / "run-traces"
 
 
+def paired_workspace_context(cwd: Path) -> dict[str, Any]:
+    explicit = os.environ.get("SCOREBENCH_CLI_CONFIG") or os.environ.get(
+        "HARNESS_CLI_CONFIG"
+    )
+    config_path = (
+        Path(explicit).expanduser()
+        if explicit
+        else Path(os.environ.get("XDG_CONFIG_HOME") or Path.home() / ".config")
+        / "harness"
+        / "cli.json"
+    )
+    if not config_path.is_file():
+        return {}
+    try:
+        config = json.loads(config_path.read_text(encoding="utf-8"))
+    except (OSError, json.JSONDecodeError):
+        return {}
+    records = config.get("paired_workspaces") if isinstance(config, dict) else None
+    if not isinstance(records, dict):
+        return {}
+    resolved = cwd.resolve()
+    for candidate in (resolved, *resolved.parents):
+        record = records.get(str(candidate))
+        if isinstance(record, dict):
+            return record
+    return {}
+
+
 def session_hint() -> str:
     for name in (
         "CODEX_THREAD_ID",
@@ -967,11 +995,18 @@ def trace_finish(args: argparse.Namespace) -> dict[str, Any]:
     if args.no_upload:
         return result
 
-    base_url = args.url or os.environ.get("SCOREBENCH_URL") or os.environ.get(
-        "HARNESS_URL", "https://scorebench.dev/"
+    paired = paired_workspace_context(cwd)
+    base_url = (
+        args.url
+        or os.environ.get("SCOREBENCH_URL")
+        or os.environ.get("HARNESS_URL")
+        or str(paired.get("url") or "")
+        or "https://scorebench.dev/"
     )
     token = os.environ.get("SCOREBENCH_RUN_TOKEN") or os.environ.get(
-        "HARNESS_RUN_TOKEN", ""
+        "HARNESS_RUN_TOKEN"
+    ) or str(
+        paired.get("run_token") or ""
     )
     response = upload_trace(
         artifact=artifact,
