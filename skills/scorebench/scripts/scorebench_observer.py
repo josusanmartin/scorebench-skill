@@ -205,6 +205,11 @@ def recent_jsonl(root: Path) -> list[Path]:
 
 
 def discover_source(provider: str, cwd: Path) -> tuple[str, Path]:
+    if provider == "auto" and os.environ.get("GROK_SESSION_JSONL"):
+        raise ObserverError(
+            "Grok timing observation is not supported; refusing to auto-discover "
+            "a Codex or Claude transcript from this workspace"
+        )
     candidates: list[tuple[str, Path]] = []
     pinned: list[tuple[str, Path]] = []
     if provider in {"auto", "codex"}:

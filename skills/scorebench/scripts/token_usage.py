@@ -492,6 +492,13 @@ def grok_jsonl_snapshot(
         )
     session_id = next(iter(session_ids))
     log_path = unified_log_path or grok_unified_log_path(path)
+    # Grok goal workflows can spawn planner/verifier sessions. Their provider
+    # calls are billed to the run but use child session IDs. The unified log
+    # records each child ID at spawn time under the same process as the bound
+    # parent, which lets us include the exact session family without sweeping
+    # in unrelated Grok processes that share this log.
+    run_process_ids: set[int] = set()
+    included_session_ids = {session_id}
     identified: dict[tuple[Any, ...], UsageSnapshot] = {}
     with log_path.open("r", encoding="utf-8") as handle:
         for line in handle:
@@ -504,9 +511,23 @@ def grok_jsonl_snapshot(
                 continue
             if not isinstance(event, dict):
                 continue
+            event_session_id = event.get("sid")
+            process_id = event.get("pid")
+            if event_session_id == session_id and isinstance(process_id, int):
+                run_process_ids.add(process_id)
+            if (
+                event.get("msg") == "subagent spawn credentials"
+                and isinstance(process_id, int)
+                and process_id in run_process_ids
+            ):
+                ctx = event.get("ctx")
+                child_id = ctx.get("subagent_id") if isinstance(ctx, dict) else None
+                if isinstance(child_id, str) and child_id.strip():
+                    included_session_ids.add(child_id.strip())
+                continue
             if event.get("msg") != "shell.turn.inference_done":
                 continue
-            if event.get("sid") != session_id:
+            if event_session_id not in included_session_ids:
                 continue
             ctx = event.get("ctx")
             if not isinstance(ctx, dict):
@@ -519,7 +540,11 @@ def grok_jsonl_snapshot(
                 raise SystemExit(
                     f"Grok inference usage is missing a timestamp in {log_path}"
                 )
-            stable_id = (timestamp.strip(), ctx.get("loop_index"))
+            stable_id = (
+                str(event_session_id),
+                timestamp.strip(),
+                ctx.get("loop_index"),
+            )
             previous = identified.get(stable_id)
             if previous is not None and previous != snapshot:
                 raise SystemExit(

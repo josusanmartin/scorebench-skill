@@ -118,7 +118,8 @@ dashboard HTML or treat `scorebench best` as the latest timing point.
 
 ## Register Passive Timing
 
-Read [passive timing observer](timing-observer.md), then register once:
+For Codex and Claude Code, read [passive timing observer](timing-observer.md),
+then register once:
 
 ```bash
 SCOREBENCH_SKILL_DIR="${CODEX_HOME:-$HOME/.codex}/skills/scorebench"
@@ -133,10 +134,14 @@ It uploads timestamps and categorical metadata only. If registration is not
 supported, preserve the exact error and continue because v2 is not yet
 authoritative; do not delay the protective baseline with repeated setup work.
 
+Do not register the passive observer for Grok Build. Grok timing-v2 parsing is
+not supported yet, and auto-discovery deliberately refuses to bind a nearby
+Codex or Claude transcript. Continue with trusted v1 worker activity pings.
+
 ## Capture The Trace Boundary
 
-Immediately after the trusted start or resume ping, read [end-of-run
-traces](run-traces.md) and record the current session boundary:
+For Codex and Claude Code, immediately after the trusted start or resume ping,
+read [end-of-run traces](run-traces.md) and record the current session boundary:
 
 ```bash
 SCOREBENCH_SKILL_DIR="${CODEX_HOME:-$HOME/.codex}/skills/scorebench"
@@ -151,6 +156,10 @@ byte offset. It does not parse, tail, compress, or upload the transcript. If
 automatic discovery fails, preserve the exact error and use the explicit
 `--provider` and `--source` form documented in the trace reference when the
 runner exposes its current JSONL.
+
+Do not run the trace helper for Grok Build. Grok trace normalization is not
+supported yet, and the helper refuses to substitute a coordinator's Codex or
+Claude transcript.
 
 ## Initialize Exact Token Accounting
 
@@ -323,8 +332,9 @@ Before exit:
 python3 "$SCOREBENCH_OBSERVER" unregister --cwd "$PWD"
 ```
 
-8. Resolve the helper path again, then sanitize, compress, and upload the frozen
-   session segment:
+8. For Codex and Claude Code, resolve the helper path again, then sanitize,
+   compress, and upload the frozen session segment. Skip this step for Grok
+   Build:
 
 ```bash
 SCOREBENCH_TRACE_HELPER="${CODEX_HOME:-$HOME/.codex}/skills/scorebench/scripts/run_trace.py"

@@ -37,6 +37,10 @@ Normally source discovery is automatic:
 - Claude uses a session environment identifier when available, then matches
   project JSONL records to the current workspace.
 
+Grok Build trace normalization is not supported yet. Do not run this helper for
+Grok workers. When `GROK_SESSION_JSONL` is present, automatic discovery fails
+closed instead of selecting an unrelated Codex or Claude transcript.
+
 For a runner-managed JSONL, pin it explicitly:
 
 ```bash

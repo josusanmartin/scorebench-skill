@@ -141,6 +141,12 @@ from `~/.grok/logs/unified.jsonl`. It converts inclusive prompt input to
 disjoint fresh input and cache-read counters and fails on multiple session IDs,
 incomplete counters, or conflicting duplicate records. Working tokens are
 fresh input plus output; cached reads remain available for exact cost pricing.
+Goal workflows may create planner or verifier subagent sessions. The helper
+includes those sessions only when the unified log records them as children of
+the bound Grok process. It excludes unrelated sessions, including concurrent
+Grok processes sharing the same log. Do not replace this with Grok's main
+session total; that undercounts goal workflows.
+
 The unified log is discovered from the normal Grok directory layout; use
 `--grok-log /absolute/path/to/unified.jsonl` only when a supervised launcher
 stores it elsewhere.

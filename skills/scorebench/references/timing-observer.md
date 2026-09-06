@@ -63,6 +63,10 @@ Use `--provider claude` for Claude Code. `--provider generic` accepts normalized
 events with timestamp, kind, operation ID, and operation kind. Do not build a
 pane-text adapter and do not upload transcript content.
 
+Grok Build is not supported by this observer yet. Do not register it with
+`--provider auto`: when `GROK_SESSION_JSONL` is present, auto-discovery fails
+closed instead of selecting an unrelated Codex or Claude transcript.
+
 One quick registration attempt is enough. Because v2 is shadow-only, preserve
 the exact error and continue with the existing v1 timing workflow if an older
 server, old handoff, or unsupported coding harness lacks observer support.

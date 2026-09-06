@@ -525,6 +525,74 @@ class TokenUsageTests(unittest.TestCase):
         self.assertNotEqual(result.returncode, 0)
         self.assertIn("conflicting Grok inference records", result.stderr)
 
+    def test_grok_jsonl_includes_spawned_sessions_from_bound_process_only(self):
+        updates = self.root / "grok-goal-updates.jsonl"
+        unified = self.root / "grok-goal-unified.jsonl"
+        updates.write_text(
+            json.dumps({"params": {"sessionId": "main-session"}}) + "\n",
+            encoding="utf-8",
+        )
+
+        def inference(session_id, process_id, timestamp, fresh, cached, output):
+            return {
+                "ts": timestamp,
+                "msg": "shell.turn.inference_done",
+                "sid": session_id,
+                "pid": process_id,
+                "ctx": {
+                    "prompt_tokens": fresh + cached,
+                    "cached_prompt_tokens": cached,
+                    "completion_tokens": output,
+                    "reasoning_tokens": 0,
+                    "loop_index": 1,
+                },
+            }
+
+        events = [
+            {
+                "ts": "2026-09-06T00:00:00Z",
+                "msg": "session created",
+                "sid": "main-session",
+                "pid": 101,
+                "ctx": {"cwd": "/work"},
+            },
+            inference("main-session", 101, "2026-09-06T00:00:01Z", 10, 100, 2),
+            {
+                "ts": "2026-09-06T00:00:02Z",
+                "msg": "subagent spawn credentials",
+                "pid": 101,
+                "ctx": {"subagent_id": "planner-session", "subagent_type": "planner"},
+            },
+            inference("planner-session", 101, "2026-09-06T00:00:03Z", 20, 200, 3),
+            {
+                "ts": "2026-09-06T00:00:04Z",
+                "msg": "subagent spawn credentials",
+                "pid": 202,
+                "ctx": {"subagent_id": "unrelated-child", "subagent_type": "planner"},
+            },
+            inference("unrelated-main", 202, "2026-09-06T00:00:05Z", 1000, 0, 100),
+            inference("unrelated-child", 202, "2026-09-06T00:00:06Z", 1000, 0, 100),
+        ]
+        unified.write_text(
+            "".join(json.dumps(event) + "\n" for event in events),
+            encoding="utf-8",
+        )
+
+        started = json.loads(
+            self.run_helper(
+                "start",
+                "--grok-jsonl",
+                str(updates),
+                "--grok-log",
+                str(unified),
+            ).stdout
+        )
+
+        self.assertEqual(started["baseline_total_tokens"], 35)
+        self.assertEqual(started["baseline_usage"]["input_tokens"], 30)
+        self.assertEqual(started["baseline_usage"]["output_tokens"], 5)
+        self.assertEqual(started["baseline_usage"]["cache_read_tokens"], 300)
+
     def test_grok_jsonl_rejects_multiple_sessions_and_schema_drift(self):
         multiple = self.root / "grok-multiple.jsonl"
         multiple.write_text(

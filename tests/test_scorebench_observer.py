@@ -207,6 +207,17 @@ class StorageAndUploadTests(unittest.TestCase):
         self.assertEqual(provider, "codex")
         self.assertEqual(source, expected)
 
+    def test_auto_discovery_refuses_cross_provider_source_for_grok(self):
+        with mock.patch.dict(
+            os.environ,
+            {"GROK_SESSION_JSONL": str(self.root / "grok" / "updates.jsonl")},
+            clear=False,
+        ):
+            with self.assertRaisesRegex(
+                OBSERVER.ObserverError, "Grok timing observation is not supported"
+            ):
+                OBSERVER.discover_source("auto", self.root)
+
     def test_oversized_record_is_discarded_as_one_line_and_clears_open_lease(self):
         source = self.root / "oversized.jsonl"
         events = [

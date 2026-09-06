@@ -69,14 +69,18 @@ Apply these hard gates to every worker:
    `--prompt-file`.
 4. Send a successful `scorebench run ping --event start` for a new worker
    session or `--event resume` for a resumed session before optimization and
-   before the first submission. Then register the bundled passive timing observer
-   once; it runs outside the model loop and consumes no model tokens. Timing v2
-   is shadow-only, so keep the existing v1 activity pings until migration. Use
-   the host-side watcher for long autonomous runs instead of asking the model to
-   self-report on a timer; never emit activity while idle or complete.
-5. Immediately after that trusted ping, record the trace source and byte
-   offset. Do all sanitization, compression, and upload after final usage and
-   the finish ping; never include private reasoning or secrets.
+   before the first submission. For Codex and Claude Code, register the bundled
+   passive timing observer once; it runs outside the model loop and consumes no
+   model tokens. Grok Build is not supported by timing v2 yet: do not register
+   the observer for Grok, and retain accurate v1 activity pings instead. Timing
+   v2 is shadow-only, so keep the existing v1 activity pings until migration.
+   Use the host-side watcher for long autonomous runs instead of asking the
+   model to self-report on a timer; never emit activity while idle or complete.
+5. For Codex and Claude Code, record the trace source and byte offset
+   immediately after that trusted ping. Do all sanitization, compression, and upload
+   after final usage and the finish ping; never include private reasoning or
+   secrets. Grok trace normalization is not supported yet: do not run the trace
+   helper for Grok.
 6. Every submission requires an exact, run-relative token total. Establish one
    run-scoped source and use the token helper so provider JSONL is deduplicated
    and normalized. Working tokens exclude cached-input reads; the separate
@@ -126,7 +130,7 @@ the original.
 Follow the detailed worker, accounting, and trace references:
 
 ```text
-context -> exercise -> current/start -> ping -> passive observer -> trace boundary -> token baseline
+context -> exercise -> current/start -> ping -> supported observer/trace setup -> token baseline
 -> correct baseline -> submit -> refresh -> iterate -> final usage -> finish ping
 -> sanitized trace upload
 ```
@@ -136,8 +140,8 @@ In a container with `SCOREBENCH_ACCOUNTING_SUPERVISED=1`, wait for
 Never replace `$SCOREBENCH_TOKEN_STATE`; the supervisor performs final usage
 reconciliation and rejects a changed baseline.
 
-Trace capture is best-effort observability. A trace failure never changes a
-candidate score, validity, status, or run completion; preserve the local
+Trace capture for supported harnesses is best-effort observability. A trace failure never changes
+a candidate score, validity, status, or run completion; preserve the local
 artifact and exact error for a later retry.
 
 Do not spend a full high-effort or max-effort turn designing an ideal solution

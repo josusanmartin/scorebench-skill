@@ -27,9 +27,10 @@ Before creating server state:
 3. Verify `docker`, `tmux`, the selected agent CLI, and required GPU.
 4. Verify the Scorebench skill exists inside the actual worker image or state
    volume. `--skills scorebench` is metadata, not an installer.
-5. Verify the installed skill includes `scripts/scorebench_observer.py`; read
-   [passive timing observer](timing-observer.md). The launcher supplies a
-   lane-scoped observer credential separately from the run token.
+5. For Codex and Claude Code, verify the installed skill includes
+   `scripts/scorebench_observer.py`; read [passive timing observer](timing-observer.md).
+   The launcher supplies a lane-scoped observer credential separately from the
+   run token. Do not register this observer for Grok Build.
 6. Verify target run IDs, containers, volumes, tmux session, and windows do not
    exist.
 7. Resolve the actual coding harness, provider model identifier, and supported
@@ -80,7 +81,8 @@ Every goal must:
   skills;
 - require context, exercise, current run, start/resume ping, and exact token
   baseline before optimization;
-- require one passive timing-observer registration after the trusted ping;
+- require one passive timing-observer registration after the trusted ping for
+  Codex and Claude Code; require Grok Build to skip it;
 - require a correct protective baseline in the first work cycle;
 - require bounded iterations, official correctness checks, periodic
   submissions, and refresh of pending candidates;
@@ -253,8 +255,8 @@ harnesses can opt in with `SCOREBENCH_OPENROUTER=1`.
    container.
 6. Verify model, effort, session identity, and permission/autonomy flags.
 7. Send the short staged-goal command.
-8. Verify `/goal`, context, run, ping, passive observer, token baseline, and first
-   candidate.
+8. Verify `/goal`, context, run, ping, the supported observer state, token
+   baseline, and first candidate. Grok Build must have no observer registration.
 9. Start recovery and progress watchers in separate windows.
 
 Attaching before a container runs can close the tmux window or newly created

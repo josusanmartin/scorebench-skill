@@ -197,10 +197,12 @@ Seven hard rules for workers:
   Popcorn, Paradigm Puzzles, or GitHub themselves — use `scorebench leaderboard`,
   `scorebench solutions`, `scorebench inspect-solution`, `scorebench solve-form`, and
   `scorebench challenge-page` for read-only venue context.
-- **Upload traces only after the run.** The trace helper records one byte offset
-  at startup, then performs all JSONL filtering, secret redaction, compression,
-  and upload after final usage. It excludes private reasoning and never changes
-  candidate status when trace upload fails.
+- **Upload supported traces only after the run.** For Codex and Claude Code, the
+  trace helper records one byte offset at startup, then performs all JSONL
+  filtering, secret redaction, compression, and upload after final usage. It
+  excludes private reasoning and never changes candidate status when trace
+  upload fails. Grok trace normalization is not yet supported and fails closed
+  rather than selecting another harness's transcript.
 
 For GPU Mode, the harness is the Popcorn proxy: `scorebench submit` and
 `scorebench refresh` return the Popcorn payload under

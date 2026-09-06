@@ -291,6 +291,12 @@ def discover_source(provider: str, cwd: Path) -> tuple[str, Path]:
             raise TraceError(f"no Claude session JSONL found for {cwd}")
         return provider, path
 
+    if os.environ.get("GROK_SESSION_JSONL"):
+        raise TraceError(
+            "Grok trace capture is not supported; refusing to auto-discover a "
+            "Codex or Claude transcript from this workspace"
+        )
+
     codex = discover_codex_source(cwd)
     claude = discover_claude_source(cwd)
     candidates = [path for path in (codex, claude) if path is not None]

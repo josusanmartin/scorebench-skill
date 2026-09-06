@@ -18,7 +18,9 @@ compatible_cli() {
   local cli="$1"
   "$cli" admin create-run-token --help 2>&1 |
     grep -q -- "--prompt-file" &&
-    "$cli" run progress --help >/dev/null 2>&1
+    "$cli" admin prepare-experiment --help >/dev/null 2>&1 &&
+    "$cli" run progress --help >/dev/null 2>&1 &&
+    "$cli" run gate --help >/dev/null 2>&1
 }
 
 FORCE="${SCOREBENCH_CLI_FORCE:-0}"
@@ -34,7 +36,7 @@ if [[ "$FORCE" != "1" ]]; then
       log "compatible Scorebench CLI already available: $existing_cli"
       exit 0
     fi
-    log "existing Scorebench CLI lacks prompt/progress support; upgrading: $existing_cli"
+    log "existing Scorebench CLI lacks current experiment lifecycle support; upgrading: $existing_cli"
   fi
 fi
 

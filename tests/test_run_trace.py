@@ -288,6 +288,28 @@ class RunTraceTests(unittest.TestCase):
         self.assertEqual(upload.call_args.kwargs["base_url"], "https://staging.scorebench.dev/")
         self.assertEqual(upload.call_args.kwargs["token"], "hrun_scoped_container_token")
 
+    def test_auto_discovery_refuses_cross_provider_trace_for_grok(self):
+        claude_source = self.root / "claude.jsonl"
+        append_jsonl(
+            claude_source,
+            {
+                "timestamp": "2026-09-06T00:00:00Z",
+                "type": "assistant",
+                "sessionId": "coordinator-session",
+                "cwd": str(self.root),
+                "message": {"content": []},
+            },
+        )
+        with mock.patch.dict(
+            TRACE.os.environ,
+            {"GROK_SESSION_JSONL": str(self.root / "grok" / "updates.jsonl")},
+            clear=False,
+        ), mock.patch.object(TRACE, "discover_claude_source", return_value=claude_source):
+            with self.assertRaisesRegex(
+                TRACE.TraceError, "Grok trace capture is not supported"
+            ):
+                TRACE.discover_source("auto", self.root)
+
     def test_repeated_start_preserves_the_original_boundary(self):
         source = self.root / "codex-retry.jsonl"
         append_jsonl(

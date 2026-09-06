@@ -90,6 +90,8 @@ class SkillContractTests(unittest.TestCase):
         )
         self.assertLess(text.index('INSTALL_URL="${'), text.index('local_repo="${'))
         self.assertIn("SCOREBENCH_CLI_FORCE", text)
+        self.assertIn("admin prepare-experiment --help", text)
+        self.assertIn("run gate --help", text)
         self.assertIn("SCOREBENCH_CLI_CHECKOUT", text)
         self.assertIn("--prompt-file", text)
         self.assertIn("run progress --help", text)
