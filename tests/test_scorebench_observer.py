@@ -218,6 +218,30 @@ class StorageAndUploadTests(unittest.TestCase):
             ):
                 OBSERVER.discover_source("auto", self.root)
 
+    def test_auto_registration_refuses_grok_before_ancestor_provider_override(self):
+        args = mock.Mock(
+            cwd=str(self.root),
+            provider="auto",
+            url="",
+            token="",
+            source="",
+            no_start=True,
+            from_start=False,
+        )
+        with mock.patch.dict(
+            os.environ,
+            {"GROK_SESSION_JSONL": str(self.root / "grok" / "updates.jsonl")},
+            clear=False,
+        ), mock.patch.object(
+            OBSERVER,
+            "ancestor_agent_details",
+            return_value=("codex", 123, "456"),
+        ):
+            with self.assertRaisesRegex(
+                OBSERVER.ObserverError, "Grok timing observation is not supported"
+            ):
+                OBSERVER.register(args)
+
     def test_oversized_record_is_discarded_as_one_line_and_clears_open_lease(self):
         source = self.root / "oversized.jsonl"
         events = [

@@ -894,6 +894,11 @@ def ensure_daemon() -> int:
 
 def register(args: argparse.Namespace) -> dict[str, Any]:
     cwd = Path(args.cwd or Path.cwd()).expanduser().resolve()
+    if args.provider == "auto" and os.environ.get("GROK_SESSION_JSONL"):
+        raise ObserverError(
+            "Grok timing observation is not supported; refusing to auto-discover "
+            "a Codex or Claude transcript from this workspace"
+        )
     scorebench_url, token = credentials(cwd, args.url or "", args.token or "")
     ancestor_provider, ancestor_pid, ancestor_ticks = ancestor_agent_details()
     requested_provider = args.provider
