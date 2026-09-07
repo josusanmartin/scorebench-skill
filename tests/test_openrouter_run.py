@@ -3,9 +3,11 @@ import subprocess
 import sys
 import tempfile
 import threading
+import time
 import unittest
 from http.server import BaseHTTPRequestHandler, ThreadingHTTPServer
 from pathlib import Path
+from unittest import mock
 
 
 SCRIPTS = Path(__file__).resolve().parents[1] / "skills" / "scorebench" / "scripts"
@@ -35,6 +37,153 @@ class FakeOpenRouter(BaseHTTPRequestHandler):
 
 
 class OpenRouterRunTests(unittest.TestCase):
+    def test_runtime_control_recognizes_only_authoritative_stop_signals(self):
+        with tempfile.TemporaryDirectory() as root:
+            workspace = Path(root)
+            with mock.patch.object(
+                runner.subprocess,
+                "run",
+                return_value=subprocess.CompletedProcess(
+                    ["scorebench", "run", "progress"],
+                    0,
+                    '{"progress":{"budget":{"reached":true}}}\n',
+                    "",
+                ),
+            ):
+                self.assertEqual(
+                    runner._runtime_control_reason(workspace=workspace, env={}),
+                    "budget_reached",
+                )
+            with mock.patch.object(
+                runner.subprocess,
+                "run",
+                return_value=subprocess.CompletedProcess(
+                    ["scorebench", "run", "progress"],
+                    1,
+                    "",
+                    "scorebench: error: HTTP 401: invalid bearer token",
+                ),
+            ):
+                self.assertEqual(
+                    runner._runtime_control_reason(workspace=workspace, env={}),
+                    "credential_revoked",
+                )
+            with mock.patch.object(
+                runner.subprocess,
+                "run",
+                return_value=subprocess.CompletedProcess(
+                    ["scorebench", "run", "progress"],
+                    1,
+                    "",
+                    "scorebench: error: HTTP 503: temporarily unavailable",
+                ),
+            ):
+                self.assertIsNone(
+                    runner._runtime_control_reason(workspace=workspace, env={})
+                )
+
+    def test_runtime_control_terminates_the_harness_process_group(self):
+        with tempfile.TemporaryDirectory() as root:
+            workspace = Path(root)
+            with mock.patch.object(
+                runner,
+                "_runtime_control_reason",
+                return_value="credential_revoked",
+            ):
+                returncode = runner._run_supervised(
+                    [sys.executable, "-c", "import time; time.sleep(60)"],
+                    workspace=workspace,
+                    env=os.environ,
+                )
+            self.assertEqual(returncode, -runner.signal.SIGTERM)
+            self.assertEqual(
+                (workspace / ".scorebench" / "runtime-control.json").read_text(
+                    encoding="utf-8"
+                ),
+                '{"reason": "credential_revoked"}\n',
+            )
+
+    def test_runtime_control_end_to_end_ignores_transient_then_stops_revoked_run(self):
+        with tempfile.TemporaryDirectory() as root:
+            workspace = Path(root)
+            fake_bin = workspace / "bin"
+            fake_bin.mkdir()
+            checks = workspace / "checks"
+            scorebench = fake_bin / "scorebench"
+            scorebench.write_text(
+                "#!/bin/sh\n"
+                f"checks={checks!s}\n"
+                "count=$(cat \"$checks\" 2>/dev/null || printf 0)\n"
+                "count=$((count + 1))\n"
+                "printf '%s\\n' \"$count\" > \"$checks\"\n"
+                "if [ \"$count\" -eq 1 ]; then\n"
+                "  echo 'scorebench: error: HTTP 503' >&2\n"
+                "  exit 1\n"
+                "fi\n"
+                "if [ \"$count\" -eq 2 ]; then\n"
+                "  echo '{\"progress\":{\"budget\":{\"reached\":false}}}'\n"
+                "  exit 0\n"
+                "fi\n"
+                "echo 'scorebench: error: HTTP 401: invalid bearer token' >&2\n"
+                "exit 1\n",
+                encoding="utf-8",
+            )
+            scorebench.chmod(0o755)
+            started = workspace / "harness-started"
+            descendant_pid = workspace / "descendant-pid"
+            env = {
+                **os.environ,
+                "PATH": f"{fake_bin}:{os.environ.get('PATH', '')}",
+                "SCOREBENCH_RUNTIME_CONTROL_POLL_SECONDS": "0.05",
+            }
+            completed = subprocess.run(
+                [
+                    sys.executable,
+                    str(SCRIPTS / "openrouter_run.py"),
+                    "--harness",
+                    "Grok Build",
+                    "--workspace",
+                    str(workspace),
+                    "--runtime-control",
+                    "--",
+                    sys.executable,
+                    "-c",
+                    (
+                        "from pathlib import Path; import subprocess, sys, time; "
+                        "child = subprocess.Popen([sys.executable, '-c', "
+                        "'import time; time.sleep(60)']); "
+                        f"Path({str(descendant_pid)!r}).write_text(str(child.pid)); "
+                        f"Path({str(started)!r}).write_text('yes'); "
+                        "time.sleep(60)"
+                    ),
+                ],
+                text=True,
+                capture_output=True,
+                check=False,
+                timeout=5,
+                env=env,
+            )
+            self.assertTrue(started.is_file())
+            child_pid = int(descendant_pid.read_text(encoding="utf-8"))
+            self.assertEqual(checks.read_text(encoding="utf-8").strip(), "3")
+            self.assertNotEqual(completed.returncode, 0)
+            self.assertIn("credential revoked", completed.stderr)
+            self.assertEqual(
+                (workspace / ".scorebench" / "runtime-control.json").read_text(
+                    encoding="utf-8"
+                ),
+                '{"reason": "credential_revoked"}\n',
+            )
+            deadline = time.monotonic() + 2
+            while True:
+                try:
+                    os.kill(child_pid, 0)
+                except ProcessLookupError:
+                    break
+                if time.monotonic() >= deadline:
+                    self.fail("revocation left a harness descendant running")
+                time.sleep(0.02)
+
     def test_key_alone_does_not_claim_openrouter_routing(self):
         enabled, protocol, reason = runner.detect_openrouter(
             "Codex", ["codex"], {"OPENROUTER_API_KEY": "secret"}, "auto"

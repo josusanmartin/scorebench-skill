@@ -9,12 +9,15 @@ token-state paths consumed by ``token_usage.py``.
 from __future__ import annotations
 
 import argparse
+import json
 import os
 from pathlib import Path
 import re
+import signal
 import subprocess
 import sys
 import threading
+import time
 from http.server import ThreadingHTTPServer
 from typing import Mapping, Sequence
 
@@ -31,6 +34,8 @@ ENDPOINT_ENV = (
     "GROK_BASE_URL",
     "OPENROUTER_BASE_URL",
 )
+RUNTIME_CONTROL_POLL_SECONDS = 30.0
+RUNTIME_CONTROL_REQUEST_TIMEOUT_SECONDS = 10.0
 
 
 def _relevant_endpoint_env(harness: str) -> tuple[str, ...]:
@@ -224,11 +229,138 @@ def _upstream_for(protocol: str, env: Mapping[str, str]) -> str:
     return upstream
 
 
+def _runtime_control_reason(
+    *, workspace: Path, env: Mapping[str, str]
+) -> str | None:
+    try:
+        completed = subprocess.run(
+            ["scorebench", "run", "progress"],
+            cwd=workspace,
+            env=dict(env),
+            text=True,
+            capture_output=True,
+            check=False,
+            timeout=RUNTIME_CONTROL_REQUEST_TIMEOUT_SECONDS,
+        )
+    except (OSError, subprocess.TimeoutExpired):
+        return None
+    if completed.returncode != 0:
+        response = f"{completed.stdout}\n{completed.stderr}".lower()
+        if "http 401" in response or "status 401" in response:
+            return "credential_revoked"
+        return None
+    try:
+        response = json.loads(completed.stdout)
+    except (TypeError, ValueError):
+        return None
+    progress = response.get("progress") if isinstance(response, dict) else None
+    budget = progress.get("budget") if isinstance(progress, dict) else None
+    if isinstance(budget, dict) and budget.get("reached") is True:
+        return "budget_reached"
+    return None
+
+
+def _write_runtime_control(workspace: Path, reason: str) -> None:
+    target = workspace / ".scorebench" / "runtime-control.json"
+    target.parent.mkdir(parents=True, exist_ok=True, mode=0o700)
+    temp = target.with_name(f".{target.name}.{os.getpid()}.tmp")
+    temp.write_text(json.dumps({"reason": reason}) + "\n", encoding="utf-8")
+    temp.chmod(0o600)
+    os.replace(temp, target)
+
+
+def _terminate_process_group(
+    process: subprocess.Popen[bytes], *, grace_seconds: float = 10.0
+) -> None:
+    if process.poll() is not None:
+        return
+    try:
+        os.killpg(process.pid, signal.SIGTERM)
+    except ProcessLookupError:
+        return
+    deadline = time.monotonic() + grace_seconds
+    while process.poll() is None and time.monotonic() < deadline:
+        time.sleep(0.1)
+    if process.poll() is None:
+        try:
+            os.killpg(process.pid, signal.SIGKILL)
+        except ProcessLookupError:
+            pass
+
+
+def _run_supervised(
+    command: Sequence[str], *, workspace: Path, env: Mapping[str, str]
+) -> int:
+    process = subprocess.Popen(
+        list(command),
+        cwd=workspace,
+        env=dict(env),
+        start_new_session=True,
+    )
+    stop_event = threading.Event()
+    try:
+        poll_seconds = max(
+            0.05,
+            float(
+                env.get(
+                    "SCOREBENCH_RUNTIME_CONTROL_POLL_SECONDS",
+                    RUNTIME_CONTROL_POLL_SECONDS,
+                )
+            ),
+        )
+    except (TypeError, ValueError):
+        poll_seconds = RUNTIME_CONTROL_POLL_SECONDS
+
+    def monitor() -> None:
+        while process.poll() is None and not stop_event.is_set():
+            reason = _runtime_control_reason(workspace=workspace, env=env)
+            if reason:
+                _write_runtime_control(workspace, reason)
+                print(
+                    f"ScoreBench stopped this worker: {reason.replace('_', ' ')}",
+                    file=sys.stderr,
+                )
+                _terminate_process_group(process)
+                return
+            stop_event.wait(poll_seconds)
+
+    monitor_thread = threading.Thread(
+        target=monitor,
+        name="scorebench-runtime-control",
+        daemon=True,
+    )
+    monitor_thread.start()
+    try:
+        return process.wait()
+    except KeyboardInterrupt:
+        _terminate_process_group(process)
+        raise
+    finally:
+        stop_event.set()
+        monitor_thread.join(timeout=RUNTIME_CONTROL_REQUEST_TIMEOUT_SECONDS + 2)
+
+
+def _run_child(
+    command: Sequence[str], *, workspace: Path, env: Mapping[str, str]
+) -> int:
+    runtime_control = env.get("SCOREBENCH_RUNTIME_CONTROL", "").strip().lower()
+    if runtime_control in TRUTHY:
+        return _run_supervised(command, workspace=workspace, env=env)
+    return subprocess.run(
+        list(command), env=dict(env), cwd=workspace, check=False
+    ).returncode
+
+
 def main(argv: Sequence[str] | None = None) -> int:
     parser = argparse.ArgumentParser(description="Launch a coding harness with automatic OpenRouter accounting")
     parser.add_argument("--harness", required=True, help="coding harness name, for example Codex or Claude Code")
     parser.add_argument("--workspace", default=os.getcwd(), help="isolated worker workspace")
     parser.add_argument("--mode", default=os.environ.get("SCOREBENCH_OPENROUTER", "auto"), help="auto, on, or off")
+    parser.add_argument(
+        "--runtime-control",
+        action="store_true",
+        help="stop the harness when its scoped credential is revoked or budget is reached",
+    )
     parser.add_argument("command", nargs=argparse.REMAINDER, help="coding harness command after --")
     args = parser.parse_args(argv)
     command = list(args.command)
@@ -238,10 +370,13 @@ def main(argv: Sequence[str] | None = None) -> int:
         parser.error("provide the coding harness command after --")
 
     env = dict(os.environ)
+    if args.runtime_control:
+        env["SCOREBENCH_RUNTIME_CONTROL"] = "1"
+    workspace = Path(args.workspace).expanduser().resolve()
     enabled, protocol, reason = detect_openrouter(args.harness, command, env, args.mode)
     if not enabled:
         print(f"ScoreBench OpenRouter accounting inactive: {reason}", file=sys.stderr)
-        return subprocess.run(command, env=env, cwd=args.workspace, check=False).returncode
+        return _run_child(command, env=env, workspace=workspace)
 
     api_key = env.get("OPENROUTER_API_KEY", "").strip()
     if not api_key:
@@ -250,7 +385,6 @@ def main(argv: Sequence[str] | None = None) -> int:
             "refusing to launch without authoritative cost accounting"
         )
 
-    workspace = Path(args.workspace).expanduser().resolve()
     accounting_dir = workspace / ".scorebench" / "openrouter"
     accounting_dir.mkdir(parents=True, exist_ok=True, mode=0o700)
     try:
@@ -282,7 +416,7 @@ def main(argv: Sequence[str] | None = None) -> int:
         file=sys.stderr,
     )
     try:
-        return subprocess.run(routed_command, env=env, cwd=workspace, check=False).returncode
+        return _run_child(routed_command, env=env, workspace=workspace)
     finally:
         server.shutdown()
         server.server_close()
