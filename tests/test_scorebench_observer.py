@@ -1,6 +1,8 @@
 import importlib.util
 import json
 import os
+import subprocess
+import sys
 import tempfile
 import unittest
 from pathlib import Path
@@ -146,6 +148,57 @@ class TransitionTests(unittest.TestCase):
 
 
 class StorageAndUploadTests(unittest.TestCase):
+    def test_supervised_reentry_gets_new_cursor_and_process_binding(self):
+        source = self.root / "resume.jsonl"
+        source.write_text('{}\n')
+        children = []
+        try:
+            records = []
+            for _ in range(2):
+                child = subprocess.Popen([sys.executable, "-c", "import time; time.sleep(60)"], cwd=self.root)
+                children.append(child)
+                args = OBSERVER.parser().parse_args([
+                    "register", "--provider", "claude", "--source", str(source), "--cwd", str(self.root),
+                    "--agent-pid", str(child.pid), "--source-offset", "3", "--no-start"])
+                with mock.patch.object(OBSERVER, "credentials", return_value=("https://test.invalid", "test-token")):
+                    registered = OBSERVER.register(args)
+                path = OBSERVER.registrations_dir() / (registered["registration_id"] + ".json")
+                state = OBSERVER.load_json(path)
+                self.assertEqual(state["agent_pid"], child.pid)
+                self.assertEqual(state["source_offset"], 3)
+                self.assertTrue(state["enabled"])
+                records.append(path)
+                child.terminate()
+                child.wait(timeout=5)
+            self.assertNotEqual(*records)
+            before = records[1].read_bytes()
+            OBSERVER.process_registration(records[0])
+            self.assertEqual(records[1].read_bytes(), before)
+        finally:
+            for child in children:
+                if child.poll() is None:
+                    child.terminate()
+                child.wait(timeout=5)
+
+    def test_supervised_registration_rejects_bad_process_or_cursor(self):
+        source = self.root / "resume.jsonl"
+        source.write_text('{}\n')
+        child = subprocess.Popen([sys.executable, "-c", "import time; time.sleep(60)"], cwd=self.root)
+        try:
+            for pid, offset, cwd in [(0, 3, self.root), (child.pid, -1, self.root),
+                                      (child.pid, 4, self.root), (child.pid, 1, self.root),
+                                      (child.pid, 3, self.root.parent)]:
+                with self.subTest(pid=pid, offset=offset, cwd=cwd):
+                    args = OBSERVER.parser().parse_args([
+                        "register", "--provider", "claude", "--source", str(source), "--cwd", str(cwd),
+                        "--agent-pid", str(pid), "--source-offset", str(offset), "--no-start"])
+                    with mock.patch.object(OBSERVER, "credentials", return_value=("https://test.invalid", "test-token")):
+                        with self.assertRaises(OBSERVER.ObserverError):
+                            OBSERVER.register(args)
+        finally:
+            child.terminate()
+            child.wait(timeout=5)
+
     def setUp(self):
         self.tempdir = tempfile.TemporaryDirectory()
         self.root = Path(self.tempdir.name)

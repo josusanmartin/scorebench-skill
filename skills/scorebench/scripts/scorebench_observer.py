@@ -913,8 +913,32 @@ def register(args: argparse.Namespace) -> dict[str, Any]:
     if provider not in {"codex", "claude", "generic"}:
         raise ObserverError("provider must be codex, claude, or generic")
     stat = source.stat()
+    supervised_pid = getattr(args, "agent_pid", None)
+    source_offset = getattr(args, "source_offset", None)
+    process_suffix = ""
+    supervised_identity = None
+    if supervised_pid is not None:
+        try:
+            proc = Path("/proc") / str(supervised_pid)
+            if supervised_pid <= 0 or proc.stat().st_uid != os.getuid() or (proc / "cwd").resolve(strict=True) != cwd:
+                raise ObserverError("supervised agent must be a live process owned by this user in this workspace")
+            supervised_identity = process_identity(supervised_pid)
+        except OSError as exc:
+            raise ObserverError("cannot verify supervised agent process") from exc
+        if not all(supervised_identity):
+            raise ObserverError("cannot verify supervised agent process identity")
+        # Each invocation gets its own cursor so the old process cannot disable it.
+        process_suffix = f"\0process:{supervised_identity[0]}:{supervised_identity[1]}"
+    if source_offset is not None:
+        if supervised_pid is None or args.from_start or not 0 <= source_offset <= stat.st_size:
+            raise ObserverError("source offset requires a supervised process and a valid byte boundary")
+        if source_offset:
+            with source.open("rb") as handle:
+                handle.seek(source_offset - 1)
+                if handle.read(1) != b"\n":
+                    raise ObserverError("source offset must follow a complete JSONL line")
     identity = hashlib.sha256(
-        f"{scorebench_url}\0{hashlib.sha256(token.encode()).hexdigest()}\0{source}".encode(
+        f"{scorebench_url}\0{hashlib.sha256(token.encode()).hexdigest()}\0{source}{process_suffix}".encode(
             "utf-8"
         )
     ).hexdigest()[:24]
@@ -925,6 +949,8 @@ def register(args: argparse.Namespace) -> dict[str, Any]:
         agent_pid, agent_ticks = ancestor_pid, ancestor_ticks
     if not agent_pid:
         agent_pid, agent_ticks = source_writer_process(source)
+    if supervised_identity is not None:
+        agent_pid, agent_ticks = supervised_identity
     if path.exists():
         state = load_json(path)
         if state.get("source_device") != stat.st_dev or state.get("source_inode") != stat.st_ino:
@@ -958,7 +984,7 @@ def register(args: argparse.Namespace) -> dict[str, Any]:
         "source_path": str(source),
         "source_device": stat.st_dev,
         "source_inode": stat.st_ino,
-        "source_offset": 0 if args.from_start else stat.st_size,
+        "source_offset": source_offset if source_offset is not None else 0 if args.from_start else stat.st_size,
         "scorebench_url": scorebench_url,
         "token": token,
         "agent_pid": agent_pid,
@@ -1094,6 +1120,8 @@ def parser() -> argparse.ArgumentParser:
     register_parser.add_argument("--token")
     register_parser.add_argument("--from-start", action="store_true")
     register_parser.add_argument("--no-start", action="store_true")
+    register_parser.add_argument("--agent-pid", type=int, help="supervisor-owned native process in this workspace")
+    register_parser.add_argument("--source-offset", type=int, help="resume observation at this exact JSONL byte boundary")
     daemon_parser = commands.add_parser("daemon", help="run the singleton host observer")
     daemon_parser.add_argument("--once", action="store_true")
     commands.add_parser("status", help="show observer health without secrets")
