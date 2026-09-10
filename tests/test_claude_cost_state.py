@@ -48,6 +48,14 @@ class ClaudeCostStateTests(unittest.TestCase):
         result = self.parse(message(model="fable-20260909"), ledger())
         self.assertEqual(result.total_tokens, 330)
 
+    def test_helper_and_main_usage_under_dated_and_undated_names(self):
+        event = ledger()
+        event["modelUsage"]["fable-20260909"] = event["modelUsage"].pop("haiku")
+        result = self.parse(message(model="fable-20260909"), event)
+        self.assertEqual(result.total_tokens, 330)
+        self.assertEqual(result.cache_read_tokens, 550)
+        self.assertAlmostEqual(result.cost_usd, .21)
+
     def test_multiple_results_in_one_invocation_are_cumulative(self):
         with tempfile.TemporaryDirectory() as directory:
             path = Path(directory) / "results.jsonl"

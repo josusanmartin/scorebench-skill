@@ -501,17 +501,15 @@ def claude_jsonl_snapshot(
             raise SystemExit("Claude terminal usage does not match the native transcript session")
         if snapshots or any(not message_models[key] for key in identified):
             raise SystemExit("cannot reconcile Claude cost-state with unidentified message usage")
-        # Native results can use a requested alias while messages name the
-        # resolved dated model. Match only unambiguous aliases, not substrings.
-        for identity, model in message_models.items():
-            if model in ledger:
-                continue
-            base = re.sub(r"-\d{8}$", "", model)
-            matches = [key for key in ledger if re.sub(r"-\d{8}$", "", key) == base]
-            if len(matches) > 1:
-                raise SystemExit("ambiguous Claude model alias in terminal usage")
-            if matches:
-                message_models[identity] = matches[0]
+        # Native helper calls and main calls may be separate ledger entries
+        # under dated and undated names of the same model. Both are real usage.
+        canonical: dict[str, list[UsageSnapshot]] = {}
+        for model, snapshot in ledger.items():
+            canonical.setdefault(re.sub(r"-\d{8}$", "", model), []).append(snapshot)
+        ledger = {model: aggregate_snapshots(values, path, "Claude model aliases")
+                  for model, values in canonical.items()}
+        message_models = {identity: re.sub(r"-\d{8}$", "", model)
+                          for identity, model in message_models.items()}
         # The ledger includes auxiliary models absent from assistant messages.
         # It is cumulative, so never add repeated checkpoints or messages twice.
         complete_cost = True
