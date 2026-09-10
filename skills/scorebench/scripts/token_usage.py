@@ -7,6 +7,7 @@ import json
 import itertools
 import math
 import os
+import re
 from pathlib import Path
 from typing import Any
 
@@ -352,19 +353,31 @@ def claude_usage_total(usage: dict[str, Any]) -> int | None:
 
 def claude_result_ledger(path: Path) -> dict[str, Any] | None:
     results: dict[str, dict] = {}
+    invocation = None
+    seen_results: dict[str, dict] = {}
     for line in path.read_text(encoding="utf-8").splitlines():
         try:
             event = json.loads(line)
         except ValueError:
             continue
-        if not isinstance(event, dict) or event.get("type") != "result" or event.get("parent_tool_use_id"):
+        if not isinstance(event, dict):
+            continue
+        if event.get("type") == "scorebench_invocation":
+            invocation = event.get("id")
+            if not isinstance(invocation, str) or not invocation or invocation in results:
+                raise SystemExit("invalid Claude invocation boundary")
+            continue
+        if event.get("type") != "result" or event.get("parent_tool_use_id"):
             continue
         identity = event.get("uuid")
         if not isinstance(identity, str) or not identity or not isinstance(event.get("modelUsage"), dict):
             raise SystemExit("Claude terminal result is missing identity or per-model usage")
-        if identity in results and results[identity] != event:
+        if invocation is None:
+            raise SystemExit("Claude results require supervisor invocation boundaries")
+        if identity in seen_results and seen_results[identity] != event:
             raise SystemExit("conflicting Claude terminal results")
-        results[identity] = event
+        seen_results[identity] = event
+        results[invocation] = event
     if not results:
         return None
     sessions = {result.get("session_id") for result in results.values()}
@@ -488,6 +501,17 @@ def claude_jsonl_snapshot(
             raise SystemExit("Claude terminal usage does not match the native transcript session")
         if snapshots or any(not message_models[key] for key in identified):
             raise SystemExit("cannot reconcile Claude cost-state with unidentified message usage")
+        # Native results can use a requested alias while messages name the
+        # resolved dated model. Match only unambiguous aliases, not substrings.
+        for identity, model in message_models.items():
+            if model in ledger:
+                continue
+            base = re.sub(r"-\d{8}$", "", model)
+            matches = [key for key in ledger if re.sub(r"-\d{8}$", "", key) == base]
+            if len(matches) > 1:
+                raise SystemExit("ambiguous Claude model alias in terminal usage")
+            if matches:
+                message_models[identity] = matches[0]
         # The ledger includes auxiliary models absent from assistant messages.
         # It is cumulative, so never add repeated checkpoints or messages twice.
         complete_cost = True
@@ -516,6 +540,12 @@ def claude_jsonl_snapshot(
         return UsageSnapshot(total_tokens=combined.total_tokens, **combined.components(),
                              cost_usd=ledger_cost if complete_cost else None)
     snapshots.extend(identified.values())
+    if terminal_ledger is not None and not terminal_ledger["modelUsage"]:
+        if all(item.total_tokens == 0 and not item.cache_read_tokens for item in snapshots):
+            return UsageSnapshot(total_tokens=0, input_tokens=0, output_tokens=0,
+                                 cache_creation_tokens=0, cache_read_tokens=0,
+                                 reasoning_output_tokens=0, cost_usd=0.0)
+        raise SystemExit("empty Claude model report contradicts transcript usage")
     if not snapshots and allow_empty:
         return UsageSnapshot(
             total_tokens=0,

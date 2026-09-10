@@ -33,15 +33,47 @@ class ClaudeCostStateTests(unittest.TestCase):
             transcript, results = Path(directory) / "session.jsonl", Path(directory) / "results.jsonl"
             transcript.write_text(json.dumps(message()) + "\n")
             result = {"type": "result", "uuid": "first", "session_id": "session-1", "modelUsage": ledger()["modelUsage"]}
-            results.write_text(json.dumps(result) + "\n" + json.dumps(result) + "\n")
+            results.write_text(json.dumps({"type":"scorebench_invocation","id":"first-process"}) + "\n" + json.dumps(result) + "\n" + json.dumps(result) + "\n")
             snapshot = usage.claude_jsonl_snapshot(transcript, results_path=results)
             self.assertEqual(snapshot.total_tokens, 330)
             self.assertAlmostEqual(snapshot.cost_usd, .21)
             with results.open("a") as output:
+                output.write(json.dumps({"type":"scorebench_invocation","id":"second-process"}) + "\n")
                 output.write(json.dumps({**result, "uuid": "second"}) + "\n")
             snapshot = usage.claude_jsonl_snapshot(transcript, results_path=results)
             self.assertEqual(snapshot.total_tokens, 660)
             self.assertAlmostEqual(snapshot.cost_usd, .42)
+
+    def test_dated_model_alias_does_not_double_count(self):
+        result = self.parse(message(model="fable-20260909"), ledger())
+        self.assertEqual(result.total_tokens, 330)
+
+    def test_multiple_results_in_one_invocation_are_cumulative(self):
+        with tempfile.TemporaryDirectory() as directory:
+            path = Path(directory) / "results.jsonl"
+            records = [{"type":"scorebench_invocation","id":"one"}]
+            for key, count in (("first", 10), ("last", 100)):
+                records.append({"type":"result","uuid":key,"session_id":"session-1","modelUsage":ledger(main=count)["modelUsage"]})
+            path.write_text("".join(json.dumps(record)+"\n" for record in records))
+            result = usage.claude_result_ledger(path)
+            self.assertEqual(result["modelUsage"]["fable"]["inputTokens"],100)
+
+    def test_empty_native_report_certifies_only_zero_usage(self):
+        with tempfile.TemporaryDirectory() as directory:
+            transcript = Path(directory) / "session.jsonl"
+            results = Path(directory) / "results.jsonl"
+            records = [
+                {"type": "scorebench_invocation", "id": "one"},
+                {"type": "result", "uuid": "auth-error", "session_id": "session-1", "modelUsage": {}},
+            ]
+            results.write_text("".join(json.dumps(record) + "\n" for record in records))
+            transcript.write_text(json.dumps(message(0, model="<synthetic>")) + "\n")
+            snapshot = usage.claude_jsonl_snapshot(transcript, results_path=results)
+            self.assertEqual(snapshot.total_tokens, 0)
+            self.assertEqual(snapshot.cost_usd, 0)
+            transcript.write_text(json.dumps(message()) + "\n")
+            with self.assertRaises(SystemExit):
+                usage.claude_jsonl_snapshot(transcript, results_path=results)
 
     def parse(self, *events):
         with tempfile.TemporaryDirectory() as directory:
