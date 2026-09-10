@@ -4,6 +4,7 @@ from __future__ import annotations
 import argparse
 from dataclasses import dataclass
 import json
+import itertools
 import math
 import os
 from pathlib import Path
@@ -349,16 +350,59 @@ def claude_usage_total(usage: dict[str, Any]) -> int | None:
     return usage_total(usage)
 
 
+def claude_result_ledger(path: Path) -> dict[str, Any] | None:
+    results: dict[str, dict] = {}
+    for line in path.read_text(encoding="utf-8").splitlines():
+        try:
+            event = json.loads(line)
+        except ValueError:
+            continue
+        if not isinstance(event, dict) or event.get("type") != "result" or event.get("parent_tool_use_id"):
+            continue
+        identity = event.get("uuid")
+        if not isinstance(identity, str) or not identity or not isinstance(event.get("modelUsage"), dict):
+            raise SystemExit("Claude terminal result is missing identity or per-model usage")
+        if identity in results and results[identity] != event:
+            raise SystemExit("conflicting Claude terminal results")
+        results[identity] = event
+    if not results:
+        return None
+    sessions = {result.get("session_id") for result in results.values()}
+    if len(sessions) != 1 or not all(isinstance(value, str) and value for value in sessions):
+        raise SystemExit("mixed Claude terminal sessions")
+    models: dict[str, dict] = {}
+    for result in results.values():
+        for model, counters in result["modelUsage"].items():
+            if not isinstance(counters, dict):
+                raise SystemExit("invalid Claude terminal model usage")
+            combined = models.setdefault(model, {})
+            for key in ("inputTokens", "outputTokens", "cacheCreationInputTokens", "cacheReadInputTokens", "costUSD"):
+                value = counters.get(key)
+                if type(value) not in (int, float) or not math.isfinite(value) or value < 0:
+                    raise SystemExit("incomplete Claude terminal model usage")
+                if key != "costUSD" and type(value) is not int:
+                    raise SystemExit("Claude token counter is not an integer")
+                combined[key] = combined.get(key, 0) + value
+    return {"type": "cost-state", "sessionId": next(iter(sessions)), "modelUsage": models}
+
+
 def claude_jsonl_snapshot(
     path: Path,
     *,
     accounting_version: int = ACCOUNTING_VERSION,
     allow_empty: bool = False,
+    results_path: Path | None = None,
 ) -> UsageSnapshot:
     snapshots: list[UsageSnapshot] = []
     identified: dict[str, UsageSnapshot] = {}
+    message_models: dict[str, str] = {}
+    ledger: dict[str, UsageSnapshot] = {}
+    ledger_cost: float | None = None
+    ledger_session: str | None = None
+    native_sessions: set[str] = set()
+    terminal_ledger = claude_result_ledger(results_path) if results_path else None
     with path.open("r", encoding="utf-8") as handle:
-        for line in handle:
+        for line in itertools.chain(handle, [json.dumps(terminal_ledger)] if terminal_ledger else []):
             line = line.strip()
             if not line:
                 continue
@@ -367,6 +411,41 @@ def claude_jsonl_snapshot(
             except json.JSONDecodeError:
                 continue
             if not isinstance(event, dict):
+                continue
+            if event.get("type") in {"user", "assistant"} and event.get("sessionId"):
+                native_sessions.add(str(event["sessionId"]))
+            if event.get("type") == "cost-state":
+                session = event.get("sessionId")
+                models = event.get("modelUsage")
+                if not isinstance(session, str) or not isinstance(models, dict):
+                    raise SystemExit("invalid Claude cost-state identity or model usage")
+                if ledger_session is not None and ledger_session != session:
+                    raise SystemExit("mixed Claude cost-state sessions")
+                ledger_session = session
+                current = {}
+                costs = []
+                for model, values in models.items():
+                    if not isinstance(values, dict):
+                        raise SystemExit("invalid Claude cost-state model counters")
+                    fields = {"input_tokens": "inputTokens", "output_tokens": "outputTokens",
+                              "cache_creation_tokens": "cacheCreationInputTokens", "cache_read_tokens": "cacheReadInputTokens"}
+                    counters = {field: usage_int(values, key) for field, key in fields.items()}
+                    if any(value is None for value in counters.values()):
+                        raise SystemExit("incomplete Claude cost-state model counters")
+                    previous = ledger.get(model)
+                    if previous and any(counters[key] < getattr(previous, key) for key in counters):
+                        raise SystemExit("Claude cost-state counters decreased; refusing undercount")
+                    current[model] = UsageSnapshot(
+                        total_tokens=counters["input_tokens"] + counters["output_tokens"] + counters["cache_creation_tokens"],
+                        **counters, reasoning_output_tokens=usage_int(values, "thinkingTokens"))
+                    cost = values.get("costUSD")
+                    if type(cost) not in (int, float) or not math.isfinite(cost) or cost < 0:
+                        raise SystemExit("invalid Claude cost-state model cost")
+                    costs.append(float(cost))
+                if not set(ledger).issubset(current):
+                    raise SystemExit("Claude cost-state lost a previously recorded model")
+                ledger = current
+                ledger_cost = None if event.get("hasUnknownModelCost") else sum(costs)
                 continue
             if event.get("type") == "result" and isinstance(event.get("usage"), dict):
                 raise SystemExit(
@@ -401,8 +480,41 @@ def claude_jsonl_snapshot(
                         f"{stable_id} in {path}"
                     )
                 identified[stable_id] = snapshot
+                message_models[stable_id] = str(message.get("model") or "") if isinstance(message, dict) else ""
                 continue
             snapshots.append(snapshot)
+    if ledger:
+        if native_sessions and native_sessions != {ledger_session}:
+            raise SystemExit("Claude terminal usage does not match the native transcript session")
+        if snapshots or any(not message_models[key] for key in identified):
+            raise SystemExit("cannot reconcile Claude cost-state with unidentified message usage")
+        # The ledger includes auxiliary models absent from assistant messages.
+        # It is cumulative, so never add repeated checkpoints or messages twice.
+        complete_cost = True
+        for model in set(message_models.values()):
+            messages = aggregate_snapshots([value for key, value in identified.items()
+                                           if message_models[key] == model], path, "Claude messages")
+            recorded = ledger.get(model)
+            if recorded is None:
+                if messages.total_tokens == 0 and not messages.cache_read_tokens:
+                    continue
+                ledger[model] = messages
+                complete_cost = False
+                continue
+            counters = {}
+            for key in ("input_tokens", "output_tokens", "cache_creation_tokens", "cache_read_tokens"):
+                observed = getattr(messages, key)
+                if observed is None:
+                    raise SystemExit("incomplete Claude messages alongside cost-state")
+                counters[key] = max(observed, getattr(recorded, key))
+                if observed > getattr(recorded, key):
+                    complete_cost = False
+            ledger[model] = UsageSnapshot(
+                total_tokens=counters["input_tokens"] + counters["output_tokens"] + counters["cache_creation_tokens"],
+                **counters, reasoning_output_tokens=recorded.reasoning_output_tokens)
+        combined = aggregate_snapshots(list(ledger.values()), path, "Claude cost-state")
+        return UsageSnapshot(total_tokens=combined.total_tokens, **combined.components(),
+                             cost_usd=ledger_cost if complete_cost else None)
     snapshots.extend(identified.values())
     if not snapshots and allow_empty:
         return UsageSnapshot(
@@ -679,6 +791,7 @@ def read_snapshot(
     if args.claude_jsonl:
         return claude_jsonl_snapshot(
             Path(args.claude_jsonl),
+            results_path=Path(args.claude_results) if getattr(args, "claude_results", None) else None,
             accounting_version=accounting_version,
             allow_empty=bool(getattr(args, "allow_empty", False)),
         )
@@ -716,7 +829,7 @@ def tokens_source_from_args(args: argparse.Namespace) -> str | None:
 
 def source_binding_from_args(args: argparse.Namespace) -> dict[str, Any] | None:
     paths: list[tuple[str, str]] = []
-    for name in ("codex_jsonl", "claude_jsonl", "grok_jsonl", "grok_log"):
+    for name in ("codex_jsonl", "claude_jsonl", "grok_jsonl", "grok_log", "claude_results"):
         raw = getattr(args, name, None)
         if raw:
             paths.append((name, str(Path(raw).expanduser().resolve())))
@@ -1001,6 +1114,8 @@ def add_total_args(parser: argparse.ArgumentParser, *, allow_empty: bool = False
     parser.add_argument("--total-tokens", type=int, help="current exact cumulative token count from the runner")
     parser.add_argument("--codex-jsonl", help="Codex exec --json event log to parse")
     parser.add_argument("--claude-jsonl", help="current Claude Code session JSONL transcript to parse")
+    parser.add_argument("--claude-results", default=os.environ.get("SCOREBENCH_CLAUDE_RESULTS_JSONL"),
+                        help="supervisor-owned single-prompt invocation stream for per-model final reconciliation")
     parser.add_argument("--grok-jsonl", help="current Grok session updates.jsonl to parse")
     parser.add_argument("--grok-log", help="Grok unified.jsonl override; normally discovered from --grok-jsonl")
     parser.add_argument(
