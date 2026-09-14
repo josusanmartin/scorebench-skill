@@ -1,5 +1,7 @@
 import json
 import io
+import socket
+import ssl
 import subprocess
 import sys
 import tempfile
@@ -46,6 +48,7 @@ ANTHROPIC_STREAM_CHUNKS = [
     b'"cache_creation_input_tokens":20}}}\n\n',
     b'event: message_delta\n',
     b'data: {"type":"message_delta","usage":{"output_tokens":8,"cost":0.01}}\n\n',
+    b'data: {"type":"message_stop"}\n\n',
 ]
 
 RESPONSES_STREAM_CHUNKS = [
@@ -197,10 +200,163 @@ class OpenRouterProxyTests(unittest.TestCase):
         handler.headers, handler.rfile = {}, io.BytesIO()
         handler.send_response, handler.send_header, handler.end_headers = mock.Mock(), mock.Mock(), mock.Mock()
         handler.wfile = io.BytesIO()
-        with mock.patch.object(orp.urllib.request, "urlopen", side_effect=TimeoutError):
+        with mock.patch.object(orp, "open_upstream", side_effect=TimeoutError) as opened:
             handler._forward()
+        self.assertEqual(opened.call_count, 1)
         handler.send_response.assert_called_once_with(502)
         self.assertIn("cost are unknown", self._log_lines()[0]["accounting_error"])
+        with self.assertRaises(SystemExit):
+            usage_helper.openrouter_jsonl_snapshot(self.log)
+
+    def test_connect_failures_retry_same_request_without_losing_accounting(self):
+        real_open = orp.open_upstream
+        attempts = []
+        def open_request(request):
+            attempts.append(request)
+            if len(attempts) < 3:
+                raise urllib.error.URLError(orp.UnsentRequestError(socket.gaierror(-3, "secret-host")))
+            return real_open(request)
+        with mock.patch.object(orp, "open_upstream", side_effect=open_request), mock.patch.object(orp.time, "sleep") as sleep:
+            status, _, _ = self._post({"model": "anthropic/claude", "messages": []})
+        self.assertEqual(status, 200)
+        self.assertEqual(len(attempts), 3)
+        self.assertIs(attempts[0], attempts[2])
+        self.assertEqual(sleep.call_args_list, [mock.call(1), mock.call(2)])
+        self.assertEqual(usage_helper.openrouter_jsonl_snapshot(self.log).cost_usd, 0.01)
+        diagnostics = self.log.with_name("transport-errors.jsonl")
+        self.assertEqual(diagnostics.stat().st_mode & 0o777, 0o600)
+        self.assertNotIn("secret-host", diagnostics.read_text())
+        self.assertNotIn("test-key-123", diagnostics.read_text())
+        self.assertEqual(len(diagnostics.read_text().splitlines()), 2)
+
+    def test_real_refused_connection_recovers_when_listener_becomes_available(self):
+        upstream = ThreadingHTTPServer(("127.0.0.1", 0), FakeUpstream, bind_and_activate=False)
+        upstream.server_bind()
+        self.proxy.upstream = f"http://127.0.0.1:{upstream.server_address[1]}"
+        original = orp._HTTPConnection.connect
+        started = threading.Event()
+        def connect(connection):
+            try:
+                return original(connection)
+            except orp.UnsentRequestError:
+                upstream.server_activate()
+                threading.Thread(target=upstream.serve_forever, daemon=True).start()
+                started.set()
+                raise
+        try:
+            with mock.patch.object(orp._HTTPConnection, "connect", connect), mock.patch.object(orp.time, "sleep"):
+                self.assertEqual(self._post({"messages": []})[0], 200)
+            self.assertTrue(started.is_set())
+            self.assertEqual(usage_helper.openrouter_jsonl_snapshot(self.log).cost_usd, 0.01)
+            diagnostics = json.loads(self.log.with_name("transport-errors.jsonl").read_text())
+            self.assertEqual(diagnostics["exception_type"], "ConnectionRefusedError")
+            self.assertEqual(diagnostics["phase"], "connect")
+        finally:
+            if started.is_set():
+                upstream.shutdown()
+            upstream.server_close()
+
+    def test_exhausted_unsent_retries_do_not_poison_future_usage(self):
+        error = urllib.error.URLError(orp.UnsentRequestError(ConnectionRefusedError()))
+        with mock.patch.object(orp, "open_upstream", side_effect=error) as opened, mock.patch.object(orp.time, "sleep"):
+            with self.assertRaises(urllib.error.HTTPError) as raised:
+                self._post({"messages": []})
+            self.assertEqual(raised.exception.code, 502)
+            raised.exception.close()
+        self.assertEqual(opened.call_count, 3)
+        self.assertEqual(self._log_lines(), [])
+        self.assertFalse(self.proxy.usage_log.blocked.is_set())
+        self._post({"messages": []})
+        self.assertEqual(usage_helper.openrouter_jsonl_snapshot(self.log).cost_usd, 0.01)
+
+    def test_bad_tls_certificate_is_not_retried_or_treated_as_billed(self):
+        error = urllib.error.URLError(orp.UnsentRequestError(ssl.SSLCertVerificationError("secret")))
+        with mock.patch.object(orp, "open_upstream", side_effect=error) as opened:
+            with self.assertRaises(urllib.error.HTTPError) as raised:
+                self._post({"messages": []})
+            self.assertNotIn(b"secret", raised.exception.read())
+        self.assertEqual(opened.call_count, 1)
+        self.assertEqual(self._log_lines(), [])
+
+    def test_transport_phase_comes_from_connect_not_exception_name(self):
+        for connection in (orp._HTTPConnection, orp._HTTPSConnection):
+            conn = connection("localhost", timeout=1)
+            with self.subTest(connection=connection), mock.patch.object(conn, "_create_connection", side_effect=TimeoutError()):
+                with self.assertRaises(orp.UnsentRequestError):
+                    conn.connect()
+        # An identical exception outside connect must remain an accounting gap.
+        with mock.patch.object(orp, "open_upstream", side_effect=TimeoutError()) as opened:
+            with self.assertRaises(urllib.error.HTTPError) as raised:
+                self._post({"messages": []})
+            raised.exception.close()
+        self.assertEqual(opened.call_count, 1)
+        self.assertEqual(self._log_lines()[0]["phase"], "request_or_headers")
+
+    def test_unknown_acceptance_blocks_further_inference_without_replaying(self):
+        with mock.patch.object(orp, "open_upstream", side_effect=orp.HTTPException("secret-request")) as opened:
+            for status in (502, 409):
+                with self.assertRaises(urllib.error.HTTPError) as raised:
+                    self._post({"messages": []})
+                self.assertEqual(raised.exception.code, status)
+                self.assertNotIn(b"secret-request", raised.exception.read())
+        self.assertEqual(opened.call_count, 1)
+        self.assertEqual(len(self._log_lines()), 1)
+        with self.assertRaises(SystemExit):
+            usage_helper.openrouter_jsonl_snapshot(self.log)
+
+    def test_trailing_stream_error_keeps_only_conclusive_receipts(self):
+        cases = [
+            (STREAM_CHUNKS[:3], True),
+            (RESPONSES_STREAM_CHUNKS, True),
+            (ANTHROPIC_STREAM_CHUNKS, True),
+            (ANTHROPIC_STREAM_CHUNKS[:-1], False),
+            (STREAM_CHUNKS[:1], False),
+        ]
+        for chunks, complete in cases:
+            with self.subTest(chunks=chunks):
+                self.log.write_text("")
+                self.proxy.usage_log.blocked.clear()
+                handler = object.__new__(orp.Handler)
+                handler.server, handler.command, handler.path = self.proxy, "POST", "/chat/completions"
+                handler.wfile = io.BytesIO()
+                upstream = mock.Mock()
+                upstream.read1.side_effect = [b"".join(chunks), ConnectionResetError()]
+                handler._pump_stream(upstream, record_usage=True)
+                self.assertEqual(len(self._log_lines()), 1)
+                if complete:
+                    self.assertGreater(usage_helper.openrouter_jsonl_snapshot(self.log).cost_usd, 0)
+                    self.assertFalse(self.proxy.usage_log.blocked.is_set())
+                else:
+                    self.assertTrue(self.proxy.usage_log.blocked.is_set())
+                    with self.assertRaises(SystemExit):
+                        usage_helper.openrouter_jsonl_snapshot(self.log)
+
+    def test_clean_eof_after_partial_usage_still_refuses_accounting(self):
+        handler = object.__new__(orp.Handler)
+        handler.server, handler.command, handler.path = self.proxy, "POST", "/messages"
+        handler.wfile = io.BytesIO()
+        handler._pump_stream(io.BytesIO(b"".join(ANTHROPIC_STREAM_CHUNKS[:-1])), record_usage=True)
+        self.assertTrue(self.proxy.usage_log.blocked.is_set())
+        with self.assertRaises(SystemExit):
+            usage_helper.openrouter_jsonl_snapshot(self.log)
+
+    def test_invalid_cost_never_certifies_a_final_stream_receipt(self):
+        for cost in (None, True, -1, float("inf"), float("nan"), 10**500):
+            with self.subTest(cost=cost):
+                self.assertFalse(orp.Handler._complete_usage({
+                    "prompt_tokens": 10, "completion_tokens": 2, "cost": cost}))
+
+    def test_later_inflight_receipts_do_not_erase_an_unknown_request(self):
+        self._post({"messages": []})
+        self.proxy.usage_log.error("unknown accepted generation")
+        handler = object.__new__(orp.Handler)
+        handler.server, handler.command, handler.path = self.proxy, "POST", "/chat/completions"
+        handler.wfile = io.BytesIO()
+        handler._pump_stream(io.BytesIO(b"".join(STREAM_CHUNKS)), record_usage=True)
+        lines = self._log_lines()
+        self.assertEqual(len(lines), 3)
+        self.assertEqual(lines[-1]["usage"]["cost"], 0.004)
+        self.assertTrue(self.proxy.usage_log.blocked.is_set())
         with self.assertRaises(SystemExit):
             usage_helper.openrouter_jsonl_snapshot(self.log)
 

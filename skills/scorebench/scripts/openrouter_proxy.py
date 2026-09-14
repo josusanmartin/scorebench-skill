@@ -23,20 +23,69 @@ Dependency-free (stdlib only). Reads OPENROUTER_API_KEY from the environment.
 from __future__ import annotations
 
 import argparse
-from http.client import HTTPException
+from http.client import HTTPConnection, HTTPSConnection, HTTPException
 import json
+import math
 import os
+import ssl
 import sys
 import threading
+import time
 import urllib.error
 import urllib.request
 from http.server import BaseHTTPRequestHandler, ThreadingHTTPServer
 from pathlib import Path
+from uuid import uuid4
 
 DEFAULT_UPSTREAM = "https://openrouter.ai"
 # Hop-by-hop and content-coding headers we must not blindly forward.
 _SKIP_REQUEST_HEADERS = {"host", "authorization", "x-api-key", "proxy-authorization", "content-length", "accept-encoding", "connection"}
 _SKIP_RESPONSE_HEADERS = {"content-length", "transfer-encoding", "connection", "content-encoding", "keep-alive"}
+
+
+class UnsentRequestError(OSError):
+    """Connection establishment failed before any inference request bytes."""
+
+    def __init__(self, cause):
+        super().__init__("upstream connection establishment failed")
+        self.cause = cause
+
+
+class _ConnectionPhase:
+    def connect(self):
+        try:
+            super().connect()
+        except (OSError, HTTPException) as exc:
+            raise UnsentRequestError(exc) from exc
+
+
+class _HTTPConnection(_ConnectionPhase, HTTPConnection):
+    pass
+
+
+class _HTTPSConnection(_ConnectionPhase, HTTPSConnection):
+    pass
+
+
+class _HTTPHandler(urllib.request.HTTPHandler):
+    def http_open(self, request):
+        return self.do_open(_HTTPConnection, request)
+
+
+class _HTTPSHandler(urllib.request.HTTPSHandler):
+    def https_open(self, request):
+        return self.do_open(_HTTPSConnection, request, context=self._context)
+
+
+class _NoRedirect(urllib.request.HTTPRedirectHandler):
+    def redirect_request(self, *args, **kwargs):
+        # A redirected connection failure cannot prove the first POST was unsent.
+        return None
+
+
+def open_upstream(request):
+    opener = urllib.request.build_opener(_HTTPHandler(), _HTTPSHandler(), _NoRedirect())
+    return opener.open(request, timeout=600)
 
 
 class UsageLog:
@@ -45,6 +94,7 @@ class UsageLog:
         self._lock = threading.Lock()
         self._idle = threading.Condition()
         self._active = 0
+        self.blocked = threading.Event()
         path.parent.mkdir(parents=True, exist_ok=True)
         # Create the file if absent so `token_usage.py start` sees a zero
         # baseline; never truncate, so a restarted proxy keeps prior usage and
@@ -76,13 +126,24 @@ class UsageLog:
         self._append(record)
         return True
 
-    def error(self, reason: str) -> None:
-        self._append({"accounting_error": reason})
+    def error(self, reason: str, **details) -> None:
+        self.blocked.set()
+        self._append({"accounting_error": reason, **details})
 
-    def _append(self, record: dict) -> None:
+    def transport_error(self, exc, *, request_id, phase, attempt):
+        cause = exc.reason if isinstance(exc, urllib.error.URLError) else exc
+        if isinstance(cause, UnsentRequestError):
+            cause = cause.cause
+        details = {"request_id": request_id, "phase": phase, "attempt": attempt,
+                   "exception_type": type(cause).__name__, "errno": getattr(cause, "errno", None)}
+        # Do not log exception strings, URLs, headers, prompts, or credentials.
+        self._append({"timestamp": time.time(), **details}, self.path.with_name("transport-errors.jsonl"))
+        return details
+
+    def _append(self, record: dict, path: Path | None = None) -> None:
         line = json.dumps(record, sort_keys=True) + "\n"
         with self._lock:
-            with self.path.open("a", encoding="utf-8") as handle:
+            with os.fdopen(os.open(path or self.path, os.O_WRONLY | os.O_APPEND | os.O_CREAT, 0o600), "a", encoding="utf-8") as handle:
                 handle.write(line)
                 handle.flush()
 
@@ -107,6 +168,9 @@ class Handler(BaseHTTPRequestHandler):
     def _forward(self) -> None:
         length = int(self.headers.get("Content-Length") or 0)
         body = self.rfile.read(length) if length else None
+        if self._generation_request() and self.server.usage_log.blocked.is_set():
+            self._send_proxy_error(409, "OpenRouter accounting is incomplete; retain this run for review")
+            return
         allowed_models = getattr(self.server, "allowed_models", None)
         if allowed_models and self._generation_request():
             try:
@@ -126,27 +190,45 @@ class Handler(BaseHTTPRequestHandler):
         headers["Authorization"] = f"Bearer {self.server.api_key}"  # type: ignore[attr-defined]
         headers["Accept-Encoding"] = "identity"  # keep the body parseable + forwardable
         request = urllib.request.Request(url, data=body, headers=headers, method=self.command)
-        try:
-            upstream = urllib.request.urlopen(request, timeout=600)  # nosec B310 (fixed upstream host)
-        except urllib.error.HTTPError as exc:
-            # Some provider failures can still report billable usage.
-            with exc:
-                self._relay(exc, record_usage=True)
-            return
-        except (urllib.error.URLError, TimeoutError, OSError) as exc:
-            if self._generation_request():
-                self.server.usage_log.error("upstream transport failure; generation acceptance and cost are unknown")
-            body = json.dumps({"error": f"openrouter proxy upstream failure: {exc}"}).encode()
-            self.send_response(502)
-            self.send_header("Content-Type", "application/json")
-            self.send_header("Content-Length", str(len(body)))
-            self.send_header("Connection", "close")
-            self.end_headers()
-            self.wfile.write(body)
-            self.close_connection = True
-            return
+        request_id = uuid4().hex
+        for attempt in range(1, 4):
+            if self._generation_request() and self.server.usage_log.blocked.is_set():
+                self._send_proxy_error(409, "OpenRouter accounting is incomplete; retain this run for review")
+                return
+            try:
+                upstream = open_upstream(request)
+                break
+            except urllib.error.HTTPError as exc:
+                # Some provider failures can still report billable usage.
+                with exc:
+                    self._relay(exc, record_usage=True)
+                return
+            except (urllib.error.URLError, OSError, HTTPException) as exc:
+                cause = exc.reason if isinstance(exc, urllib.error.URLError) else exc
+                unsent = isinstance(cause, UnsentRequestError)
+                details = self.server.usage_log.transport_error(exc, request_id=request_id,
+                    phase="connect" if unsent else "request_or_headers", attempt=attempt)
+                if unsent and attempt < 3 and not isinstance(cause.cause, ssl.SSLCertVerificationError):
+                    time.sleep(attempt)
+                    continue
+                if self._generation_request() and not unsent:
+                    self.server.usage_log.error(
+                        "upstream transport failure; generation acceptance and cost are unknown", **details)
+                self._send_proxy_error(502, "upstream connection failed before sending request" if unsent
+                    else "upstream transport failed; generation acceptance and cost are unknown", request_id)
+                return
         with upstream:
             self._relay(upstream, record_usage=True)
+
+    def _send_proxy_error(self, status, message, request_id=None):
+        body = json.dumps({"error": {"code": status, "message": message, "request_id": request_id}}).encode()
+        self.send_response(status)
+        self.send_header("Content-Type", "application/json")
+        self.send_header("Content-Length", str(len(body)))
+        self.send_header("Connection", "close")
+        self.end_headers()
+        self.wfile.write(body)
+        self.close_connection = True
 
     def _relay(self, upstream, *, record_usage: bool) -> None:
         status = getattr(upstream, "status", None) or upstream.getcode() or 200
@@ -160,7 +242,7 @@ class Handler(BaseHTTPRequestHandler):
             raise
         if body is not None and record_usage:
             recorded = self._record_body_usage(body)
-            if not recorded and (200 <= status < 300 or status >= 500) and self._generation_request():
+            if not recorded and (200 <= status < 400 or status >= 500) and self._generation_request():
                 self.server.usage_log.error("generation response omitted usage")
         client_connected = True
         try:
@@ -211,10 +293,16 @@ class Handler(BaseHTTPRequestHandler):
                 # HTTPResponse.read waits to fill the buffer; read1 forwards
                 # available bytes immediately, including small token deltas.
                 chunk = getattr(upstream, "read1", upstream.read)(65536)
-            except (OSError, HTTPException, EOFError):
+            except (OSError, HTTPException, EOFError) as exc:
                 if record_usage:
-                    self.server.usage_log.error("generation stream interrupted before final usage")
-                raise
+                    details = self.server.usage_log.transport_error(exc, request_id=uuid4().hex,
+                        phase="stream", attempt=1)
+                    if response_obj.get("complete"):
+                        self.server.usage_log.record(response_obj)
+                    else:
+                        self.server.usage_log.error("generation stream interrupted before final usage",
+                            generation_id=response_obj.get("id"), **details)
+                return
             if not chunk:
                 break
             if record_usage:
@@ -232,17 +320,20 @@ class Handler(BaseHTTPRequestHandler):
                     client_connected = False
         if record_usage and buffer:
             self._scan_sse_line(buffer, response_obj)
-        if record_usage and response_obj["usage"]:
+        if record_usage and response_obj.get("complete"):
             self.server.usage_log.record(response_obj)  # type: ignore[attr-defined]
         elif record_usage and self._generation_request():
-            self.server.usage_log.error("generation stream omitted usage")
+            self.server.usage_log.error("generation stream omitted final usage", generation_id=response_obj.get("id"))
 
     def _scan_sse_line(self, line: bytes, response_obj: dict) -> None:
         line = line.strip()
         if not line.startswith(b"data:"):
             return
         payload = line[len(b"data:"):].strip()
-        if not payload or payload == b"[DONE]":
+        if payload == b"[DONE]":
+            response_obj["complete"] = self._complete_usage(response_obj["usage"])
+            return
+        if not payload:
             return
         try:
             obj = json.loads(payload)
@@ -265,6 +356,19 @@ class Handler(BaseHTTPRequestHandler):
         response_obj["model"] = (
             obj.get("model") or message.get("model") or response.get("model") or response_obj.get("model")
         )
+        terminal = (obj.get("type") in ("response.completed", "response.incomplete", "message_stop")
+                    or (isinstance(obj.get("usage"), dict) and obj.get("choices") == []))
+        if terminal:
+            response_obj["complete"] = self._complete_usage(response_obj["usage"])
+
+    @staticmethod
+    def _complete_usage(usage):
+        keys = ("prompt_tokens", "completion_tokens") if "prompt_tokens" in usage else ("input_tokens", "output_tokens")
+        try:
+            return all(type(usage.get(key)) in (int, float) and math.isfinite(usage[key]) and usage[key] >= 0
+                       for key in (*keys, "cost"))
+        except OverflowError:
+            return False
 
     @staticmethod
     def _merge_usage(target: dict, update: dict) -> None:

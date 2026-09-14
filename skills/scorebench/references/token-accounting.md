@@ -267,6 +267,30 @@ not a rounded remaining-dollar estimate. Missing usage fails accounting; a
 partial set of reported costs is never a complete run cost. Preserve the ledger
 and report the missing measurement rather than resetting or fabricating it.
 
+Connection failures are not all accounting gaps. The proxy retries a connection
+that demonstrably failed before the inference request was sent, at most three
+attempts with one- and two-second backoff. Certificate verification failures
+are not retried or bypassed. Such unsent attempts do not incur generation cost
+and do not invalidate earlier receipts. Requests are not followed through
+redirects or replayed by the proxy after ambiguous acceptance.
+
+After a response starts, the proxy retains a conclusive final usage receipt even
+if the connection subsequently breaks. An interrupted stream with only partial
+usage, or a request sent without receiving a response, still has unknown cost.
+The ledger records that gap and the proxy blocks new inference requests while
+allowing already-started responses to drain. Neither SDK retries nor later
+successful receipts resolve the missing cost. Do not use length-limit recovery
+for an incomplete ledger or report the last accepted snapshot as final spend.
+
+On failures, preserve `transport-errors.jsonl` beside the ledger as well as
+`result.json` and native logs. Transport diagnostics record a local request ID,
+phase, exception type, and attempt number, never credentials or prompt text.
+The local request ID is not an OpenRouter generation ID. Older proxies did not
+record these details, so a generic transport error may not be reconcilable from
+retained evidence. Verify the final server lifecycle through `run progress` and
+`run current`; a preparation status of `ready` describes launch preparation,
+not a live model process.
+
 Never broadly search `~/.codex`, `~/.claude`, browser profiles, shell snapshots,
 or old transcripts to infer usage.
 

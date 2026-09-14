@@ -5,6 +5,7 @@ executables. No real provider credentials, account, or paid calls are used.
 """
 import json
 import os
+import socket
 from pathlib import Path
 import subprocess
 import sys
@@ -41,6 +42,11 @@ class Provider(BaseHTTPRequestHandler):
         with self.server.lock:
             self.server.requests.append((self.path, self.headers.get("Authorization"), request))
             seq = len(self.server.requests)
+        if seq in getattr(self.server, "drop_before_headers", set()):
+            # Acceptance is deliberately ambiguous: request arrived, receipt did not.
+            self.connection.shutdown(socket.SHUT_RDWR)
+            self.close_connection = True
+            return
         messages = request.get("messages", [])
         tools = request.get("tools", [])
         had_tool = any(message.get("role") == "tool" for message in messages)
@@ -73,6 +79,14 @@ class Provider(BaseHTTPRequestHandler):
         body = ("".join("data: " + json.dumps(event) + "\n\n" for event in events) + "data: [DONE]\n\n").encode()
         self.send_response(200)
         self.send_header("Content-Type", "text/event-stream")
+        if seq in getattr(self.server, "drop_after_usage", set()):
+            self.send_header("Transfer-Encoding", "chunked")
+            self.end_headers()
+            self.wfile.write(f"{len(body):x}\r\n".encode() + body + b"\r\n")
+            self.wfile.flush()
+            self.connection.shutdown(socket.SHUT_RDWR)
+            self.close_connection = True
+            return
         self.send_header("Content-Length", str(len(body)))
         self.end_headers()
         self.wfile.write(body)
