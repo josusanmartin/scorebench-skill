@@ -97,12 +97,45 @@ class PublisherTests(unittest.TestCase):
     def test_completion_requires_server_acceptance_even_after_clean_exit(self):
         with mock.patch("openrouter_accounting.subprocess.run", side_effect=[
             subprocess.CompletedProcess("scorebench", 1, "", "HTTP 400: budget not reached"),
+            subprocess.CompletedProcess("scorebench", 0, '{"run":{"status":"active"}}', ""),
             subprocess.CompletedProcess("scorebench", 0, "{}", ""),
         ]) as post:
             self.assertEqual(self.publisher.finalize(0, accounting_ok=True), 1)
         self.assertIn("finish", post.call_args_list[0].args[0])
-        self.assertIn("failed", post.call_args_list[1].args[0])
+        self.assertIn("failed", post.call_args_list[2].args[0])
         self.assertFalse(json.loads((self.root / "result.json").read_text())["completion_confirmed"])
+
+    def test_finish_timeout_checks_server_before_recording_failure(self):
+        with mock.patch("openrouter_accounting.time.sleep"), mock.patch(
+            "openrouter_accounting.subprocess.run", side_effect=[
+                *[subprocess.TimeoutExpired("scorebench", 15)] * 3,
+                subprocess.CompletedProcess("scorebench", 0, '{"run":{"status":"finished"}}', ""),
+            ]):
+            self.assertEqual(self.publisher.finalize(0, accounting_ok=True), 0)
+        report = json.loads((self.root / "result.json").read_text())
+        self.assertTrue(report["completion_confirmed"])
+        self.assertEqual(len(report["lifecycle_attempts"]), 3)
+
+    def test_failure_ping_retries_and_records_transient_failure(self):
+        with mock.patch("openrouter_accounting.time.sleep"), mock.patch(
+            "openrouter_accounting.subprocess.run", side_effect=[
+                subprocess.TimeoutExpired("scorebench", 15),
+                subprocess.CompletedProcess("scorebench", 1, "", "HTTP 502: secret-detail"),
+                subprocess.CompletedProcess("scorebench", 0, "{}", ""),
+            ]):
+            self.assertEqual(self.publisher.finalize(1, accounting_ok=True), 1)
+        report = json.loads((self.root / "result.json").read_text())
+        self.assertTrue(report["lifecycle_confirmed"])
+        self.assertEqual(len(report["lifecycle_attempts"]), 3)
+        self.assertNotIn("secret-detail", (self.root / "result.json").read_text())
+
+    def test_rejected_failure_is_explicitly_unconfirmed(self):
+        with mock.patch("openrouter_accounting.subprocess.run", return_value=
+                        subprocess.CompletedProcess("scorebench", 1, "", "HTTP 401")):
+            self.assertEqual(self.publisher.finalize(1, accounting_ok=True), 1)
+        report = json.loads((self.root / "result.json").read_text())
+        self.assertFalse(report["lifecycle_confirmed"])
+        self.assertEqual(len(report["lifecycle_attempts"]), 1)
 
     def test_controlled_budget_stop_finishes_after_reconciliation(self):
         control = self.root / ".scorebench/runtime-control.json"

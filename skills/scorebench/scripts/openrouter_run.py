@@ -25,6 +25,7 @@ from typing import Mapping, Sequence
 from openrouter_proxy import DEFAULT_UPSTREAM, Handler, UsageLog
 from openrouter_agents import agent_kind, check_installation, model_metadata, route_agent, validate_route
 from openrouter_accounting import Publisher
+from openrouter_reentry import SessionOutput, admit_reentry, resume_command
 
 
 OPENROUTER_HOST = "openrouter.ai"
@@ -304,14 +305,26 @@ def _terminate_process_group(
 
 
 def _run_supervised(
-    command: Sequence[str], *, workspace: Path, env: Mapping[str, str], publisher: Publisher | None = None
+    command: Sequence[str], *, workspace: Path, env: Mapping[str, str], publisher: Publisher | None = None,
+    session_output: SessionOutput | None = None,
 ) -> int:
     process = subprocess.Popen(
         list(command),
         cwd=workspace,
         env=dict(env),
         start_new_session=True,
+        stdout=subprocess.PIPE if session_output else None,
     )
+    output_thread = None
+    if session_output:
+        def copy_output() -> None:
+            try:
+                session_output.copy_stdout(process.stdout)
+            except Exception:
+                session_output.error = True
+                print("ScoreBench native output capture failed; automatic reentry disabled", file=sys.stderr)
+        output_thread = threading.Thread(target=copy_output, daemon=True)
+        output_thread.start()
     stop_event = threading.Event()
     try:
         poll_seconds = max(
@@ -369,6 +382,10 @@ def _run_supervised(
     finally:
         stop_event.set()
         monitor_thread.join(timeout=45)
+        if output_thread:
+            output_thread.join(timeout=10)
+            if output_thread.is_alive():
+                session_output.error = True
 
 
 def _run_child(
@@ -390,6 +407,8 @@ def main(argv: Sequence[str] | None = None) -> int:
     parser.add_argument("--expected-model", default="", help="immutable model identifier from the assigned recipe")
     parser.add_argument("--expected-effort", default="", help="immutable reasoning effort from the assigned recipe")
     parser.add_argument("--check", action="store_true", help="validate launch prerequisites without starting a run or model")
+    parser.add_argument("--recover-session", default="", help="explicitly resume a retained, length-limited OpenCode session")
+    parser.add_argument("--no-auto-reentry", action="store_true", help="retain length-limited OpenCode exits for explicit recovery")
     parser.add_argument(
         "--runtime-control",
         action="store_true",
@@ -407,6 +426,11 @@ def main(argv: Sequence[str] | None = None) -> int:
     if args.runtime_control:
         env["SCOREBENCH_RUNTIME_CONTROL"] = "1"
     workspace = Path(args.workspace).expanduser().resolve()
+    if args.recover_session and (agent_kind(args.harness) != "opencode" or not args.runtime_control):
+        parser.error("--recover-session requires supervised OpenCode")
+    if (agent_kind(args.harness) == "opencode" and not args.recover_session
+            and (workspace / ".scorebench/openrouter/result.json").exists()):
+        raise SystemExit("OpenCode worker already exited; use documented --recover-session checks, not a new launch")
     validate_route(args.harness, command, args.expected_model, args.expected_effort)
     enabled, protocol, reason = detect_openrouter(args.harness, command, env, args.mode)
     if not enabled:
@@ -433,10 +457,11 @@ def main(argv: Sequence[str] | None = None) -> int:
                 raise SystemExit(f"{name} must be this worker's private workspace path; clear inherited accounting paths")
         check_installation(command, env)
         _provider, selected_model = validate_route(args.harness, command, args.expected_model)
-        metadata = model_metadata(selected_model, _upstream_for(protocol, env))
+        metadata = model_metadata(selected_model, _upstream_for(protocol, env),
+                                  output_target=128000 if agent_kind(args.harness) == "opencode" else 0)
         if args.expected_effort and not metadata["reasoning"]:
             raise SystemExit("selected OpenRouter model does not expose reasoning support for this recipe")
-    if args.check:
+    if args.check and not args.recover_session:
         # Validate inline OpenCode routing without writing a Pi extension or
         # touching the run's ledger. A stale helper rejects --check itself.
         if agent_kind(args.harness) == "opencode":
@@ -461,6 +486,32 @@ def main(argv: Sequence[str] | None = None) -> int:
     except BlockingIOError:
         lock.close()
         raise SystemExit("OpenRouter ledger already belongs to a running worker")
+
+    if args.recover_session:
+        # Recovery may neither initialize an absent baseline nor replace a live
+        # writer. Validate everything under the same ledger lock used for launch.
+        try:
+            if not state_path.is_file() or not log_path.is_file():
+                raise RuntimeError("retained ledger and original token baseline are required")
+            result = json.loads((accounting_dir / "result.json").read_text())
+            if result.get("accounting_ok") is not True or result.get("completion_confirmed") is not False:
+                raise RuntimeError("recovery requires an accounted, incomplete retained worker")
+            if result.get("runtime_control"):
+                raise RuntimeError("controlled stops cannot be recovered as length-limit exits")
+            recovery_env = dict(env)
+            recovery_env["SCOREBENCH_OPENROUTER_LOG"] = str(log_path)
+            recovery_env["SCOREBENCH_TOKEN_STATE"] = str(state_path)
+            route_agent(args.harness, command, recovery_env, "http://127.0.0.1:1", workspace, metadata)
+            preview = Publisher(workspace, recovery_env)
+            preview.current_flags()  # Validate the source binding and billed cost without rewriting them.
+            assessment = admit_reentry(preview, metadata, command, args.recover_session, manual=True, check=True)
+            if args.check:
+                print(json.dumps(assessment))
+                lock.close()
+                return 0
+        except Exception:
+            lock.close()
+            raise
 
     server = ThreadingHTTPServer(("127.0.0.1", 0), Handler)
     server.upstream = _upstream_for(protocol, env)  # type: ignore[attr-defined]
@@ -490,6 +541,9 @@ def main(argv: Sequence[str] | None = None) -> int:
             if agent_kind(args.harness)
             else _route_child(args.harness, command, env, protocol, origin)
         )
+        if agent_kind(args.harness) == "opencode":
+            print(f"ScoreBench OpenCode limits: context {metadata['contextWindow']}, "
+                  f"output including reasoning {metadata['maxTokens']}", file=sys.stderr)
         if agent_kind(args.harness):
             _provider, selected_model = validate_route(args.harness, command, args.expected_model)
             server.allowed_models = {selected_model}
@@ -499,11 +553,40 @@ def main(argv: Sequence[str] | None = None) -> int:
         if env.get("SCOREBENCH_RUNTIME_CONTROL", "").lower() in TRUTHY:
             publisher = Publisher(workspace, env)
             publisher.initialize()
-        returncode = _run_child(routed_command, env=env, workspace=workspace, publisher=publisher)
+        if publisher and agent_kind(args.harness) == "opencode":
+            session = args.recover_session
+            if session:
+                admit_reentry(publisher, metadata, command, session, manual=True)
+                routed_command = resume_command(routed_command, session)
+            while True:
+                output = SessionOutput(accounting_dir, session)
+                returncode = _run_supervised(routed_command, env=env, workspace=workspace,
+                                             publisher=publisher, session_output=output)
+                if (returncode != 0 or output.error or output.reason != "length"
+                        or args.no_auto_reentry or (workspace / ".scorebench/runtime-control.json").exists()):
+                    if output.error:
+                        returncode = 1
+                    break
+                if not server.usage_log.wait_idle(30):
+                    raise RuntimeError("unfinished OpenRouter request prevents reentry")
+                publisher.publish()
+                budget = publisher.read("progress")["progress"]["budget"]
+                if budget.get("reached") is True or (budget.get("type") == "cost"
+                    and budget.get("available") is True and budget.get("used", 0) >= budget.get("target", float("inf")) * 0.95):
+                    break
+                admit_reentry(publisher, metadata, command, output.session)
+                session = output.session
+                print("ScoreBench resuming the same OpenCode session after its output limit", file=sys.stderr)
+                # Rebuild from the original command, not a prior --session command.
+                routed_command = resume_command(command, session)
+        else:
+            returncode = _run_child(routed_command, env=env, workspace=workspace, publisher=publisher)
     except KeyboardInterrupt:
         returncode = 130
     except Exception as exc:
         print(f"ScoreBench OpenRouter worker error ({type(exc).__name__}); retain its workspace", file=sys.stderr)
+        if isinstance(exc, RuntimeError):
+            print(str(exc), file=sys.stderr)
         returncode = 1
     finally:
         server.shutdown()
@@ -518,9 +601,11 @@ def main(argv: Sequence[str] | None = None) -> int:
             except Exception:
                 print("ScoreBench final OpenRouter accounting failed; retain the workspace and usage ledger", file=sys.stderr)
                 returncode = 1
+    try:
+        if publisher and agent_kind(args.harness):
+            returncode = publisher.finalize(returncode, accounting_ok=accounting_ok)
+    finally:
         lock.close()
-    if publisher and agent_kind(args.harness):
-        returncode = publisher.finalize(returncode, accounting_ok=accounting_ok)
     return returncode
 
 

@@ -25,7 +25,7 @@ def check_installation(command: Sequence[str], env: dict[str, str]) -> None:
         raise SystemExit("selected coding CLI is not ready; repair its installation before starting the run") from exc
 
 
-def model_metadata(model: str, upstream: str) -> dict:
+def model_metadata(model: str, upstream: str, *, output_target: int = 0) -> dict:
     """Resolve new models without waiting for the agent's bundled catalog."""
     url = upstream.rstrip("/") + "/api/v1/models/" + urllib.parse.quote(model, safe="/") + "/endpoints"
     try:
@@ -35,11 +35,17 @@ def model_metadata(model: str, upstream: str) -> dict:
                      if "tools" in endpoint.get("supported_parameters", [])]
         if data["id"] != model or not endpoints:
             raise ValueError("no matching tool-capable endpoint")
-        contexts = [int(endpoint["context_length"]) for endpoint in endpoints]
+        context = min(int(endpoint["context_length"]) for endpoint in endpoints)
+        if output_target:
+            # OpenRouter routes explicit max_tokens only to capable endpoints.
+            # One small endpoint must not constrain every other provider.
+            maximum = min(output_target, context, max(int(e.get("max_completion_tokens") or 0) for e in endpoints))
+            if maximum <= 0:
+                raise ValueError("no declared output limit")
+            endpoints = [e for e in endpoints if int(e.get("max_completion_tokens") or 0) >= maximum]
         outputs = [int(endpoint["max_completion_tokens"]) for endpoint in endpoints
                    if endpoint.get("max_completion_tokens")]
-        context = min(contexts)
-        maximum = min(outputs) if outputs else min(context, 32768)
+        maximum = maximum if output_target else (min(outputs) if outputs else min(context, 32768))
         if min(context, maximum) <= 0:
             raise ValueError("invalid model limits")
         pricing = endpoints[0]["pricing"]
@@ -48,11 +54,22 @@ def model_metadata(model: str, upstream: str) -> dict:
             if not math.isfinite(value) or value < 0:
                 raise ValueError("invalid model price")
             return value
+        # Admission uses the most expensive eligible rate, never a cached-input
+        # discount. Actual accounting always uses the proxy's billed cost.
+        resume_rates = {key: max(float(p.get(key, e["pricing"].get(key, 0)))
+                                for e in endpoints for p in [e["pricing"], *e["pricing"].get("overrides", [])])
+                        for key in ("prompt", "completion")}
+        if any(not math.isfinite(v) or v < 0 for v in resume_rates.values()):
+            raise ValueError("invalid resume price")
+        resume_estimate = context * resume_rates["prompt"] + min(maximum, context) * resume_rates["completion"]
+        if any(key not in e["pricing"] for e in endpoints for key in ("prompt", "completion")):
+            resume_estimate = None
         return {"id": model, "name": data["name"],
                 "reasoning": any("reasoning" in e.get("supported_parameters", []) for e in endpoints),
                 "input": [mode for mode in data.get("architecture", {}).get("input_modalities", ["text"])
                           if mode in {"text", "image"}],
                 "contextWindow": context, "maxTokens": min(maximum, context),
+                "resumeCostUpperBound": resume_estimate,
                 "cost": {"input": price("prompt"), "output": price("completion"),
                          "cacheRead": price("input_cache_read"), "cacheWrite": price("input_cache_write")},
                 "compat": {"thinkingFormat": "openrouter", "maxTokensField": "max_tokens",
@@ -150,6 +167,7 @@ def route_agent(
                 # Explicit OpenRouter variants preserve the saved experiment effort.
                 selected["variants"] = {effort: {"reasoning": {"effort": effort}}
                                         for effort in ("low", "medium", "high")}
+                env["OPENCODE_EXPERIMENTAL_OUTPUT_TOKEN_MAX"] = str(metadata["maxTokens"])
         except (ValueError, TypeError, AttributeError) as exc:
             raise SystemExit("OPENCODE_CONFIG_CONTENT must be a JSON object with valid provider options") from exc
         # OpenCode otherwise chooses an automatic helper model that may use a

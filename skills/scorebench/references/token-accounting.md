@@ -213,7 +213,21 @@ baseline and publishes changed usage every 30 seconds and at exit. `start` reuse
 that baseline instead of replacing it. Keep using helper flags before submissions
 for candidate-specific checkpoints. Pi/OpenCode workers must leave the final ping
 to the wrapper: ScoreBench validates budget/target completion server-side. These
-manual workers do not support automatic reentry or sanitized native trace upload.
+manual workers do not support sanitized native trace upload. OpenCode JSON-mode
+workers can automatically resume a `length` stop in the same native session,
+up to three attempts, after exact cumulative publication and identity/budget
+checks. Pi reentry is not supported. OpenCode's output allowance is raised from
+32,000 to 128,000 where provider metadata supports it; context remains
+provider-derived and reasoning effort is unchanged. Provider limits can still
+truncate a response. Never reset the baseline or start a replacement session.
+Cost admission reserves a conservative cold full-context request plus output;
+if the remainder is too small, recovery is refused rather than overspending
+just to exhaust it. Actual cost still comes only from the response ledger.
+For retained OpenCode workers, first run the documented `--recover-session
+ses_... --check` flow in the site's experiment-launching runbook, then request
+owner approval before executing it. It preserves pairing and run identity.
+The final result records `lifecycle_confirmed` and compact ping-attempt outcomes;
+an unconfirmed lifecycle must be escalated, not silently treated as completed.
 Retain their native JSON/session logs and `.scorebench/openrouter/result.json`;
 never use Codex/Claude trace auto-discovery as a substitute.
 

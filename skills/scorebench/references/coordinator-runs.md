@@ -259,7 +259,14 @@ launch prompt; see [OpenRouter accounting](token-accounting.md#openrouter-automa
 The wrapper pins the zero baseline, publishes usage, and owns the final ping.
 Only an OpenRouter API key is needed for these provider routes, not subscription
 logins to unrelated coding agents. Retain the native session/output logs;
-automatic trace upload and reentry are not available for these two harnesses.
+automatic trace upload is not available for these two harnesses. OpenCode's
+wrapper supports bounded same-session continuation after a structured `length`
+stop, with cumulative accounting, original assignment and remaining-budget
+checks. Pi reentry is not supported. Retained OpenCode recovery requires the
+runbook's read-only `--recover-session ... --check`, followed by explicit owner
+approval before execution. Never rerun preparation, reset a baseline, or create
+a replacement session to recover. Inspect `lifecycle_confirmed` in the wrapper
+result; missing server confirmation is an escalation, not proof of completion.
 Do not bind a coordinator Codex/Claude transcript to such a worker.
 
 1. Create and verify fresh lane-specific work and agent-state volumes.

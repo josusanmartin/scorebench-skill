@@ -1,0 +1,180 @@
+"""Bounded OpenCode length-limit recovery; never create a replacement session."""
+from __future__ import annotations
+
+import json
+import math
+import os
+from pathlib import Path
+import re
+import subprocess
+import sys
+import time
+
+from openrouter_agents import option, selected_route
+from openrouter_accounting import AccountingError
+
+MAX_REENTRIES = 3
+CONTINUE_PROMPT = (
+    "The previous response reached its output limit. Continue the same assigned ScoreBench goal "
+    "in this session and workspace. Keep the original run identity, model, effort, and token baseline. "
+    "Prefer bounded reasoning and concrete tool work rather than another oversized response. "
+    "The supervisor owns final usage and completion. Check progress and obey the remaining budget "
+    "and explicit stops; do not restart the run or repeat unchanged submissions."
+)
+
+
+def write_json(path: Path, value: dict) -> None:
+    temp = path.with_suffix(".tmp")
+    with os.fdopen(os.open(temp, os.O_WRONLY | os.O_CREAT | os.O_TRUNC, 0o600), "w") as handle:
+        json.dump(value, handle, indent=2)
+    os.replace(temp, path)
+
+
+def resume_command(command: list[str], session: str) -> list[str]:
+    if not re.fullmatch(r"ses_[A-Za-z0-9]+", session):
+        raise AccountingError("invalid retained OpenCode session ID")
+    if command[1:2] != ["run"] or option(command, "--format") != "json":
+        raise AccountingError("OpenCode recovery requires run --format json")
+    # Only the documented headless invocation can be resumed automatically.
+    # Unknown flags, --fork, --continue, --attach and alternate workspaces fail closed.
+    valued = {"--model", "-m", "--variant", "--format", "--title", "--agent"}
+    switches = {"--pure", "--auto", "--thinking"}
+    base, messages = command[:2], []
+    index = 2
+    while index < len(command):
+        arg = command[index]
+        key = arg.split("=", 1)[0]
+        if key in valued:
+            base.append(arg)
+            if "=" not in arg:
+                index += 1
+                if index >= len(command):
+                    raise AccountingError("incomplete OpenCode launch option")
+                base.append(command[index])
+        elif arg in switches:
+            base.append(arg)
+        elif arg.startswith("-"):
+            raise AccountingError("unsupported OpenCode option for same-session recovery")
+        else:
+            messages.append(arg)
+        index += 1
+    if len(messages) != 1:
+        raise AccountingError("recovery requires one original worker prompt")
+    return [*base, "--session", session, CONTINUE_PROMPT]
+
+
+class SessionOutput:
+    def __init__(self, directory: Path, session: str = ""):
+        self.directory = directory
+        self.session = session
+        self.reason = ""
+        self.error = False
+
+    def observe(self, line: bytes) -> None:
+        try:
+            event = json.loads(line)
+            if not isinstance(event, dict) or event.get("type") not in {"step_start", "step_finish", "error"}:
+                return
+            session = event.get("sessionID", "")
+            if not isinstance(session, str) or not re.fullmatch(r"ses_[A-Za-z0-9]+", session):
+                return
+            if self.session and session != self.session:
+                self.error = True
+                return
+            self.session = session
+            if event["type"] == "error":
+                self.error = True
+            if event["type"] == "step_start":
+                self.reason = ""
+            if event["type"] == "step_finish":
+                self.reason = event.get("part", {}).get("reason", "")
+        except (ValueError, TypeError, AttributeError):
+            return
+
+    def copy_stdout(self, stream) -> None:
+        path = self.directory / "native-output.jsonl"
+        with os.fdopen(os.open(path, os.O_WRONLY | os.O_CREAT | os.O_APPEND, 0o600), "ab") as log:
+            partial = False
+            while chunk := stream.readline(1024 * 1024):
+                log.write(chunk)
+                log.flush()
+                try:
+                    sys.stdout.buffer.write(chunk)
+                    sys.stdout.buffer.flush()
+                except BrokenPipeError:
+                    pass
+                if not partial and chunk.endswith(b"\n"):
+                    self.observe(chunk)
+                partial = not chunk.endswith(b"\n")
+
+
+def inspect_session(command: list[str], session: str, workspace: Path, env: dict) -> None:
+    result = subprocess.run([command[0], "--pure", "export", session], cwd=workspace,
+                            env=env, capture_output=True, timeout=30)
+    if result.returncode:
+        raise AccountingError("retained OpenCode session cannot be read")
+    try:
+        data = json.loads(result.stdout)
+        info = data["info"]
+        if info["id"] != session or info.get("parentID") or Path(info["directory"]).resolve() != workspace:
+            raise ValueError("session belongs to a different workspace")
+        assistants = [m["info"] for m in data["messages"] if m["info"].get("role") == "assistant"]
+        last = assistants[-1]
+        provider, model = selected_route("OpenCode", command)
+        if (last.get("finish") != "length" or last.get("error")
+                or any(m.get("modelID") != model or m.get("providerID") != provider for m in assistants)):
+            raise ValueError("session is not a length-limited run of the assigned model")
+    except (ValueError, KeyError, IndexError, TypeError) as exc:
+        raise AccountingError("retained OpenCode session failed identity/length-stop validation") from exc
+
+
+def admit_reentry(publisher, metadata: dict, command: list[str], session: str, *, manual=False, check=False) -> dict:
+    resume_command(command, session)
+    if not check:
+        publisher.publish()
+    progress = publisher.read("progress")
+    current = publisher.read("current")
+    start = json.loads((publisher.workspace / ".scorebench/supervisor-run-start.json").read_text())
+    run_id = start["run"]["run_id"]
+    model = selected_route("OpenCode", command)[1]
+    for run in (start["run"], current["run"]):
+        assigned = run["metadata"]
+        if (run["run_id"] != run_id or assigned.get("coding_harness") != "OpenCode"
+                or assigned.get("model") not in {model, "openrouter/" + model}
+                or assigned.get("effort") != option(command, "--variant")
+                or assigned.get("completion_policy") != "budget_or_target"):
+            raise AccountingError("reentry does not match the original supervised run assignment")
+    if progress.get("scope", {}).get("kind") != "run_token" or progress["run"]["run_id"] != run_id:
+        raise AccountingError("reentry requires the original scoped run credential")
+    if progress["run"].get("status") in {"finished", "stopped", "revoked"}:
+        raise AccountingError("cannot recover a finished or stopped run")
+    budget = progress["progress"]["budget"]
+    remaining = budget.get("remaining")
+    if (budget.get("available") is not True or budget.get("reached") is not False
+            or budget.get("type") not in {"cost", "time", "tokens"}
+            or type(remaining) not in (int, float) or not math.isfinite(remaining) or remaining <= 0):
+        raise AccountingError("reentry requires a conclusive remaining fixed budget")
+    estimate = metadata.get("resumeCostUpperBound")
+    if budget["type"] == "cost" and (
+        type(estimate) not in (int, float) or not math.isfinite(estimate) or estimate <= 0 or remaining < estimate
+    ):
+        raise AccountingError("insufficient resume budget for a cold-context request; retain the worker")
+    if manual and publisher.read("gate").get("ready") is not True:
+        raise AccountingError("retained worker execution gate is not ready")
+    inspect_session(command, session, publisher.workspace, publisher.env)
+    path = publisher.log.parent / "reentries.json"
+    record = json.loads(path.read_text()) if path.exists() else {"run_id": run_id, "session_id": session, "attempts": []}
+    if record["run_id"] != run_id or record["session_id"] != session or len(record["attempts"]) >= MAX_REENTRIES:
+        raise AccountingError("OpenCode same-session recovery limit or identity mismatch")
+    if check:
+        return {"recoverable": True, "run_id": run_id, "session_id": session,
+                "remaining": remaining, "resume_cost_estimate": estimate,
+                "context_window": metadata.get("contextWindow"), "max_output_tokens": metadata.get("maxTokens")}
+    record["attempts"].append({"reason": "length", "manual": manual, "remaining": remaining,
+                               "resume_cost_estimate": estimate, "at": time.time(),
+                               "context_window": metadata.get("contextWindow"), "max_output_tokens": metadata.get("maxTokens")})
+    # Reserve the attempt before reopening lifecycle or launching another model.
+    write_json(path, record)
+    if not publisher.ping("resume", "OpenCode same-session continuation after output limit"):
+        raise AccountingError("could not confirm the resume heartbeat")
+    return record

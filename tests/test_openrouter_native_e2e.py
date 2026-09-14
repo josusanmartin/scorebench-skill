@@ -27,8 +27,8 @@ class Provider(BaseHTTPRequestHandler):
             self.send_error(404)
             return
         body = json.dumps({"data": {"id": model, "name": "Probe", "endpoints": [{
-            "supported_parameters": ["tools", "reasoning"], "context_length": 32768,
-            "max_completion_tokens": 1000, "pricing": {"prompt": "0.000001", "completion": "0.000002"},
+            "supported_parameters": ["tools", "reasoning"], "context_length": getattr(self.server, "context_limit", 32768),
+            "max_completion_tokens": getattr(self.server, "output_limit", 1000), "pricing": {"prompt": "0.000001", "completion": "0.000002"},
         }]}}).encode()
         self.send_response(200)
         self.send_header("Content-Type", "application/json")
@@ -59,11 +59,15 @@ class Provider(BaseHTTPRequestHandler):
                      "function": {"name": tool, "arguments": json.dumps(arguments)}}]}
         usage = {"prompt_tokens": 100, "completion_tokens": 20, "total_tokens": 120,
                  "prompt_tokens_details": {"cached_tokens": 40, "cache_write_tokens": 10},
-                 "completion_tokens_details": {"reasoning_tokens": 5}, "cost": 0.002}
+                 "completion_tokens_details": {"reasoning_tokens": 5}, "cost": getattr(self.server, "unit_cost", 0.002)}
+        reason = "tool_calls" if call_tool else "stop"
+        if seq in getattr(self.server, "length_steps", set()):
+            reason = "length"
+            delta = {"role": "assistant", "reasoning": "Long reasoning was truncated."}
         envelope = {"id": f"gen-{seq}", "object": "chat.completion.chunk", "created": 1, "model": request["model"]}
         events = [
             {**envelope, "choices": [{"index": 0, "delta": delta, "finish_reason": None}]},
-            {**envelope, "choices": [{"index": 0, "delta": {}, "finish_reason": "tool_calls" if call_tool else "stop"}]},
+            {**envelope, "choices": [{"index": 0, "delta": {}, "finish_reason": reason}]},
             {**envelope, "choices": [], "usage": usage},
         ]
         body = ("".join("data: " + json.dumps(event) + "\n\n" for event in events) + "data: [DONE]\n\n").encode()
@@ -75,7 +79,7 @@ class Provider(BaseHTTPRequestHandler):
 
 
 class NativeE2ETests(unittest.TestCase):
-    def run_agent(self, kind, binary, model=MODEL, effort="low"):
+    def run_agent(self, kind, binary, model=MODEL, effort="low", length_stop=False, retained_recovery=False):
         with tempfile.TemporaryDirectory(prefix="scorebench-native-") as root:
             root = Path(root)
             home, work, bin_dir = root / "home", root / "work", root / "bin"
@@ -88,9 +92,22 @@ if sys.argv[1:3] == ['run','usage']:
     with Path('snapshots.jsonl').open('a') as f: f.write(json.dumps(sys.argv[3:])+'\\n')
     print('{"ok":true}')
 elif sys.argv[1:3] == ['run','progress']:
-    print('{"progress":{"budget":{"reached":false,"type":"none"}}}')
+    if Path('assignment.json').exists():
+        snapshots=[json.loads(line) for line in Path('snapshots.jsonl').read_text().splitlines()]
+        flags=snapshots[-1]; used=float(flags[flags.index('--cost-usd')+1])
+        print(json.dumps({'scope':{'kind':'run_token'}, 'run':{'run_id':'probe-run','status':'active'},
+          'progress':{'budget':{'available':True,'type':'cost','target':3.0,'used':used,'remaining':max(0,3-used),'reached':used>=3}}}))
+    else: print('{"progress":{"budget":{"reached":false,"type":"none"}}}')
+elif sys.argv[1:3] == ['run','current']:
+    print(Path('assignment.json').read_text())
+elif sys.argv[1:3] == ['run','gate']:
+    print('{"ready":true}')
 elif sys.argv[1:3] == ['run','ping']:
     with Path('pings.jsonl').open('a') as f: f.write(json.dumps(sys.argv[3:])+'\\n')
+    if 'finish' in sys.argv and Path('assignment.json').exists():
+        flags=json.loads(Path('snapshots.jsonl').read_text().splitlines()[-1])
+        if float(flags[flags.index('--cost-usd')+1]) < 2.85:
+            print('HTTP 400: budget not reached',file=sys.stderr); raise SystemExit(1)
     print('{"ok":true}')
 else:
     raise SystemExit(2)
@@ -99,6 +116,17 @@ else:
             server = ThreadingHTTPServer(("127.0.0.1", 0), Provider)
             server.lock, server.requests, server.workspace = threading.Lock(), [], work
             server.model = model
+            if length_stop:
+                server.length_steps = {2}
+                server.unit_cost = 1.0
+                server.output_limit = 131072
+                server.context_limit = 500000
+                assignment = {"run": {"run_id": "probe-run", "metadata": {
+                    "coding_harness": "OpenCode", "model": "openrouter/" + model,
+                    "effort": effort, "completion_policy": "budget_or_target"}}}
+                (work / "assignment.json").write_text(json.dumps(assignment))
+                (work / ".scorebench").mkdir()
+                (work / ".scorebench/supervisor-run-start.json").write_text(json.dumps(assignment))
             thread = threading.Thread(target=server.serve_forever, daemon=True)
             thread.start()
             env = {"HOME": str(home), "PATH": f"{bin_dir}:{os.environ['PATH']}",
@@ -116,10 +144,30 @@ else:
                 command = [binary, "run", "--pure", "--auto", "--model", "openrouter/" + model,
                            "--variant", effort, "--title", "ScoreBench local probe", "--format", "json", prompt]
             try:
-                result = subprocess.run([sys.executable, str(SCRIPTS / "openrouter_run.py"),
+                launcher = [sys.executable, str(SCRIPTS / "openrouter_run.py"),
                     "--harness", kind, "--workspace", str(work), "--expected-model", model, "--expected-effort", effort,
-                    "--runtime-control", "--", *command], env=env, cwd=work,
+                    "--runtime-control"]
+                result = subprocess.run([*launcher, *(["--no-auto-reentry"] if retained_recovery else []), "--", *command], env=env, cwd=work,
                     capture_output=True, text=True, timeout=90)
+                if retained_recovery:
+                    self.assertEqual(result.returncode, 1, result.stderr[-2000:])
+                    accounting = work / ".scorebench/openrouter"
+                    baseline = (accounting / "token-state.json").read_bytes()
+                    prefix = (accounting / "usage.jsonl").read_bytes()
+                    events = [json.loads(line) for line in (accounting / "native-output.jsonl").read_text().splitlines()]
+                    session = events[-1]["sessionID"]
+                    recovery = [*launcher, "--recover-session", session]
+                    preview = subprocess.run([*recovery, "--check", "--", *command], env=env, cwd=work,
+                                             capture_output=True, text=True, timeout=45)
+                    self.assertEqual(preview.returncode, 0, preview.stderr)
+                    self.assertTrue(json.loads(preview.stdout)["recoverable"])
+                    self.assertEqual((accounting / "usage.jsonl").read_bytes(), prefix)
+                    self.assertEqual(len(server.requests), 2)
+                    self.assertFalse((accounting / "reentries.json").exists())
+                    result = subprocess.run([*recovery, "--", *command], env=env, cwd=work,
+                                            capture_output=True, text=True, timeout=90)
+                    self.assertEqual((accounting / "token-state.json").read_bytes(), baseline)
+                    self.assertTrue((accounting / "usage.jsonl").read_bytes().startswith(prefix))
                 self.assertEqual(result.returncode, 0, result.stderr[-5000:] + result.stdout[-3000:])
                 self.assertTrue((work / "probe.txt").exists(), result.stderr[-2000:] + result.stdout[-4000:])
                 self.assertEqual((work / "probe.txt").read_text(), "scorebench-probe\n")
@@ -132,6 +180,8 @@ else:
                     self.assertEqual(auth, "Bearer fake-native-test-key")
                     self.assertEqual(request["model"], model)
                     self.assertEqual(request.get("reasoning", {}).get("effort"), effort)
+                    if length_stop:
+                        self.assertEqual(request.get("max_tokens"), 128000)
                 ledger = [json.loads(line) for line in (work / ".scorebench/openrouter/usage.jsonl").read_text().splitlines()]
                 self.assertEqual(len(ledger), len(server.requests))
                 snapshots = [json.loads(line) for line in (work / "snapshots.jsonl").read_text().splitlines()]
@@ -140,11 +190,19 @@ else:
                 count = len(server.requests)
                 for flag, expected in (("--total-tokens", 80 * count), ("--input-tokens", 50 * count),
                                        ("--output-tokens", 20 * count), ("--cache-read-tokens", 40 * count),
-                                       ("--cache-creation-tokens", 10 * count), ("--cost-usd", 0.002 * count)):
+                                       ("--cache-creation-tokens", 10 * count), ("--cost-usd", (1.0 if length_stop else 0.002) * count)):
                     self.assertAlmostEqual(float(last[last.index(flag) + 1]), expected)
                 self.assertNotIn("fake-native-test-key", (work / ".scorebench/openrouter/usage.jsonl").read_text())
                 self.assertTrue(json.loads((work / ".scorebench/openrouter/result.json").read_text())["completion_confirmed"])
                 self.assertIn('"finish"', (work / "pings.jsonl").read_text())
+                if length_stop:
+                    self.assertEqual(count, 3)
+                    recovery = json.loads((work / ".scorebench/openrouter/reentries.json").read_text())
+                    self.assertEqual(len(recovery["attempts"]), 1)
+                    native = [json.loads(line) for line in (work / ".scorebench/openrouter/native-output.jsonl").read_text().splitlines()]
+                    self.assertEqual({e["sessionID"] for e in native}, {recovery["session_id"]})
+                    self.assertTrue(any(e.get("part", {}).get("reason") == "length" for e in native))
+                    self.assertIn('"resume"', (work / "pings.jsonl").read_text())
                 print(f"{kind}/{model}/{effort}: {count} real CLI requests, tool round trip, zero baseline and final snapshot verified")
             finally:
                 server.shutdown()
@@ -154,6 +212,14 @@ else:
     @unittest.skipUnless(os.environ.get("SCOREBENCH_TEST_OPENCODE_BIN"), "set SCOREBENCH_TEST_OPENCODE_BIN")
     def test_opencode(self):
         self.run_agent("OpenCode", os.environ["SCOREBENCH_TEST_OPENCODE_BIN"])
+
+    @unittest.skipUnless(os.environ.get("SCOREBENCH_TEST_OPENCODE_BIN"), "set SCOREBENCH_TEST_OPENCODE_BIN")
+    def test_opencode_length_stop_resumes_same_session_with_cumulative_cost(self):
+        self.run_agent("OpenCode", os.environ["SCOREBENCH_TEST_OPENCODE_BIN"], effort="high", length_stop=True)
+
+    @unittest.skipUnless(os.environ.get("SCOREBENCH_TEST_OPENCODE_BIN"), "set SCOREBENCH_TEST_OPENCODE_BIN")
+    def test_opencode_retained_recovery_checks_then_resumes_without_reset(self):
+        self.run_agent("OpenCode", os.environ["SCOREBENCH_TEST_OPENCODE_BIN"], effort="high", length_stop=True, retained_recovery=True)
 
     @unittest.skipUnless(os.environ.get("SCOREBENCH_TEST_PI_BIN"), "set SCOREBENCH_TEST_PI_BIN")
     def test_pi(self):

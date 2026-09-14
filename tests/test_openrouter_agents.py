@@ -128,6 +128,33 @@ class NativeRoutingTests(unittest.TestCase):
                 with self.assertRaisesRegex(SystemExit, "metadata unavailable"):
                     agents.model_metadata("provider/new-model", "https://openrouter.ai")
 
+    def test_opencode_larger_output_does_not_inherit_smallest_provider_limit(self):
+        data = {"id": "deepseek/flash", "name": "Flash", "endpoints": [
+            {"supported_parameters": ["tools", "reasoning"], "context_length": 1000000,
+             "max_completion_tokens": limit, "pricing": {"prompt": "0.000001", "completion": "0.000002"}}
+            for limit in (32768, 131072, 384000)
+        ]}
+        with mock.patch.object(agents.urllib.request, "urlopen", return_value=io.BytesIO(json.dumps({"data": data}).encode())):
+            metadata = agents.model_metadata("deepseek/flash", "https://openrouter.ai", output_target=128000)
+        self.assertEqual(metadata["maxTokens"], 128000)
+        self.assertEqual(metadata["contextWindow"], 1000000)
+        self.assertAlmostEqual(metadata["resumeCostUpperBound"], 1.256)
+        env = {"OPENCODE_EXPERIMENTAL_OUTPUT_TOKEN_MAX": "32000"}
+        agents.route_agent("OpenCode", ["opencode", "run", "-m", "openrouter/deepseek/flash"],
+                           env, "http://localhost:1", Path("/tmp/worker"), metadata)
+        self.assertEqual(env["OPENCODE_EXPERIMENTAL_OUTPUT_TOKEN_MAX"], "128000")
+        self.assertEqual(json.loads(env["OPENCODE_CONFIG_CONTENT"])["provider"]["openrouter"]["models"]
+                         ["deepseek/flash"]["limit"]["output"], 128000)
+
+    def test_opencode_output_never_exceeds_provider_limit(self):
+        data = {"id": "small/model", "name": "Small", "endpoints": [
+            {"supported_parameters": ["tools"], "context_length": 8192,
+             "max_completion_tokens": 4096, "pricing": {"prompt": "0.000001", "completion": "0.000002"}},
+        ]}
+        with mock.patch.object(agents.urllib.request, "urlopen", return_value=io.BytesIO(json.dumps({"data": data}).encode())):
+            metadata = agents.model_metadata("small/model", "https://openrouter.ai", output_target=128000)
+        self.assertEqual(metadata["maxTokens"], 4096)
+
 
 class LedgerTests(unittest.TestCase):
     def snapshot(self, records):
