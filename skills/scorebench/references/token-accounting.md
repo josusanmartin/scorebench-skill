@@ -282,6 +282,25 @@ allowing already-started responses to drain. Neither SDK retries nor later
 successful receipts resolve the missing cost. Do not use length-limit recovery
 for an incomplete ledger or report the last accepted snapshot as final spend.
 
+Retained OpenCode request/header transport failures have a separate owner-approved
+partial-accounting recovery mode. See the canonical experiment-launching runbook:
+`--recover-session ses_ORIGINAL --accept-accounting-gap --check` assesses the same
+session without inference or accounting writes. Execution without `--check` needs
+explicit owner acceptance that missing charges remain unknown, confirmed tokens
+and cost are lower bounds, and remaining budget is only an upper bound. Do not
+choose this mode autonomously or imply a hard total-spend guarantee.
+
+The supervisor preserves every receipt and the original baseline, records hashed
+evidence in `accepted-gaps.json`, and publishes `openrouter_usage_partial` with
+parsed confidence. The token helper automatically reads this acknowledgement for
+future usage and submission flags. Do not override its provenance to exact.
+Another gap still stops inference; acknowledgement covers only the recorded
+errors, not future ones. `accounting_ok: true` means accepted accounting, while
+`accounting_complete: false` and `accounting_quality: partial` identify these
+incomplete totals even after successful completion. Do not remove error rows or
+manually write acknowledgement files. Missing-cost receipts and corrupt ledgers
+remain blockers. Both updated skill and server support are required.
+
 On failures, preserve `transport-errors.jsonl` beside the ledger as well as
 `result.json` and native logs. Transport diagnostics record a local request ID,
 phase, exception type, and attempt number, never credentials or prompt text.

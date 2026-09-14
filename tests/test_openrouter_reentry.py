@@ -147,3 +147,19 @@ class ReentryTests(unittest.TestCase):
         self.session["info"]["directory"] = "/other"
         with self.assertRaises(AccountingError):
             check()
+
+    def test_gap_recovery_preserves_native_identity_but_accepts_interrupted_response(self):
+        self.session["messages"][-1]["info"].update(finish=None, error={"name": "APIError"})
+        with mock.patch("openrouter_reentry.subprocess.run", return_value=
+                        subprocess.CompletedProcess("opencode", 0, json.dumps(self.session), "")):
+            inspect_session(COMMAND, "ses_probe", self.root, {}, accounting_gap=True)
+        with mock.patch("openrouter_reentry.subprocess.run", return_value=
+                        subprocess.CompletedProcess("opencode", 0, json.dumps(self.session), "")):
+            with self.assertRaises(AccountingError):
+                inspect_session(COMMAND, "ses_probe", self.root, {})
+        result = self.admit(check=True, accounting_gap=True)
+        self.assertFalse(result["accounting_complete"])
+        self.assertTrue(result["remaining_is_upper_bound"])
+        resumed = resume_command(COMMAND, "ses_probe", accounting_gap=True)
+        self.assertIn("lower bounds", resumed[-1])
+        self.assertNotIn("original goal", resumed)

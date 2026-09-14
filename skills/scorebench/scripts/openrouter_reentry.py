@@ -21,6 +21,15 @@ CONTINUE_PROMPT = (
     "The supervisor owns final usage and completion. Check progress and obey the remaining budget "
     "and explicit stops; do not restart the run or repeat unchanged submissions."
 )
+GAP_PROMPT = (
+    "The owner explicitly accepted partial accounting to recover this transport interruption. "
+    "Continue the original assigned ScoreBench goal in the SAME session and workspace; preserve "
+    "run identity, model, effort, receipts and zero baseline. Existing receipts omit an unknown "
+    "charge: cost and tokens are lower bounds, and remaining budget is only an upper bound. "
+    "Do not claim exact accounting or reset the ledger. The supervisor owns finalization. "
+    "Obey budget and explicit stops. Inspect your own history before retrying an uncertain "
+    "submission; never duplicate it blindly. Use concrete, bounded tool work."
+)
 
 
 def write_json(path: Path, value: dict) -> None:
@@ -30,7 +39,7 @@ def write_json(path: Path, value: dict) -> None:
     os.replace(temp, path)
 
 
-def resume_command(command: list[str], session: str) -> list[str]:
+def resume_command(command: list[str], session: str, *, accounting_gap=False) -> list[str]:
     if not re.fullmatch(r"ses_[A-Za-z0-9]+", session):
         raise AccountingError("invalid retained OpenCode session ID")
     if command[1:2] != ["run"] or option(command, "--format") != "json":
@@ -60,7 +69,7 @@ def resume_command(command: list[str], session: str) -> list[str]:
         index += 1
     if len(messages) != 1:
         raise AccountingError("recovery requires one original worker prompt")
-    return [*base, "--session", session, CONTINUE_PROMPT]
+    return [*base, "--session", session, GAP_PROMPT if accounting_gap else CONTINUE_PROMPT]
 
 
 class SessionOutput:
@@ -108,7 +117,7 @@ class SessionOutput:
                 partial = not chunk.endswith(b"\n")
 
 
-def inspect_session(command: list[str], session: str, workspace: Path, env: dict) -> None:
+def inspect_session(command: list[str], session: str, workspace: Path, env: dict, *, accounting_gap=False) -> None:
     result = subprocess.run([command[0], "--pure", "export", session], cwd=workspace,
                             env=env, capture_output=True, timeout=30)
     if result.returncode:
@@ -121,14 +130,14 @@ def inspect_session(command: list[str], session: str, workspace: Path, env: dict
         assistants = [m["info"] for m in data["messages"] if m["info"].get("role") == "assistant"]
         last = assistants[-1]
         provider, model = selected_route("OpenCode", command)
-        if (last.get("finish") != "length" or last.get("error")
+        if ((not accounting_gap and (last.get("finish") != "length" or last.get("error")))
                 or any(m.get("modelID") != model or m.get("providerID") != provider for m in assistants)):
             raise ValueError("session is not a length-limited run of the assigned model")
     except (ValueError, KeyError, IndexError, TypeError) as exc:
         raise AccountingError("retained OpenCode session failed identity/length-stop validation") from exc
 
 
-def admit_reentry(publisher, metadata: dict, command: list[str], session: str, *, manual=False, check=False) -> dict:
+def admit_reentry(publisher, metadata: dict, command: list[str], session: str, *, manual=False, check=False, accounting_gap=False) -> dict:
     resume_command(command, session)
     if not check:
         publisher.publish()
@@ -161,7 +170,7 @@ def admit_reentry(publisher, metadata: dict, command: list[str], session: str, *
         raise AccountingError("insufficient resume budget for a cold-context request; retain the worker")
     if manual and publisher.read("gate").get("ready") is not True:
         raise AccountingError("retained worker execution gate is not ready")
-    inspect_session(command, session, publisher.workspace, publisher.env)
+    inspect_session(command, session, publisher.workspace, publisher.env, accounting_gap=accounting_gap)
     path = publisher.log.parent / "reentries.json"
     record = json.loads(path.read_text()) if path.exists() else {"run_id": run_id, "session_id": session, "attempts": []}
     if record["run_id"] != run_id or record["session_id"] != session or len(record["attempts"]) >= MAX_REENTRIES:
@@ -169,12 +178,15 @@ def admit_reentry(publisher, metadata: dict, command: list[str], session: str, *
     if check:
         return {"recoverable": True, "run_id": run_id, "session_id": session,
                 "remaining": remaining, "resume_cost_estimate": estimate,
+                "accounting_complete": not accounting_gap,
+                "remaining_is_upper_bound": accounting_gap,
                 "context_window": metadata.get("contextWindow"), "max_output_tokens": metadata.get("maxTokens")}
-    record["attempts"].append({"reason": "length", "manual": manual, "remaining": remaining,
+    record["attempts"].append({"reason": "accounting_gap" if accounting_gap else "length", "manual": manual, "remaining": remaining,
                                "resume_cost_estimate": estimate, "at": time.time(),
                                "context_window": metadata.get("contextWindow"), "max_output_tokens": metadata.get("maxTokens")})
     # Reserve the attempt before reopening lifecycle or launching another model.
     write_json(path, record)
-    if not publisher.ping("resume", "OpenCode same-session continuation after output limit"):
+    if not publisher.ping("resume", "OpenCode same-session recovery; owner accepted incomplete accounting" if accounting_gap
+                          else "OpenCode same-session continuation after output limit"):
         raise AccountingError("could not confirm the resume heartbeat")
     return record

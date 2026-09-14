@@ -25,7 +25,8 @@ from typing import Mapping, Sequence
 from openrouter_proxy import DEFAULT_UPSTREAM, Handler, UsageLog
 from openrouter_agents import agent_kind, check_installation, model_metadata, route_agent, validate_route
 from openrouter_accounting import Publisher
-from openrouter_reentry import SessionOutput, admit_reentry, resume_command
+from openrouter_reentry import SessionOutput, admit_reentry, resume_command, write_json
+from openrouter_gaps import ACK_FILE, prepare_ack
 
 
 OPENROUTER_HOST = "openrouter.ai"
@@ -408,6 +409,8 @@ def main(argv: Sequence[str] | None = None) -> int:
     parser.add_argument("--expected-effort", default="", help="immutable reasoning effort from the assigned recipe")
     parser.add_argument("--check", action="store_true", help="validate launch prerequisites without starting a run or model")
     parser.add_argument("--recover-session", default="", help="explicitly resume a retained, length-limited OpenCode session")
+    parser.add_argument("--accept-accounting-gap", action="store_true",
+                        help="owner acknowledgement: resume a retained transport failure with incomplete cost/token totals")
     parser.add_argument("--no-auto-reentry", action="store_true", help="retain length-limited OpenCode exits for explicit recovery")
     parser.add_argument(
         "--runtime-control",
@@ -428,6 +431,8 @@ def main(argv: Sequence[str] | None = None) -> int:
     workspace = Path(args.workspace).expanduser().resolve()
     if args.recover_session and (agent_kind(args.harness) != "opencode" or not args.runtime_control):
         parser.error("--recover-session requires supervised OpenCode")
+    if args.accept_accounting_gap and not args.recover_session:
+        parser.error("--accept-accounting-gap requires --recover-session; never enables automatic gap recovery")
     if (agent_kind(args.harness) == "opencode" and not args.recover_session
             and (workspace / ".scorebench/openrouter/result.json").exists()):
         raise SystemExit("OpenCode worker already exited; use documented --recover-session checks, not a new launch")
@@ -487,6 +492,7 @@ def main(argv: Sequence[str] | None = None) -> int:
         lock.close()
         raise SystemExit("OpenRouter ledger already belongs to a running worker")
 
+    gap_ack = None
     if args.recover_session:
         # Recovery may neither initialize an absent baseline nor replace a live
         # writer. Validate everything under the same ledger lock used for launch.
@@ -494,17 +500,44 @@ def main(argv: Sequence[str] | None = None) -> int:
             if not state_path.is_file() or not log_path.is_file():
                 raise RuntimeError("retained ledger and original token baseline are required")
             result = json.loads((accounting_dir / "result.json").read_text())
-            if result.get("accounting_ok") is not True or result.get("completion_confirmed") is not False:
+            control_path = workspace / ".scorebench/runtime-control.json"
+            control = json.loads(control_path.read_text()) if control_path.exists() else {}
+            if args.accept_accounting_gap:
+                retry_partial = result.get("accounting_quality") == "partial" and result.get("accounting_complete") is False
+                if ((result.get("accounting_ok") is not False and not retry_partial) or result.get("completion_confirmed") is not False
+                        or result.get("runtime_control") not in ({}, {"reason": "accounting_unavailable"})
+                        or control != result["runtime_control"]):
+                    raise RuntimeError("partial recovery requires a retained accounting-unavailable transport stop")
+                start = json.loads((workspace / ".scorebench/supervisor-run-start.json").read_text())
+                gap_ack = prepare_ack(log_path, state_path, run_id=start["run"]["run_id"],
+                                      session_id=args.recover_session, result=result, control=control)
+            elif result.get("accounting_ok") is not True or result.get("completion_confirmed") is not False:
+                if result.get("runtime_control", {}).get("reason") == "accounting_unavailable":
+                    raise RuntimeError("missing OpenRouter receipt blocks exact recovery; owner may explicitly use --accept-accounting-gap with --check to assess partial recovery")
                 raise RuntimeError("recovery requires an accounted, incomplete retained worker")
-            if result.get("runtime_control"):
+            if result.get("runtime_control") and not args.accept_accounting_gap:
                 raise RuntimeError("controlled stops cannot be recovered as length-limit exits")
             recovery_env = dict(env)
             recovery_env["SCOREBENCH_OPENROUTER_LOG"] = str(log_path)
             recovery_env["SCOREBENCH_TOKEN_STATE"] = str(state_path)
             route_agent(args.harness, command, recovery_env, "http://127.0.0.1:1", workspace, metadata)
             preview = Publisher(workspace, recovery_env)
-            preview.current_flags()  # Validate the source binding and billed cost without rewriting them.
-            assessment = admit_reentry(preview, metadata, command, args.recover_session, manual=True, check=True)
+            preview.gap_preview = gap_ack
+            recovery_env["SCOREBENCH_ACCOUNTING_SUPERVISED"] = "1"
+            preview_flags = preview.current_flags()  # Validate binding and all retained receipts without writes.
+            assessment = admit_reentry(preview, metadata, command, args.recover_session, manual=True, check=True,
+                                       accounting_gap=args.accept_accounting_gap)
+            if gap_ack:
+                # The last server snapshot can predate several complete receipts.
+                known_cost = float(preview_flags[preview_flags.index("--cost-usd") + 1])
+                budget = preview.read("progress")["progress"]["budget"]
+                if budget.get("type") != "cost":
+                    raise RuntimeError("partial transport recovery currently requires a fixed cost budget")
+                remaining = min(assessment["remaining"], max(0.0, float(budget["target"]) - known_cost))
+                if remaining < metadata["resumeCostUpperBound"]:
+                    raise RuntimeError("insufficient confirmed remaining budget for partial recovery")
+                assessment.update(confirmed_cost_usd=known_cost, unknown_cost_usd=None,
+                                  acknowledged_gaps=len(gap_ack["gaps"]), remaining=remaining)
             if args.check:
                 print(json.dumps(assessment))
                 lock.close()
@@ -552,12 +585,23 @@ def main(argv: Sequence[str] | None = None) -> int:
                 server.allowed_models.add(small_model.removeprefix("openrouter/"))
         if env.get("SCOREBENCH_RUNTIME_CONTROL", "").lower() in TRUTHY:
             publisher = Publisher(workspace, env)
+            if gap_ack:
+                publisher.gap_preview = gap_ack
+                # Do not persist an acknowledgement or clear the old stop until
+                # the server accepts the partial provenance and exposes it back.
+                publisher.publish()
+                progress = publisher.read("progress")["progress"]
+                if progress.get("accounting_quality") != "partial":
+                    raise RuntimeError("server does not support partial OpenRouter accounting; recovery refused")
+                write_json(accounting_dir / ACK_FILE, gap_ack)
+                publisher.gap_preview = None
+                control_path.unlink(missing_ok=True)
             publisher.initialize()
         if publisher and agent_kind(args.harness) == "opencode":
             session = args.recover_session
             if session:
-                admit_reentry(publisher, metadata, command, session, manual=True)
-                routed_command = resume_command(routed_command, session)
+                admit_reentry(publisher, metadata, command, session, manual=True, accounting_gap=args.accept_accounting_gap)
+                routed_command = resume_command(routed_command, session, accounting_gap=args.accept_accounting_gap)
             while True:
                 output = SessionOutput(accounting_dir, session)
                 returncode = _run_supervised(routed_command, env=env, workspace=workspace,
@@ -572,6 +616,7 @@ def main(argv: Sequence[str] | None = None) -> int:
                 publisher.publish()
                 budget = publisher.read("progress")["progress"]["budget"]
                 if budget.get("reached") is True or (budget.get("type") == "cost"
+                    and budget.get("accounting_complete") is not False
                     and budget.get("available") is True and budget.get("used", 0) >= budget.get("target", float("inf")) * 0.95):
                     break
                 admit_reentry(publisher, metadata, command, output.session)

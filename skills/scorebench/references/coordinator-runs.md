@@ -269,6 +269,13 @@ a replacement session to recover. Inspect `lifecycle_confirmed` in the wrapper
 result; missing server confirmation is an escalation, not proof of completion.
 Do not bind a coordinator Codex/Claude transcript to such a worker.
 
+For a retained OpenCode request/header transport gap, the runbook also offers
+`--accept-accounting-gap` with `--recover-session ... --check`. Explain that cost
+and tokens will remain lower bounds, not exact totals, and obtain explicit owner
+acceptance before executing. This does not reset the budget, recover an unknown
+receipt, or allow future gaps to be ignored. A guard refusal is not a new model
+failure and does not authorize a replacement run.
+
 1. Create and verify fresh lane-specific work and agent-state volumes.
 2. Seed only allowlisted files, installed skills, bootstrap, token helper, and
    staged goal.

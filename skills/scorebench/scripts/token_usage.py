@@ -9,6 +9,8 @@ import os
 from pathlib import Path
 from typing import Any
 
+from openrouter_gaps import ACK_FILE, PARTIAL_SOURCE, digest, load_ack
+
 
 # No built-in default: any fixed value is either relative (and silently follows
 # the working directory) or hardcodes one environment's layout. Workers set
@@ -42,6 +44,7 @@ class UsageSnapshot:
     # Authoritative USD cost, when the source reports one (OpenRouter). Kept out
     # of components() because it is a float, not a token count.
     cost_usd: float | None = None
+    accounting_incomplete: bool = False
 
     def components(self) -> dict[str, int]:
         return {
@@ -626,7 +629,7 @@ def openrouter_usage_snapshot(usage: dict[str, Any]) -> UsageSnapshot | None:
     )
 
 
-def openrouter_jsonl_snapshot(path: Path) -> UsageSnapshot:
+def openrouter_jsonl_snapshot(path: Path, *, accepted_gaps: dict | None = None) -> UsageSnapshot:
     """Sum every per-response usage record the OpenRouter proxy has logged.
 
     Each line is one response (a bare usage object, or a record with a "usage"
@@ -653,6 +656,9 @@ def openrouter_jsonl_snapshot(path: Path) -> UsageSnapshot:
             raise SystemExit(
                 f"invalid OpenRouter usage JSONL at {path}:{line_number}: {exc.msg}"
             ) from exc
+        if (isinstance(record, dict) and record.get("accounting_error") and accepted_gaps
+                and accepted_gaps["gaps"].get(str(line_number)) == digest(lines[line_number - 1].encode())):
+            continue
         if not isinstance(record, dict) or record.get("accounting_error"):
             raise SystemExit(f"incomplete OpenRouter usage at {path}:{line_number}")
         response_id = record.get("id")
@@ -680,6 +686,7 @@ def openrouter_jsonl_snapshot(path: Path) -> UsageSnapshot:
             cache_read_tokens=0,
             reasoning_output_tokens=0,
             cost_usd=0.0,
+            accounting_incomplete=accepted_gaps is not None,
         )
     aggregated = aggregate_snapshots(snapshots, path, "OpenRouter usage")
     return UsageSnapshot(
@@ -692,6 +699,7 @@ def openrouter_jsonl_snapshot(path: Path) -> UsageSnapshot:
         cost_usd=(
             round(math.fsum(costs), COST_DECIMAL_PLACES) if len(costs) == len(snapshots) else None
         ),
+        accounting_incomplete=accepted_gaps is not None,
     )
 
 
@@ -706,7 +714,12 @@ def read_snapshot(
     if args.grok_log and not args.grok_jsonl:
         raise SystemExit("--grok-log requires --grok-jsonl")
     if args.openrouter_jsonl:
-        return openrouter_jsonl_snapshot(Path(args.openrouter_jsonl))
+        path = Path(args.openrouter_jsonl)
+        try:
+            ack = load_ack(path, resolve_state_path(args.state), preview=getattr(args, "openrouter_gap_ack", ""))
+        except (ValueError, OSError) as exc:
+            raise SystemExit("invalid OpenRouter accounting-gap acknowledgement") from exc
+        return openrouter_jsonl_snapshot(path, accepted_gaps=ack)
     if args.codex_jsonl:
         return codex_jsonl_snapshot(
             Path(args.codex_jsonl),
@@ -848,6 +861,10 @@ def cmd_start(args: argparse.Namespace) -> int:
         )
         return 0
 
+    if args.openrouter_jsonl and (getattr(args, "openrouter_gap_ack", "")
+            or Path(args.openrouter_jsonl).with_name(ACK_FILE).exists()):
+        raise SystemExit("cannot replace a retained OpenRouter baseline after acknowledging an accounting gap")
+
     snapshot = read_snapshot(args, accounting_version=ACCOUNTING_VERSION)
     tokens_source = tokens_source_from_args(args) or "codex_goal"
     confidence = args.confidence or "exact"
@@ -975,6 +992,8 @@ def current_provenance(
 def cmd_status(args: argparse.Namespace) -> int:
     state, snapshot, run_total, run_components, run_cost = current_run_usage(args)
     tokens_source, usage_source, confidence = current_provenance(args, state)
+    if snapshot.accounting_incomplete:
+        tokens_source, confidence = PARTIAL_SOURCE, "parsed"
     payload = {
         "absolute_total_tokens": snapshot.total_tokens,
         "accounting_version": state.get("accounting_version", 1),
@@ -986,6 +1005,7 @@ def cmd_status(args: argparse.Namespace) -> int:
         "tokens_total_source": tokens_source,
         "usage_source": usage_source,
         "confidence": confidence,
+        "accounting_complete": not snapshot.accounting_incomplete,
     }
     if run_cost is not None:
         payload["run_cost_usd"] = run_cost
@@ -994,8 +1014,10 @@ def cmd_status(args: argparse.Namespace) -> int:
 
 
 def cmd_flags(args: argparse.Namespace) -> int:
-    state, _snapshot, run_total, run_components, run_cost = current_run_usage(args)
+    state, snapshot, run_total, run_components, run_cost = current_run_usage(args)
     tokens_source, usage_source, confidence = current_provenance(args, state)
+    if snapshot.accounting_incomplete:
+        tokens_source, confidence = PARTIAL_SOURCE, "parsed"
     component_flags = {
         "input_tokens": "--input-tokens",
         "output_tokens": "--output-tokens",
@@ -1030,6 +1052,7 @@ def cmd_flags(args: argparse.Namespace) -> int:
 
 
 def add_total_args(parser: argparse.ArgumentParser, *, allow_empty: bool = False) -> None:
+    parser.add_argument("--openrouter-gap-ack", default="", help=argparse.SUPPRESS)
     parser.add_argument(
         "--state",
         default=DEFAULT_STATE,

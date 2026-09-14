@@ -10,6 +10,7 @@ import sys
 import time
 
 import token_usage
+from openrouter_gaps import PARTIAL_SOURCE
 
 
 class AccountingError(RuntimeError):
@@ -24,6 +25,7 @@ class Publisher:
         self.state = Path(env["SCOREBENCH_TOKEN_STATE"])
         self.last_flags: list[str] | None = None
         self.lifecycle_attempts: list[dict] = []
+        self.gap_preview: dict | None = None
 
     def read(self, name: str) -> dict:
         result = subprocess.run(["scorebench", "run", name], cwd=self.workspace, env=self.env,
@@ -58,7 +60,8 @@ class Publisher:
     def helper(self, command: str) -> str:
         result = subprocess.run(
             [sys.executable, str(Path(__file__).with_name("token_usage.py")), command,
-             "--state", str(self.state), "--openrouter-jsonl", str(self.log)],
+             "--state", str(self.state), "--openrouter-jsonl", str(self.log),
+             *(["--openrouter-gap-ack", json.dumps(self.gap_preview)] if self.gap_preview else [])],
             cwd=self.workspace, env=self.env, capture_output=True, text=True, timeout=15,
         )
         if result.returncode:
@@ -119,7 +122,11 @@ class Publisher:
                 confirmed = self.ping("failed", "OpenRouter worker exited; server did not certify completion")
             else:
                 confirmed = True
+        partial = PARTIAL_SOURCE in (self.last_flags or [])
         report = {"harness_returncode": returncode, "accounting_ok": accounting_ok,
+                  "accounting_complete": accounting_ok and not partial,
+                  "accounting_quality": "partial" if partial else "exact" if accounting_ok else "unavailable",
+                  "accounting_warnings": ["Missing OpenRouter receipt; tokens and cost are confirmed lower bounds, not complete totals"] if partial else [],
                   "completion_confirmed": completed, "runtime_control": control,
                   "trace_uploaded": False, "lifecycle_confirmed": confirmed,
                   "lifecycle_attempts": self.lifecycle_attempts}
