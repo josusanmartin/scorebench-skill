@@ -567,7 +567,7 @@ def usage_cost(usage: dict[str, Any]) -> float | None:
     value = usage.get("cost")
     if isinstance(value, bool):
         return None
-    if isinstance(value, (int, float)) and value >= 0:
+    if isinstance(value, (int, float)) and math.isfinite(value) and value >= 0:
         return float(value)
     return None
 
@@ -587,6 +587,10 @@ def openrouter_usage_snapshot(usage: dict[str, Any]) -> UsageSnapshot | None:
     if (prompt_tokens is None and input_tokens is None) or output_tokens is None:
         return None
     prompt_details = usage.get("prompt_tokens_details")
+    responses_details = usage.get("input_tokens_details")
+    if prompt_tokens is None and isinstance(responses_details, dict):
+        prompt_tokens = input_tokens
+        prompt_details = responses_details
     cache_read_tokens = None
     cache_creation_tokens = None
     if isinstance(prompt_details, dict):
@@ -596,7 +600,7 @@ def openrouter_usage_snapshot(usage: dict[str, Any]) -> UsageSnapshot | None:
         cache_read_tokens = usage_int(usage, "cache_read_input_tokens")
     if cache_creation_tokens is None:
         cache_creation_tokens = usage_int(usage, "cache_creation_input_tokens")
-    completion_details = usage.get("completion_tokens_details")
+    completion_details = usage.get("completion_tokens_details") or usage.get("output_tokens_details")
     reasoning_tokens = None
     if isinstance(completion_details, dict):
         reasoning_tokens = usage_int(completion_details, "reasoning_tokens")
@@ -631,6 +635,7 @@ def openrouter_jsonl_snapshot(path: Path) -> UsageSnapshot:
     """
     snapshots: list[UsageSnapshot] = []
     costs: list[float] = []
+    seen: dict[str, dict[str, Any]] = {}
     raw = path.read_text(encoding="utf-8")
     lines = raw.splitlines()
     for line_number, line in enumerate(lines, start=1):
@@ -648,14 +653,21 @@ def openrouter_jsonl_snapshot(path: Path) -> UsageSnapshot:
             raise SystemExit(
                 f"invalid OpenRouter usage JSONL at {path}:{line_number}: {exc.msg}"
             ) from exc
-        if not isinstance(record, dict):
-            continue
+        if not isinstance(record, dict) or record.get("accounting_error"):
+            raise SystemExit(f"incomplete OpenRouter usage at {path}:{line_number}")
+        response_id = record.get("id")
+        if isinstance(response_id, str) and response_id:
+            if response_id in seen:
+                if seen[response_id] != record:
+                    raise SystemExit(f"conflicting OpenRouter usage for response {response_id}")
+                continue
+            seen[response_id] = record
         usage = record.get("usage")
         if not isinstance(usage, dict):
             usage = record
         snapshot = openrouter_usage_snapshot(usage)
         if snapshot is None:
-            continue
+            raise SystemExit(f"invalid OpenRouter usage at {path}:{line_number}")
         snapshots.append(snapshot)
         if snapshot.cost_usd is not None:
             costs.append(snapshot.cost_usd)
@@ -678,7 +690,7 @@ def openrouter_jsonl_snapshot(path: Path) -> UsageSnapshot:
         cache_read_tokens=aggregated.cache_read_tokens,
         reasoning_output_tokens=aggregated.reasoning_output_tokens,
         cost_usd=(
-            round(math.fsum(costs), COST_DECIMAL_PLACES) if costs else None
+            round(math.fsum(costs), COST_DECIMAL_PLACES) if len(costs) == len(snapshots) else None
         ),
     )
 
@@ -741,7 +753,7 @@ def tokens_source_from_args(args: argparse.Namespace) -> str | None:
 
 def source_binding_from_args(args: argparse.Namespace) -> dict[str, Any] | None:
     paths: list[tuple[str, str]] = []
-    for name in ("codex_jsonl", "claude_jsonl", "grok_jsonl", "grok_log"):
+    for name in ("codex_jsonl", "claude_jsonl", "grok_jsonl", "grok_log", "openrouter_jsonl"):
         raw = getattr(args, name, None)
         if raw:
             paths.append((name, str(Path(raw).expanduser().resolve())))

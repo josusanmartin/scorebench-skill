@@ -252,6 +252,16 @@ OpenRouter is inactive: a revoked run credential or authoritative exhausted
 budget terminates the coding-harness process group, while transient request
 failures do not. Do not launch the inner coding harness directly.
 
+Pi and OpenCode currently use the OpenRouter manual-workspace path, not the
+Docker launcher. Their generated wrapper preflights the explicit provider/model
+and helper compatibility before run start. Use the assigned command from the
+launch prompt; see [OpenRouter accounting](token-accounting.md#openrouter-automatic-detection-with-authoritative-usd-cost).
+The wrapper pins the zero baseline, publishes usage, and owns the final ping.
+Only an OpenRouter API key is needed for these provider routes, not subscription
+logins to unrelated coding agents. Retain the native session/output logs;
+automatic trace upload and reentry are not available for these two harnesses.
+Do not bind a coordinator Codex/Claude transcript to such a worker.
+
 1. Create and verify fresh lane-specific work and agent-state volumes.
 2. Seed only allowlisted files, installed skills, bootstrap, token helper, and
    staged goal.

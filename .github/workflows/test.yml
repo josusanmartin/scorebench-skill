@@ -24,3 +24,20 @@ jobs:
         run: python -m compileall -q skills/scorebench/scripts tests
       - name: Run tests
         run: python -m unittest discover -s tests -v
+  native-openrouter:
+    runs-on: ubuntu-latest
+    timeout-minutes: 10
+    steps:
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
+      - uses: actions/setup-python@5fda3b95a4ea91299a34e894583c3862153e4b97 # v7.0.0
+        with:
+          python-version: "3.12"
+      - name: Install pinned native agents without lifecycle scripts
+        run: npm install --prefix "$RUNNER_TEMP/agents" --ignore-scripts --no-audit --no-fund @earendil-works/pi-coding-agent@0.85.1 opencode-linux-x64@1.17.14 node-linux-x64@22.19.0
+      - name: Exercise real agents against a local OpenRouter fixture
+        env:
+          SCOREBENCH_TEST_PI_BIN: ${{ runner.temp }}/agents/node_modules/.bin/pi
+          SCOREBENCH_TEST_OPENCODE_BIN: ${{ runner.temp }}/agents/node_modules/opencode-linux-x64/bin/opencode
+        run: |
+          export PATH="$RUNNER_TEMP/agents/node_modules/node-linux-x64/bin:$PATH"
+          python -m unittest discover -s tests -p 'test_openrouter*.py' -v

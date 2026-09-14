@@ -9,6 +9,7 @@ token-state paths consumed by ``token_usage.py``.
 from __future__ import annotations
 
 import argparse
+import fcntl
 import json
 import os
 from pathlib import Path
@@ -22,6 +23,8 @@ from http.server import ThreadingHTTPServer
 from typing import Mapping, Sequence
 
 from openrouter_proxy import DEFAULT_UPSTREAM, Handler, UsageLog
+from openrouter_agents import agent_kind, check_installation, model_metadata, route_agent, validate_route
+from openrouter_accounting import Publisher
 
 
 OPENROUTER_HOST = "openrouter.ai"
@@ -153,7 +156,19 @@ def detect_openrouter(
     mode: str,
 ) -> tuple[bool, str, str]:
     normalized_mode = mode.strip().lower() or "auto"
+    if normalized_mode not in TRUTHY | FALSY | {"auto"}:
+        raise SystemExit("--mode must be auto, on, or off")
     protocol = "anthropic" if "claude" in harness.lower() else "openai"
+    if agent_kind(harness):
+        provider, _model = validate_route(harness, command)
+        if provider == "openrouter":
+            if normalized_mode in FALSY:
+                raise SystemExit("cannot disable accounting for an explicitly selected OpenRouter model")
+            return True, "openai", f"{harness} selected OpenRouter"
+        if normalized_mode in TRUTHY:
+            raise SystemExit("selected provider is not OpenRouter")
+        if normalized_mode == "auto":
+            return False, "openai", f"{harness} selected a different provider"
     if normalized_mode in FALSY:
         return False, protocol, "disabled explicitly"
     if normalized_mode not in TRUTHY | {"auto"}:
@@ -289,7 +304,7 @@ def _terminate_process_group(
 
 
 def _run_supervised(
-    command: Sequence[str], *, workspace: Path, env: Mapping[str, str]
+    command: Sequence[str], *, workspace: Path, env: Mapping[str, str], publisher: Publisher | None = None
 ) -> int:
     process = subprocess.Popen(
         list(command),
@@ -312,8 +327,24 @@ def _run_supervised(
         poll_seconds = RUNTIME_CONTROL_POLL_SECONDS
 
     def monitor() -> None:
+        failures = 0
         while process.poll() is None and not stop_event.is_set():
-            reason = _runtime_control_reason(workspace=workspace, env=env)
+            reason = None
+            try:
+                if publisher:
+                    publisher.publish()
+                failures = 0
+            except Exception:
+                failures += 1
+                if failures == 1:
+                    print("ScoreBench usage publication delayed; retrying without resetting accounting", file=sys.stderr)
+                if failures >= 3:
+                    reason = "accounting_unavailable"
+            try:
+                reason = _runtime_control_reason(workspace=workspace, env=env) or reason
+            except Exception:
+                # A malformed/transient response must not kill the watchdog.
+                print("ScoreBench runtime check failed; retrying", file=sys.stderr)
             if reason:
                 _write_runtime_control(workspace, reason)
                 print(
@@ -337,15 +368,15 @@ def _run_supervised(
         raise
     finally:
         stop_event.set()
-        monitor_thread.join(timeout=RUNTIME_CONTROL_REQUEST_TIMEOUT_SECONDS + 2)
+        monitor_thread.join(timeout=45)
 
 
 def _run_child(
-    command: Sequence[str], *, workspace: Path, env: Mapping[str, str]
+    command: Sequence[str], *, workspace: Path, env: Mapping[str, str], publisher: Publisher | None = None
 ) -> int:
     runtime_control = env.get("SCOREBENCH_RUNTIME_CONTROL", "").strip().lower()
     if runtime_control in TRUTHY:
-        return _run_supervised(command, workspace=workspace, env=env)
+        return _run_supervised(command, workspace=workspace, env=env, publisher=publisher)
     return subprocess.run(
         list(command), env=dict(env), cwd=workspace, check=False
     ).returncode
@@ -356,6 +387,9 @@ def main(argv: Sequence[str] | None = None) -> int:
     parser.add_argument("--harness", required=True, help="coding harness name, for example Codex or Claude Code")
     parser.add_argument("--workspace", default=os.getcwd(), help="isolated worker workspace")
     parser.add_argument("--mode", default=os.environ.get("SCOREBENCH_OPENROUTER", "auto"), help="auto, on, or off")
+    parser.add_argument("--expected-model", default="", help="immutable model identifier from the assigned recipe")
+    parser.add_argument("--expected-effort", default="", help="immutable reasoning effort from the assigned recipe")
+    parser.add_argument("--check", action="store_true", help="validate launch prerequisites without starting a run or model")
     parser.add_argument(
         "--runtime-control",
         action="store_true",
@@ -373,8 +407,13 @@ def main(argv: Sequence[str] | None = None) -> int:
     if args.runtime_control:
         env["SCOREBENCH_RUNTIME_CONTROL"] = "1"
     workspace = Path(args.workspace).expanduser().resolve()
+    validate_route(args.harness, command, args.expected_model, args.expected_effort)
     enabled, protocol, reason = detect_openrouter(args.harness, command, env, args.mode)
     if not enabled:
+        if args.runtime_control and agent_kind(args.harness):
+            raise SystemExit("ScoreBench Pi/OpenCode workers currently require an explicit OpenRouter route; native-provider accounting is not supported")
+        if args.check:
+            return 0
         print(f"ScoreBench OpenRouter accounting inactive: {reason}", file=sys.stderr)
         return _run_child(command, env=env, workspace=workspace)
 
@@ -385,6 +424,26 @@ def main(argv: Sequence[str] | None = None) -> int:
             "refusing to launch without authoritative cost accounting"
         )
 
+    metadata = None
+    if agent_kind(args.harness):
+        for name, filename in (("SCOREBENCH_OPENROUTER_LOG", "usage.jsonl"),
+                               ("SCOREBENCH_TOKEN_STATE", "token-state.json")):
+            expected = workspace / ".scorebench/openrouter" / filename
+            if env.get(name) and Path(env[name]).expanduser().resolve() != expected.resolve():
+                raise SystemExit(f"{name} must be this worker's private workspace path; clear inherited accounting paths")
+        check_installation(command, env)
+        _provider, selected_model = validate_route(args.harness, command, args.expected_model)
+        metadata = model_metadata(selected_model, _upstream_for(protocol, env))
+        if args.expected_effort and not metadata["reasoning"]:
+            raise SystemExit("selected OpenRouter model does not expose reasoning support for this recipe")
+    if args.check:
+        # Validate inline OpenCode routing without writing a Pi extension or
+        # touching the run's ledger. A stale helper rejects --check itself.
+        if agent_kind(args.harness) == "opencode":
+            route_agent(args.harness, command, env, "http://127.0.0.1:1", workspace, metadata)
+        print("ScoreBench OpenRouter preflight passed", file=sys.stderr)
+        return 0
+
     accounting_dir = workspace / ".scorebench" / "openrouter"
     accounting_dir.mkdir(parents=True, exist_ok=True, mode=0o700)
     try:
@@ -393,6 +452,15 @@ def main(argv: Sequence[str] | None = None) -> int:
         pass
     log_path = Path(env.get("SCOREBENCH_OPENROUTER_LOG") or accounting_dir / "usage.jsonl").expanduser().resolve()
     state_path = Path(env.get("SCOREBENCH_TOKEN_STATE") or accounting_dir / "token-state.json").expanduser().resolve()
+
+    # A second launcher must never interleave generations in the same ledger.
+    log_path.parent.mkdir(parents=True, exist_ok=True, mode=0o700)
+    lock = open(str(log_path) + ".lock", "a")
+    try:
+        fcntl.flock(lock, fcntl.LOCK_EX | fcntl.LOCK_NB)
+    except BlockingIOError:
+        lock.close()
+        raise SystemExit("OpenRouter ledger already belongs to a running worker")
 
     server = ThreadingHTTPServer(("127.0.0.1", 0), Handler)
     server.upstream = _upstream_for(protocol, env)  # type: ignore[attr-defined]
@@ -407,20 +475,53 @@ def main(argv: Sequence[str] | None = None) -> int:
     env["SCOREBENCH_OPENROUTER_LOG"] = str(log_path)
     env["SCOREBENCH_TOKEN_STATE"] = str(state_path)
     env["SCOREBENCH_OPENROUTER_ACTIVE"] = "1"
-    routed_command = _route_child(args.harness, command, env, protocol, origin)
-
     thread = threading.Thread(target=server.serve_forever, daemon=True)
     thread.start()
     print(
         f"ScoreBench OpenRouter accounting active ({reason}); usage and authoritative cost -> {log_path}",
         file=sys.stderr,
     )
+    publisher = None
+    accounting_ok = False
+    returncode = 1
     try:
-        return _run_child(routed_command, env=env, workspace=workspace)
+        routed_command = (
+            route_agent(args.harness, command, env, origin, workspace, metadata)
+            if agent_kind(args.harness)
+            else _route_child(args.harness, command, env, protocol, origin)
+        )
+        if agent_kind(args.harness):
+            _provider, selected_model = validate_route(args.harness, command, args.expected_model)
+            server.allowed_models = {selected_model}
+            if agent_kind(args.harness) == "opencode":
+                small_model = json.loads(env["OPENCODE_CONFIG_CONTENT"])["small_model"]
+                server.allowed_models.add(small_model.removeprefix("openrouter/"))
+        if env.get("SCOREBENCH_RUNTIME_CONTROL", "").lower() in TRUTHY:
+            publisher = Publisher(workspace, env)
+            publisher.initialize()
+        returncode = _run_child(routed_command, env=env, workspace=workspace, publisher=publisher)
+    except KeyboardInterrupt:
+        returncode = 130
+    except Exception as exc:
+        print(f"ScoreBench OpenRouter worker error ({type(exc).__name__}); retain its workspace", file=sys.stderr)
+        returncode = 1
     finally:
         server.shutdown()
         server.server_close()
         thread.join(timeout=5)
+        if not server.usage_log.wait_idle(30):
+            server.usage_log.error("worker exited with an unfinished upstream request")
+        if publisher:
+            try:
+                publisher.publish()
+                accounting_ok = True
+            except Exception:
+                print("ScoreBench final OpenRouter accounting failed; retain the workspace and usage ledger", file=sys.stderr)
+                returncode = 1
+        lock.close()
+    if publisher and agent_kind(args.harness):
+        returncode = publisher.finalize(returncode, accounting_ok=accounting_ok)
+    return returncode
 
 
 if __name__ == "__main__":

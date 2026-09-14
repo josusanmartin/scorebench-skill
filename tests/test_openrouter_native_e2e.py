@@ -1,0 +1,178 @@
+"""Opt-in real CLI tests; all inference goes to a local deterministic provider.
+
+Set SCOREBENCH_TEST_OPENCODE_BIN and/or SCOREBENCH_TEST_PI_BIN to installed
+executables. No real provider credentials, account, or paid calls are used.
+"""
+import json
+import os
+from pathlib import Path
+import subprocess
+import sys
+import tempfile
+import threading
+import unittest
+from http.server import BaseHTTPRequestHandler, ThreadingHTTPServer
+
+SCRIPTS = Path(__file__).resolve().parents[1] / "skills/scorebench/scripts"
+MODEL = "scorebench/probe"
+
+
+class Provider(BaseHTTPRequestHandler):
+    def log_message(self, *args):
+        pass
+
+    def do_GET(self):
+        model = getattr(self.server, "model", MODEL)
+        if self.path != f"/api/v1/models/{model}/endpoints":
+            self.send_error(404)
+            return
+        body = json.dumps({"data": {"id": model, "name": "Probe", "endpoints": [{
+            "supported_parameters": ["tools", "reasoning"], "context_length": 32768,
+            "max_completion_tokens": 1000, "pricing": {"prompt": "0.000001", "completion": "0.000002"},
+        }]}}).encode()
+        self.send_response(200)
+        self.send_header("Content-Type", "application/json")
+        self.send_header("Content-Length", str(len(body)))
+        self.end_headers()
+        self.wfile.write(body)
+
+    def do_POST(self):
+        request = json.loads(self.rfile.read(int(self.headers["Content-Length"])))
+        with self.server.lock:
+            self.server.requests.append((self.path, self.headers.get("Authorization"), request))
+            seq = len(self.server.requests)
+        messages = request.get("messages", [])
+        tools = request.get("tools", [])
+        had_tool = any(message.get("role") == "tool" for message in messages)
+        tool = next((t["function"]["name"] for t in tools if t["function"]["name"] == "write"), None)
+        if not tool:
+            tool = next((t["function"]["name"] for t in tools if t["function"]["name"] == "apply_patch"), None)
+        call_tool = tool and not had_tool
+        delta = {"role": "assistant", "content": "ScoreBench probe complete."}
+        if call_tool:
+            props = next(t["function"]["parameters"]["properties"] for t in tools if t["function"]["name"] == tool)
+            arguments = {"filePath" if "filePath" in props else "path": str(self.server.workspace / "probe.txt"),
+                         "content": "scorebench-probe\n"}
+            if tool == "apply_patch":
+                arguments = {"patchText": "*** Begin Patch\n*** Add File: probe.txt\n+scorebench-probe\n*** End Patch"}
+            delta = {"role": "assistant", "tool_calls": [{"index": 0, "id": f"call-{seq}", "type": "function",
+                     "function": {"name": tool, "arguments": json.dumps(arguments)}}]}
+        usage = {"prompt_tokens": 100, "completion_tokens": 20, "total_tokens": 120,
+                 "prompt_tokens_details": {"cached_tokens": 40, "cache_write_tokens": 10},
+                 "completion_tokens_details": {"reasoning_tokens": 5}, "cost": 0.002}
+        envelope = {"id": f"gen-{seq}", "object": "chat.completion.chunk", "created": 1, "model": request["model"]}
+        events = [
+            {**envelope, "choices": [{"index": 0, "delta": delta, "finish_reason": None}]},
+            {**envelope, "choices": [{"index": 0, "delta": {}, "finish_reason": "tool_calls" if call_tool else "stop"}]},
+            {**envelope, "choices": [], "usage": usage},
+        ]
+        body = ("".join("data: " + json.dumps(event) + "\n\n" for event in events) + "data: [DONE]\n\n").encode()
+        self.send_response(200)
+        self.send_header("Content-Type", "text/event-stream")
+        self.send_header("Content-Length", str(len(body)))
+        self.end_headers()
+        self.wfile.write(body)
+
+
+class NativeE2ETests(unittest.TestCase):
+    def run_agent(self, kind, binary, model=MODEL, effort="low"):
+        with tempfile.TemporaryDirectory(prefix="scorebench-native-") as root:
+            root = Path(root)
+            home, work, bin_dir = root / "home", root / "work", root / "bin"
+            for path in (home, work, bin_dir):
+                path.mkdir()
+            cli = bin_dir / "scorebench"
+            cli.write_text(f"#!{sys.executable}\n" + '''import json,sys
+from pathlib import Path
+if sys.argv[1:3] == ['run','usage']:
+    with Path('snapshots.jsonl').open('a') as f: f.write(json.dumps(sys.argv[3:])+'\\n')
+    print('{"ok":true}')
+elif sys.argv[1:3] == ['run','progress']:
+    print('{"progress":{"budget":{"reached":false,"type":"none"}}}')
+elif sys.argv[1:3] == ['run','ping']:
+    with Path('pings.jsonl').open('a') as f: f.write(json.dumps(sys.argv[3:])+'\\n')
+    print('{"ok":true}')
+else:
+    raise SystemExit(2)
+''')
+            cli.chmod(0o755)
+            server = ThreadingHTTPServer(("127.0.0.1", 0), Provider)
+            server.lock, server.requests, server.workspace = threading.Lock(), [], work
+            server.model = model
+            thread = threading.Thread(target=server.serve_forever, daemon=True)
+            thread.start()
+            env = {"HOME": str(home), "PATH": f"{bin_dir}:{os.environ['PATH']}",
+                   "XDG_CONFIG_HOME": str(home / ".config"), "XDG_DATA_HOME": str(home / ".local/share"),
+                   "XDG_CACHE_HOME": str(home / ".cache"), "XDG_STATE_HOME": str(home / ".local/state"),
+                   "OPENROUTER_API_KEY": "fake-native-test-key",
+                   "OPENROUTER_BASE": f"http://127.0.0.1:{server.server_port}",
+                   "PI_OFFLINE": "1", "PI_TELEMETRY": "0", "OPENCODE_DISABLE_MODELS_FETCH": "true"}
+            prompt = "Use the write tool to create probe.txt containing scorebench-probe, then say done."
+            if kind == "Pi":
+                command = [binary, "--provider", "openrouter", "--model", model,
+                           "--thinking", effort, "--offline", "--no-extensions", "--no-skills", "--no-context-files",
+                           "--mode", "json", "--print", prompt]
+            else:
+                command = [binary, "run", "--pure", "--auto", "--model", "openrouter/" + model,
+                           "--variant", effort, "--title", "ScoreBench local probe", "--format", "json", prompt]
+            try:
+                result = subprocess.run([sys.executable, str(SCRIPTS / "openrouter_run.py"),
+                    "--harness", kind, "--workspace", str(work), "--expected-model", model, "--expected-effort", effort,
+                    "--runtime-control", "--", *command], env=env, cwd=work,
+                    capture_output=True, text=True, timeout=90)
+                self.assertEqual(result.returncode, 0, result.stderr[-5000:] + result.stdout[-3000:])
+                self.assertTrue((work / "probe.txt").exists(), result.stderr[-2000:] + result.stdout[-4000:])
+                self.assertEqual((work / "probe.txt").read_text(), "scorebench-probe\n")
+                private_sessions = work / ".scorebench/openrouter" / ("pi-agent" if kind == "Pi" else "opencode-data")
+                self.assertTrue(private_sessions.is_dir())
+                self.assertGreaterEqual(len(server.requests), 2)
+                self.assertLessEqual(len(server.requests), 6)
+                for path, auth, request in server.requests:
+                    self.assertEqual(path, "/api/v1/chat/completions")
+                    self.assertEqual(auth, "Bearer fake-native-test-key")
+                    self.assertEqual(request["model"], model)
+                    self.assertEqual(request.get("reasoning", {}).get("effort"), effort)
+                ledger = [json.loads(line) for line in (work / ".scorebench/openrouter/usage.jsonl").read_text().splitlines()]
+                self.assertEqual(len(ledger), len(server.requests))
+                snapshots = [json.loads(line) for line in (work / "snapshots.jsonl").read_text().splitlines()]
+                first, last = snapshots[0], snapshots[-1]
+                self.assertEqual(first[first.index("--total-tokens") + 1], "0")
+                count = len(server.requests)
+                for flag, expected in (("--total-tokens", 80 * count), ("--input-tokens", 50 * count),
+                                       ("--output-tokens", 20 * count), ("--cache-read-tokens", 40 * count),
+                                       ("--cache-creation-tokens", 10 * count), ("--cost-usd", 0.002 * count)):
+                    self.assertAlmostEqual(float(last[last.index(flag) + 1]), expected)
+                self.assertNotIn("fake-native-test-key", (work / ".scorebench/openrouter/usage.jsonl").read_text())
+                self.assertTrue(json.loads((work / ".scorebench/openrouter/result.json").read_text())["completion_confirmed"])
+                self.assertIn('"finish"', (work / "pings.jsonl").read_text())
+                print(f"{kind}/{model}/{effort}: {count} real CLI requests, tool round trip, zero baseline and final snapshot verified")
+            finally:
+                server.shutdown()
+                server.server_close()
+                thread.join(5)
+
+    @unittest.skipUnless(os.environ.get("SCOREBENCH_TEST_OPENCODE_BIN"), "set SCOREBENCH_TEST_OPENCODE_BIN")
+    def test_opencode(self):
+        self.run_agent("OpenCode", os.environ["SCOREBENCH_TEST_OPENCODE_BIN"])
+
+    @unittest.skipUnless(os.environ.get("SCOREBENCH_TEST_PI_BIN"), "set SCOREBENCH_TEST_PI_BIN")
+    def test_pi(self):
+        self.run_agent("Pi", os.environ["SCOREBENCH_TEST_PI_BIN"])
+
+    def test_offered_models_and_efforts_reach_provider_unchanged(self):
+        binaries = [(kind, os.environ.get(name)) for kind, name in (
+            ("Pi", "SCOREBENCH_TEST_PI_BIN"), ("OpenCode", "SCOREBENCH_TEST_OPENCODE_BIN"))]
+        if not any(binary for _, binary in binaries):
+            self.skipTest("set native CLI paths")
+        for kind, binary in binaries:
+            if not binary:
+                continue
+            for model in ("openai/gpt-6-astra", "anthropic/claude-fable-5.1",
+                          "x-ai/grok-4.6", "deepseek/deepseek-v4.1-flash"):
+                for effort in ("low", "medium", "high"):
+                    with self.subTest(kind=kind, model=model, effort=effort):
+                        self.run_agent(kind, binary, model, effort)
+
+
+if __name__ == "__main__":
+    unittest.main()

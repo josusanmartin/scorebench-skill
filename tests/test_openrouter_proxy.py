@@ -1,9 +1,11 @@
 import json
+import io
 import subprocess
 import sys
 import tempfile
 import threading
 import unittest
+from unittest import mock
 import urllib.error
 import urllib.request
 from http.server import BaseHTTPRequestHandler, ThreadingHTTPServer
@@ -99,6 +101,8 @@ class FakeUpstream(BaseHTTPRequestHandler):
             for chunk in chunks:
                 self.wfile.write(chunk)
                 self.wfile.flush()
+                if b'"slow": true' in body and chunk == chunks[0]:
+                    self.server.release.wait(3)
         else:
             self.send_response(200)
             self.send_header("Content-Type", "application/json")
@@ -150,6 +154,67 @@ class OpenRouterProxyTests(unittest.TestCase):
         self.assertEqual(len(lines), 1)
         self.assertEqual(lines[0]["usage"]["cost"], 0.01)
         self.assertEqual(lines[0]["id"], "gen-nonstream")
+
+    def test_stream_first_delta_arrives_before_generation_finishes(self):
+        self.upstream.release = threading.Event()
+        request = urllib.request.Request(self.base + "/chat/completions",
+            data=json.dumps({"stream": True, "slow": True}).encode(),
+            headers={"Content-Type": "application/json"})
+        try:
+            with urllib.request.urlopen(request, timeout=1) as response:
+                self.assertEqual(response.readline(), STREAM_CHUNKS[0].splitlines(keepends=True)[0])
+                self.assertEqual(self._log_lines(), [])
+                self.upstream.release.set()
+                response.read()
+            self.assertEqual(self._log_lines()[0]["usage"]["cost"], 0.004)
+        finally:
+            self.upstream.release.set()
+
+    def test_wrong_native_model_is_rejected_without_billable_request(self):
+        self.proxy.allowed_models = {"assigned/model"}
+        with self.assertRaises(urllib.error.HTTPError) as raised:
+            self._post({"model": "wrong/model", "messages": []})
+        self.assertEqual(raised.exception.code, 400)
+        raised.exception.close()
+        self.assertEqual(self._log_lines(), [])
+
+    def test_disconnect_while_sending_headers_still_drains_billed_usage(self):
+        handler = object.__new__(orp.Handler)
+        handler.server, handler.command, handler.path = self.proxy, "POST", "/chat/completions"
+        handler.send_response = mock.Mock()
+        handler.send_header = mock.Mock()
+        handler.end_headers = mock.Mock(side_effect=BrokenPipeError)
+        handler.wfile = mock.Mock()
+        upstream = io.BytesIO(b"".join(STREAM_CHUNKS))
+        upstream.status, upstream.headers = 200, {"Content-Type": "text/event-stream"}
+        handler._relay(upstream, record_usage=True)
+        self.assertEqual(self._log_lines()[0]["usage"]["cost"], 0.004)
+        handler.wfile.write.assert_not_called()
+
+    def test_ambiguous_generation_timeout_is_not_zero_cost(self):
+        handler = object.__new__(orp.Handler)
+        handler.server, handler.command, handler.path = self.proxy, "POST", "/chat/completions"
+        handler.headers, handler.rfile = {}, io.BytesIO()
+        handler.send_response, handler.send_header, handler.end_headers = mock.Mock(), mock.Mock(), mock.Mock()
+        handler.wfile = io.BytesIO()
+        with mock.patch.object(orp.urllib.request, "urlopen", side_effect=TimeoutError):
+            handler._forward()
+        handler.send_response.assert_called_once_with(502)
+        self.assertIn("cost are unknown", self._log_lines()[0]["accounting_error"])
+        with self.assertRaises(SystemExit):
+            usage_helper.openrouter_jsonl_snapshot(self.log)
+
+    def test_upstream_504_without_usage_cannot_be_treated_as_free(self):
+        handler = object.__new__(orp.Handler)
+        handler.server, handler.command, handler.path = self.proxy, "POST", "/chat/completions"
+        handler.send_response, handler.send_header, handler.end_headers = mock.Mock(), mock.Mock(), mock.Mock()
+        handler.wfile = io.BytesIO()
+        upstream = io.BytesIO(b'{"error":{"message":"gateway timeout"}}')
+        upstream.status, upstream.headers = 504, {"Content-Type": "application/json"}
+        handler._relay(upstream, record_usage=True)
+        self.assertEqual(self._log_lines()[0]["accounting_error"], "generation response omitted usage")
+        with self.assertRaises(SystemExit):
+            usage_helper.openrouter_jsonl_snapshot(self.log)
 
     def test_nonstreaming_responses_envelope_usage_capture(self):
         body = json.dumps({

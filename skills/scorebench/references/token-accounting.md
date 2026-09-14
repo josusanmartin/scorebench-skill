@@ -174,15 +174,48 @@ provider, or selected model identifies OpenRouter. The presence of
 `OPENROUTER_API_KEY` alone is deliberately insufficient. Use
 `SCOREBENCH_OPENROUTER=1` for a custom harness whose route cannot be inspected,
 or `SCOREBENCH_OPENROUTER=0` to disable wrapping explicitly. A detected route
-without a key fails closed.
+without a key fails closed. Explicit Pi/OpenCode OpenRouter selection cannot
+disable accounting with `SCOREBENCH_OPENROUTER=0`.
 
 The launcher selects OpenRouter's native Anthropic skin for Claude Code and its
-OpenAI-compatible Responses API for Codex and other harnesses. It replaces an
+OpenAI-compatible API for Codex and other harnesses. It replaces an
 existing Codex provider `base_url` override in place so a later command-line
 value cannot bypass accounting. Both top-level usage objects and the
 `response.completed` envelope are captured. It creates private, workspace-local
 `SCOREBENCH_OPENROUTER_LOG` and `SCOREBENCH_TOKEN_STATE` paths. Use one launcher
 and workspace per parallel worker. Never share a usage log.
+
+Pi and OpenCode use explicit native routes, not a generic `OPENAI_BASE_URL`
+override. Through the generated `launch-with-accounting` wrapper, use:
+
+```bash
+./launch-with-accounting opencode run --pure --auto --model openrouter/deepseek/deepseek-v4.1-flash \
+  --variant low --format json "$(cat worker-prompt.txt)"
+./launch-with-accounting pi --no-extensions --provider openrouter --model deepseek/deepseek-v4.1-flash \
+  --thinking low --mode json --print "$(cat worker-prompt.txt)"
+```
+
+Choose only the assigned harness, model, and effort. The wrapper checks the model
+and effort against the manifest before run start. Pi/OpenCode recipes support
+low, medium, and high effort. OpenCode receives explicit OpenRouter reasoning
+variants rather than relying on built-in model-name heuristics. Its provider overrides are child-only;
+the helper model is also on OpenRouter. Pi uses a private provider extension.
+At preflight and launch, public OpenRouter metadata supplies the exact model's
+tool support, limits, and reasoning capability, including models absent from
+the CLI's bundled catalog. This makes no paid inference call. Native CLI cost
+displays can use catalog estimates; ScoreBench instead records billed response
+cost. Global provider settings are not edited. Do not use OpenCode `--attach`,
+shared Pi sessions, or extensions that call a different provider independently.
+Native-provider token parsers for these two harnesses are not implemented.
+
+With runtime control enabled, the wrapper establishes a supervisor-owned zero
+baseline and publishes changed usage every 30 seconds and at exit. `start` reuses
+that baseline instead of replacing it. Keep using helper flags before submissions
+for candidate-specific checkpoints. Pi/OpenCode workers must leave the final ping
+to the wrapper: ScoreBench validates budget/target completion server-side. These
+manual workers do not support automatic reentry or sanitized native trace upload.
+Retain their native JSON/session logs and `.scorebench/openrouter/result.json`;
+never use Codex/Claude trace auto-discovery as a substitute.
 
 The helper automatically reads `$SCOREBENCH_OPENROUTER_LOG`; do not also pass a
 Codex, Claude, or Grok transcript source. Baseline and snapshot normally reduce
@@ -213,9 +246,12 @@ scorebench run progress
 ```
 
 This is a local ledger read plus one ScoreBench request; it does not make an
-extra model call. A single in-flight model response can still cross the budget,
-so stop starting new inference when the remaining amount is smaller than a
-normal request for that run.
+extra model call. A single in-flight model response can still cross the budget.
+Usage becomes available when that response completes; a flat ledger during a
+stream does not prove zero spend. Follow the assigned budget completion policy,
+not a rounded remaining-dollar estimate. Missing usage fails accounting; a
+partial set of reported costs is never a complete run cost. Preserve the ledger
+and report the missing measurement rather than resetting or fabricating it.
 
 Never broadly search `~/.codex`, `~/.claude`, browser profiles, shell snapshots,
 or old transcripts to infer usage.
