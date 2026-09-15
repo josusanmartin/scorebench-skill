@@ -9,6 +9,7 @@ import time
 import urllib.error
 import urllib.parse
 import urllib.request
+from openrouter_transport import openrouter_opener
 
 STREAM_ERRORS = {"generation stream omitted final usage", "generation stream interrupted before final usage"}
 
@@ -80,11 +81,6 @@ def lookup_model_alias(model: str, canonical: str, *, opener, base, timeout: int
             "data": {"id": model, "canonical_slug": canonical}}
 
 
-class _NoRedirect(urllib.request.HTTPRedirectHandler):
-    def redirect_request(self, *args, **kwargs):
-        return None
-
-
 def lookup_generation(generation_id: str, model: str, *, upstream: str, api_key: str,
                       require_final: bool = False) -> dict:
     base = urllib.parse.urlsplit(upstream)
@@ -95,7 +91,7 @@ def lookup_generation(generation_id: str, model: str, *, upstream: str, api_key:
     url = urllib.parse.urlunsplit((base.scheme, base.netloc, "/api/v1/generation",
                                   urllib.parse.urlencode({"id": generation_id}), ""))
     request = urllib.request.Request(url, headers={"Authorization": f"Bearer {api_key}", "Accept": "application/json"})
-    opener = urllib.request.build_opener(_NoRedirect())
+    opener = openrouter_opener()
     for attempt in range(3):
         try:
             with opener.open(request, timeout=3 if require_final else 10) as response:

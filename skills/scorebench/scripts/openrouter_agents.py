@@ -14,6 +14,7 @@ from pathlib import Path
 from typing import Sequence
 import urllib.parse
 import urllib.request
+from openrouter_transport import openrouter_opener
 
 
 def check_installation(command: Sequence[str], env: dict[str, str]) -> None:
@@ -29,7 +30,7 @@ def model_metadata(model: str, upstream: str, *, output_target: int = 0) -> dict
     """Resolve new models without waiting for the agent's bundled catalog."""
     url = upstream.rstrip("/") + "/api/v1/models/" + urllib.parse.quote(model, safe="/") + "/endpoints"
     try:
-        with urllib.request.urlopen(url, timeout=15) as response:
+        with openrouter_opener().open(url, timeout=15) as response:
             data = json.load(response)["data"]
         endpoints = [endpoint for endpoint in data["endpoints"]
                      if "tools" in endpoint.get("supported_parameters", [])]

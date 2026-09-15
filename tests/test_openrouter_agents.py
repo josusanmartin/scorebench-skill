@@ -118,13 +118,15 @@ class NativeRoutingTests(unittest.TestCase):
             {"supported_parameters": ["tools"], "context_length": 16000,
              "max_completion_tokens": 4000, "pricing": {"prompt": "0.000001"}},
         ]}
-        with mock.patch.object(agents.urllib.request, "urlopen", return_value=io.BytesIO(json.dumps({"data": data}).encode())):
+        with mock.patch.object(agents, "openrouter_opener") as opener:
+            opener.return_value.open.return_value = io.BytesIO(json.dumps({"data": data}).encode())
             result = agents.model_metadata("provider/new-model", "https://openrouter.ai")
         self.assertEqual((result["contextWindow"], result["maxTokens"]), (16000, 4000))
         self.assertEqual(result["cost"]["input"], 1)
         self.assertEqual(result["compat"]["thinkingFormat"], "openrouter")
         for invalid in ({**data, "id": "other/model"}, {**data, "endpoints": []}):
-            with mock.patch.object(agents.urllib.request, "urlopen", return_value=io.BytesIO(json.dumps({"data": invalid}).encode())):
+            with mock.patch.object(agents, "openrouter_opener") as opener:
+                opener.return_value.open.return_value = io.BytesIO(json.dumps({"data": invalid}).encode())
                 with self.assertRaisesRegex(SystemExit, "metadata unavailable"):
                     agents.model_metadata("provider/new-model", "https://openrouter.ai")
 
@@ -134,7 +136,8 @@ class NativeRoutingTests(unittest.TestCase):
              "max_completion_tokens": limit, "pricing": {"prompt": "0.000001", "completion": "0.000002"}}
             for limit in (32768, 131072, 384000)
         ]}
-        with mock.patch.object(agents.urllib.request, "urlopen", return_value=io.BytesIO(json.dumps({"data": data}).encode())):
+        with mock.patch.object(agents, "openrouter_opener") as opener:
+            opener.return_value.open.return_value = io.BytesIO(json.dumps({"data": data}).encode())
             metadata = agents.model_metadata("deepseek/flash", "https://openrouter.ai", output_target=128000)
         self.assertEqual(metadata["maxTokens"], 128000)
         self.assertEqual(metadata["contextWindow"], 1000000)
@@ -151,7 +154,8 @@ class NativeRoutingTests(unittest.TestCase):
             {"supported_parameters": ["tools"], "context_length": 8192,
              "max_completion_tokens": 4096, "pricing": {"prompt": "0.000001", "completion": "0.000002"}},
         ]}
-        with mock.patch.object(agents.urllib.request, "urlopen", return_value=io.BytesIO(json.dumps({"data": data}).encode())):
+        with mock.patch.object(agents, "openrouter_opener") as opener:
+            opener.return_value.open.return_value = io.BytesIO(json.dumps({"data": data}).encode())
             metadata = agents.model_metadata("small/model", "https://openrouter.ai", output_target=128000)
         self.assertEqual(metadata["maxTokens"], 4096)
 
