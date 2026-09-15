@@ -53,8 +53,8 @@ def write_json(path: Path, value: dict) -> None:
     os.replace(temp, path)
 
 
-def resume_command(command: list[str], session: str, *, accounting_gap=False, finish_reason="length") -> list[str]:
-    if not accounting_gap and finish_reason not in CONTINUABLE_FINISHES:
+def resume_command(command: list[str], session: str, *, accounting_gap=False, receipt_recovery=False, finish_reason="length") -> list[str]:
+    if not accounting_gap and not receipt_recovery and finish_reason not in CONTINUABLE_FINISHES:
         raise AccountingError("unsupported native finish reason for continuation")
     if not re.fullmatch(r"ses_[A-Za-z0-9]+", session):
         raise AccountingError("invalid retained OpenCode session ID")
@@ -86,6 +86,10 @@ def resume_command(command: list[str], session: str, *, accounting_gap=False, fi
     if len(messages) != 1:
         raise AccountingError("recovery requires one original worker prompt")
     prompt = GAP_PROMPT if accounting_gap else EARLY_STOP_PROMPT if finish_reason == "stop" else CONTINUE_PROMPT
+    if receipt_recovery:
+        prompt = ("The supervisor recovered missing usage receipts from OpenRouter's generation metadata. "
+                  "Continue the same assigned goal, session and workspace, preserving the original run and token baseline. "
+                  "Recovered receipts are already counted; do not add usage again. Check progress and obey budget and explicit stops.")
     return [*base, "--session", session, prompt]
 
 
@@ -164,7 +168,7 @@ def inspect_session(command: list[str], session: str, workspace: Path, env: dict
     return last.get("finish")
 
 
-def admit_reentry(publisher, metadata: dict, command: list[str], session: str, *, manual=False, check=False, accounting_gap=False, expected_finish=None) -> dict:
+def admit_reentry(publisher, metadata: dict, command: list[str], session: str, *, manual=False, check=False, accounting_gap=False, receipt_recovery=False, expected_finish=None) -> dict:
     resume_command(command, session)
     if not check:
         publisher.publish()
@@ -197,10 +201,11 @@ def admit_reentry(publisher, metadata: dict, command: list[str], session: str, *
         raise AccountingError("insufficient resume budget for a cold-context request; retain the worker")
     if manual and publisher.read("gate").get("ready") is not True:
         raise AccountingError("retained worker execution gate is not ready")
-    finish_reason = inspect_session(command, session, publisher.workspace, publisher.env, accounting_gap=accounting_gap)
+    finish_reason = inspect_session(command, session, publisher.workspace, publisher.env,
+                                    accounting_gap=accounting_gap or receipt_recovery)
     if expected_finish is not None and finish_reason != expected_finish:
         raise AccountingError("native session finish disagrees with captured output")
-    reason = "accounting_gap" if accounting_gap else "early_stop" if finish_reason == "stop" else "length"
+    reason = "receipt_recovery" if receipt_recovery else "accounting_gap" if accounting_gap else "early_stop" if finish_reason == "stop" else "length"
     path = publisher.log.parent / "reentries.json"
     record = json.loads(path.read_text()) if path.exists() else {"run_id": run_id, "session_id": session, "attempts": []}
     if record["run_id"] != run_id or record["session_id"] != session or len(record["attempts"]) >= MAX_REENTRIES:
@@ -219,6 +224,7 @@ def admit_reentry(publisher, metadata: dict, command: list[str], session: str, *
     # Reserve the attempt before reopening lifecycle or launching another model.
     write_json(path, record)
     if not publisher.ping("resume", "OpenCode same-session recovery; owner accepted incomplete accounting" if accounting_gap
+                          else "OpenCode same-session recovery after generation receipt reconciliation" if receipt_recovery
                           else "OpenCode same-session continuation after early stop" if finish_reason == "stop"
                           else "OpenCode same-session continuation after output limit"):
         raise AccountingError("could not confirm the resume heartbeat")

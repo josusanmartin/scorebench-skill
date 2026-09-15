@@ -24,8 +24,8 @@ import openrouter_run as runner
 
 
 class TransportTests(unittest.TestCase):
-    def test_configuration_is_explicit_and_auto_preserves_system_transport(self):
-        self.assertEqual(transport.configured_ip_family({}), "auto")
+    def test_ipv4_is_default_and_auto_requires_an_explicit_override(self):
+        self.assertEqual(transport.configured_ip_family({}), "4")
         for value in ("auto", "4", "6"):
             self.assertEqual(transport.configured_ip_family({transport.IP_FAMILY_ENV: f" {value} "}), value)
         for value in ("", "ipv4", "7", "false", "4;secret"):
@@ -33,10 +33,22 @@ class TransportTests(unittest.TestCase):
                 transport.configured_ip_family({transport.IP_FAMILY_ENV: value})
         original = socket.getaddrinfo
         for cls in (transport._HTTPConnection, transport._HTTPSConnection):
-            automatic = cls("openrouter.ai")
+            default = cls("openrouter.ai")
+            self.assertIs(default._create_connection.func, transport._create_connection)
+            self.assertEqual(default._create_connection.keywords, {"family": socket.AF_INET})
+            default.close()
+            automatic = cls("openrouter.ai", ip_family="auto")
             self.assertIs(automatic._create_connection, socket.create_connection)
             self.assertIs(socket.getaddrinfo, original)
             automatic.close()
+
+    def test_unset_environment_defaults_to_ipv4_at_the_entrypoint(self):
+        env = dict(os.environ)
+        env.pop(transport.IP_FAMILY_ENV, None)
+        result = subprocess.run([sys.executable, str(SCRIPTS / "openrouter_transport.py"), "--check"],
+                                env=env, capture_output=True, text=True, timeout=10)
+        self.assertEqual(result.returncode, 0, result.stderr)
+        self.assertIn("IP family 4; TLS verification enabled", result.stdout)
 
     def test_family_selection_is_per_connection_with_no_cross_family_fallback(self):
         for value, family, sockaddr in (("4", socket.AF_INET, ("127.0.0.1", 443)),
@@ -162,8 +174,9 @@ class TLSTransportTests(unittest.TestCase):
         self.thread = threading.Thread(target=self.server.serve_forever, daemon=True)
         self.thread.start()
         self.base = f"https://localhost:{self.server.server_port}"
-        self.env = mock.patch.dict(os.environ, {transport.IP_FAMILY_ENV: "4", "SSL_CERT_FILE": str(self.cert), "NO_PROXY": "*", "no_proxy": "*"})
+        self.env = mock.patch.dict(os.environ, {"SSL_CERT_FILE": str(self.cert), "NO_PROXY": "*", "no_proxy": "*"})
         self.env.start()
+        os.environ.pop(transport.IP_FAMILY_ENV, None)
 
     def tearDown(self):
         self.env.stop()

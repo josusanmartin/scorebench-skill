@@ -287,13 +287,35 @@ before stopping new workers. Only conclusive matching usage is accepted
 automatically; this does not authorize partial accounting or resume an exited
 worker. Dated model IDs require a recorded OpenRouter catalog alias mapping.
 
+Updated proxies journal every inference attempt before sending and persist its
+generation ID when first observed in the response. The private
+`.scorebench/openrouter/requests.sqlite3` stores identity, request hashes and
+counters, never keys or prompt text. Supervisor metadata retries use persisted
+backoff; neither transport retries nor accounting repair replay ambiguous inference.
+For an exited worker, proactively run `scorebench run reconcile --check` in its
+original workspace. This queries provider metadata without writing evidence or
+starting inference. `scorebench run reconcile` appends validated missing receipts
+with original-error hashes; it does not publish usage or reopen the run. It
+refuses a live ledger writer. Both require the existing OpenRouter key in the
+environment, not an owner login. An older CLI can invoke the installed
+`scripts/openrouter_reconcile.py --workspace .` directly, with `--check` for preview.
+Refresh the complete skill if the helper is missing.
+
+After conclusive repair, repeat the normal retained OpenCode recovery check
+without partial-accounting acceptance. Execution still needs owner approval and
+passes the original session, assignment, gate, baseline and resume-budget checks.
+Do not infer completion from repair or reset any run identity. No-ID gaps remain
+unknown; account/key totals cannot attribute them to one concurrent run. Pi
+accounting repair works, but retained Pi session recovery is still unsupported.
+
 ### OpenRouter Address Family
 
-On a host with confirmed IPv6 upload failures, set
-`SCOREBENCH_OPENROUTER_IP_FAMILY=4` in the coordinator's launch environment
-before invoking the generated wrappers. The default `auto` keeps the system's
-address selection; `6` is available for explicit diagnostics. Other values fail
-preflight before model work. The setting applies only to ScoreBench's OpenRouter
+ScoreBench defaults to IPv4 (`SCOREBENCH_OPENROUTER_IP_FAMILY=4`) for OpenRouter;
+no coordinator setup is needed. New generated wrappers set and verify this
+default before preflight, gate polling or retained recovery. An explicit `auto`
+override restores system address selection; `6` selects IPv6 for diagnostics
+or IPv6-only networks. Empty or invalid values fail preflight before model work.
+The setting applies only to ScoreBench's OpenRouter
 connections, including model metadata and receipt lookups, not the whole host
 or the ScoreBench server connection. HTTPS hostname/certificate verification
 remains enabled, and the provider/model/effort do not change. With an outbound
@@ -306,11 +328,12 @@ patch global DNS, or hard-code provider IPs. The transport never falls back to
 another family after a sent request fails. Existing bounded retries are only
 for confirmed unsent connection failures; an ambiguous upload retains its
 accounting gap. Changing transport does not repair a missing receipt or permit
-unapproved recovery. A supported owner-approved recovery must inherit the same
-explicit setting and preserve the original session and ledger.
+unapproved recovery. Supported owner-approved recovery uses the same IPv4
+default unless explicitly overridden, preserving the original session and ledger.
 
-Refresh the complete skill before using this setting; a website deployment
-does not change installed helpers. Already-running wrappers are unchanged.
+Refresh the complete skill to receive the default; a website deployment
+does not change installed helpers. New wrappers refuse helpers without transport
+support rather than silently ignoring the setting. Already-running workers are unchanged.
 Pi/OpenCode still use their current manual-workspace path, not Docker.
 
 For a retained OpenCode request/header transport gap or a missing final stream

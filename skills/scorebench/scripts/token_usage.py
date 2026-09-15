@@ -642,7 +642,16 @@ def openrouter_jsonl_snapshot(path: Path, *, accepted_gaps: dict | None = None) 
     seen: dict[str, dict[str, Any]] = {}
     raw = path.read_text(encoding="utf-8")
     lines = raw.splitlines()
+    from openrouter_journal import read_records, resolved_error_lines
+    try:
+        resolved = resolved_error_lines(read_records(path, allow_partial_tail=True, raw=raw))
+    except json.JSONDecodeError as exc:
+        raise SystemExit(f"invalid OpenRouter usage JSONL at {path}: {exc.msg}") from exc
+    except (ValueError, OSError, TypeError, KeyError) as exc:
+        raise SystemExit("invalid OpenRouter receipt reconciliation evidence") from exc
     for line_number, line in enumerate(lines, start=1):
+        if line_number == len(lines) and not raw.endswith("\n"):
+            continue
         line = line.strip()
         if not line:
             continue
@@ -660,12 +669,15 @@ def openrouter_jsonl_snapshot(path: Path, *, accepted_gaps: dict | None = None) 
         if (isinstance(record, dict) and record.get("accounting_error") and accepted_gaps
                 and accepted_gaps["gaps"].get(str(line_number)) == digest(lines[line_number - 1].encode())):
             continue
+        if line_number in resolved:
+            continue
         if not isinstance(record, dict) or record.get("accounting_error"):
             raise SystemExit(f"incomplete OpenRouter usage at {path}:{line_number}")
         response_id = record.get("id")
         if isinstance(response_id, str) and response_id:
             if response_id in seen:
-                if seen[response_id] != record:
+                if ((seen[response_id].get("model"), seen[response_id].get("usage"))
+                        != (record.get("model"), record.get("usage"))):
                     raise SystemExit(f"conflicting OpenRouter usage for response {response_id}")
                 continue
             seen[response_id] = record
