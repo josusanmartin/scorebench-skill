@@ -23,9 +23,10 @@ from http.server import ThreadingHTTPServer
 from typing import Mapping, Sequence
 
 from openrouter_proxy import DEFAULT_UPSTREAM, Handler, UsageLog
+from openrouter_transport import IP_FAMILY_ENV, configured_ip_family
 from openrouter_agents import agent_kind, check_installation, model_metadata, route_agent, validate_route
 from openrouter_accounting import Publisher
-from openrouter_reentry import SessionOutput, admit_reentry, resume_command, write_json
+from openrouter_reentry import CONTINUABLE_FINISHES, SessionOutput, admit_reentry, resume_command, write_json
 from openrouter_gaps import ACK_FILE, prepare_ack
 from openrouter_generations import lookup_generation
 
@@ -412,7 +413,7 @@ def main(argv: Sequence[str] | None = None) -> int:
     parser.add_argument("--recover-session", default="", help="explicitly assess or resume a retained OpenCode session")
     parser.add_argument("--accept-accounting-gap", action="store_true",
                         help="owner acknowledgement: recover a retained transport/stream receipt gap with partial cost/token totals")
-    parser.add_argument("--no-auto-reentry", action="store_true", help="retain length-limited OpenCode exits for explicit recovery")
+    parser.add_argument("--no-auto-reentry", action="store_true", help="retain length-limited and early-stop OpenCode exits for explicit recovery")
     parser.add_argument(
         "--runtime-control",
         action="store_true",
@@ -447,6 +448,12 @@ def main(argv: Sequence[str] | None = None) -> int:
         print(f"ScoreBench OpenRouter accounting inactive: {reason}", file=sys.stderr)
         return _run_child(command, env=env, workspace=workspace)
 
+    try:
+        ip_family = configured_ip_family(env)
+    except ValueError as exc:
+        parser.error(str(exc))
+    env[IP_FAMILY_ENV] = ip_family
+    print(f"ScoreBench OpenRouter transport: IP family {ip_family}; TLS verification enabled", file=sys.stderr)
     api_key = env.get("OPENROUTER_API_KEY", "").strip()
     if not api_key:
         raise SystemExit(
@@ -519,7 +526,7 @@ def main(argv: Sequence[str] | None = None) -> int:
                     raise RuntimeError("missing OpenRouter receipt blocks exact recovery; owner may explicitly use --accept-accounting-gap with --check to assess partial recovery")
                 raise RuntimeError("recovery requires an accounted, incomplete retained worker")
             if result.get("runtime_control") and not args.accept_accounting_gap:
-                raise RuntimeError("controlled stops cannot be recovered as length-limit exits")
+                raise RuntimeError("controlled stops cannot be recovered as ordinary native exits")
             recovery_env = dict(env)
             recovery_env["SCOREBENCH_OPENROUTER_LOG"] = str(log_path)
             recovery_env["SCOREBENCH_TOKEN_STATE"] = str(state_path)
@@ -604,13 +611,14 @@ def main(argv: Sequence[str] | None = None) -> int:
         if publisher and agent_kind(args.harness) == "opencode":
             session = args.recover_session
             if session:
-                admit_reentry(publisher, metadata, command, session, manual=True, accounting_gap=args.accept_accounting_gap)
-                routed_command = resume_command(routed_command, session, accounting_gap=args.accept_accounting_gap)
+                record = admit_reentry(publisher, metadata, command, session, manual=True, accounting_gap=args.accept_accounting_gap)
+                routed_command = resume_command(routed_command, session, accounting_gap=args.accept_accounting_gap,
+                                                finish_reason=record["attempts"][-1]["native_finish_reason"])
             while True:
                 output = SessionOutput(accounting_dir, session)
                 returncode = _run_supervised(routed_command, env=env, workspace=workspace,
                                              publisher=publisher, session_output=output)
-                if (returncode != 0 or output.error or output.reason != "length"
+                if (returncode != 0 or output.error or output.reason not in CONTINUABLE_FINISHES
                         or args.no_auto_reentry or (workspace / ".scorebench/runtime-control.json").exists()):
                     if output.error:
                         returncode = 1
@@ -619,15 +627,22 @@ def main(argv: Sequence[str] | None = None) -> int:
                     raise RuntimeError("unfinished OpenRouter request prevents reentry")
                 publisher.publish()
                 budget = publisher.read("progress")["progress"]["budget"]
-                if budget.get("reached") is True or (budget.get("type") == "cost"
+                if budget.get("type") not in {"cost", "time", "tokens"} or budget.get("reached") is True or (budget.get("type") == "cost"
                     and budget.get("accounting_complete") is not False
                     and budget.get("available") is True and budget.get("used", 0) >= budget.get("target", float("inf")) * 0.95):
                     break
-                admit_reentry(publisher, metadata, command, output.session)
+                # The server also owns explicit cost-to-target completion.
+                # A rejected finish does not mark the run failed or release its gate.
+                if publisher.ping("finish", "OpenCode turn ended; checking supervised completion"):
+                    break
+                if publisher.read("progress")["run"].get("status") == "finished":
+                    break  # A timed-out finish may have committed.
+                admit_reentry(publisher, metadata, command, output.session, expected_finish=output.reason)
                 session = output.session
-                print("ScoreBench resuming the same OpenCode session after its output limit", file=sys.stderr)
+                cause = "output limit" if output.reason == "length" else "early stop before budget completion"
+                print(f"ScoreBench resuming the same OpenCode session after {cause}", file=sys.stderr)
                 # Rebuild from the original command, not a prior --session command.
-                routed_command = resume_command(command, session)
+                routed_command = resume_command(command, session, finish_reason=output.reason)
         else:
             returncode = _run_child(routed_command, env=env, workspace=workspace, publisher=publisher)
     except KeyboardInterrupt:

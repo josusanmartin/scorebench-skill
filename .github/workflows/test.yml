@@ -39,7 +39,7 @@ jobs:
       - name: Install recovery test dependency
         run: python -m pip install pytest
       - name: Install pinned native agents without lifecycle scripts
-        run: npm install --prefix "$RUNNER_TEMP/agents" --ignore-scripts --no-audit --no-fund @earendil-works/pi-coding-agent@0.85.1 opencode-linux-x64@1.17.14 node-linux-x64@22.19.0
+        run: npm install --prefix "$RUNNER_TEMP/agents" --ignore-scripts --no-audit --no-fund @earendil-works/pi-coding-agent@0.85.1 opencode-linux-x64@1.18.30 node-linux-x64@22.19.0
       - name: Exercise real agents against a local OpenRouter fixture
         env:
           SCOREBENCH_TEST_PI_BIN: ${{ runner.temp }}/agents/node_modules/.bin/pi

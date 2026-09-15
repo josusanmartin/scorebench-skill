@@ -23,7 +23,7 @@ Dependency-free (stdlib only). Reads OPENROUTER_API_KEY from the environment.
 from __future__ import annotations
 
 import argparse
-from http.client import HTTPConnection, HTTPSConnection, HTTPException
+from http.client import HTTPException
 import json
 import math
 import os
@@ -38,6 +38,10 @@ from pathlib import Path
 from uuid import uuid4
 
 from openrouter_generations import generation_usage, lookup_generation, stream_gap
+from openrouter_transport import (
+    UnsentRequestError, _HTTPConnection, _HTTPSConnection,
+    configured_ip_family, openrouter_opener,
+)
 
 DEFAULT_UPSTREAM = "https://openrouter.ai"
 # Hop-by-hop and content-coding headers we must not blindly forward.
@@ -45,49 +49,8 @@ _SKIP_REQUEST_HEADERS = {"host", "authorization", "x-api-key", "proxy-authorizat
 _SKIP_RESPONSE_HEADERS = {"content-length", "transfer-encoding", "connection", "content-encoding", "keep-alive"}
 
 
-class UnsentRequestError(OSError):
-    """Connection establishment failed before any inference request bytes."""
-
-    def __init__(self, cause):
-        super().__init__("upstream connection establishment failed")
-        self.cause = cause
-
-
-class _ConnectionPhase:
-    def connect(self):
-        try:
-            super().connect()
-        except (OSError, HTTPException) as exc:
-            raise UnsentRequestError(exc) from exc
-
-
-class _HTTPConnection(_ConnectionPhase, HTTPConnection):
-    pass
-
-
-class _HTTPSConnection(_ConnectionPhase, HTTPSConnection):
-    pass
-
-
-class _HTTPHandler(urllib.request.HTTPHandler):
-    def http_open(self, request):
-        return self.do_open(_HTTPConnection, request)
-
-
-class _HTTPSHandler(urllib.request.HTTPSHandler):
-    def https_open(self, request):
-        return self.do_open(_HTTPSConnection, request, context=self._context)
-
-
-class _NoRedirect(urllib.request.HTTPRedirectHandler):
-    def redirect_request(self, *args, **kwargs):
-        # A redirected connection failure cannot prove the first POST was unsent.
-        return None
-
-
 def open_upstream(request):
-    opener = urllib.request.build_opener(_HTTPHandler(), _HTTPSHandler(), _NoRedirect())
-    return opener.open(request, timeout=600)
+    return openrouter_opener().open(request, timeout=600)
 
 
 class UsageLog:
@@ -153,6 +116,7 @@ class UsageLog:
         if isinstance(cause, UnsentRequestError):
             cause = cause.cause
         details = {"request_id": request_id, "phase": phase, "attempt": attempt,
+                   "ip_family": configured_ip_family(),
                    "exception_type": type(cause).__name__, "errno": getattr(cause, "errno", None)}
         # Do not log exception strings, URLs, headers, prompts, or credentials.
         self._append({"timestamp": time.time(), **details}, self.path.with_name("transport-errors.jsonl"))
@@ -469,6 +433,10 @@ def main() -> int:
     parser.add_argument("--host", default="127.0.0.1", help="listen host (default loopback only)")
     parser.add_argument("--upstream", default=os.environ.get("OPENROUTER_BASE", DEFAULT_UPSTREAM), help="upstream base URL")
     args = parser.parse_args()
+    try:
+        ip_family = configured_ip_family()
+    except ValueError as exc:
+        parser.error(str(exc))
 
     api_key = os.environ.get("OPENROUTER_API_KEY", "").strip()
     if not api_key:
@@ -486,6 +454,7 @@ def main() -> int:
     base_url = f"http://{args.host}:{port}/api/v1"
     # One machine-readable line for scripts, then human guidance on stderr.
     print(json.dumps({"base_url": base_url, "port": port, "log": str(server.usage_log.path)}), flush=True)  # type: ignore[attr-defined]
+    print(f"ScoreBench OpenRouter transport: IP family {ip_family}; TLS verification enabled", file=sys.stderr)
     print(f"OpenRouter proxy on {base_url}\n  point your harness base URL here; usage -> {server.usage_log.path}", file=sys.stderr, flush=True)  # type: ignore[attr-defined]
     try:
         server.serve_forever()

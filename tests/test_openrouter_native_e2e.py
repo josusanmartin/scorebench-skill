@@ -93,6 +93,10 @@ class Provider(BaseHTTPRequestHandler):
         if seq in getattr(self.server, "length_steps", set()):
             reason = "length"
             delta = {"role": "assistant", "reasoning": "Long reasoning was truncated."}
+        override = getattr(self.server, "response_steps", {}).get(seq, {})
+        delta = override.get("delta", delta)
+        reason = override.get("reason", reason)
+        usage.update(override.get("usage", {}))
         envelope = {"id": f"gen-{seq}", "object": "chat.completion.chunk", "created": 1, "model": request["model"]}
         events = [
             {**envelope, "choices": [{"index": 0, "delta": delta, "finish_reason": None}]},
@@ -118,7 +122,7 @@ class Provider(BaseHTTPRequestHandler):
 
 
 class NativeE2ETests(unittest.TestCase):
-    def run_agent(self, kind, binary, model=MODEL, effort="low", length_stop=False, retained_recovery=False, receipt_lookup=False):
+    def run_agent(self, kind, binary, model=MODEL, effort="low", length_stop=False, retained_recovery=False, receipt_lookup=False, early_stop=False, compaction=False, ip_family="auto"):
         with tempfile.TemporaryDirectory(prefix="scorebench-native-") as root:
             root = Path(root)
             home, work, bin_dir = root / "home", root / "work", root / "bin"
@@ -163,11 +167,23 @@ else:
                     "native_tokens_prompt": 100, "native_tokens_completion": 20,
                     "native_tokens_cached": 40, "native_tokens_reasoning": 5,
                     "total_cost": 0.002, "finish_reason": "stop"}}
-            if length_stop:
-                server.length_steps = {2}
+            if length_stop or early_stop:
+                server.length_steps = {2} if length_stop else set()
+                if early_stop:
+                    server.response_steps = {2: {"delta": {"role": "assistant", "content": ""}, "reason": "stop"}}
                 server.unit_cost = 1.0
                 server.output_limit = 131072
                 server.context_limit = 500000
+                if compaction:
+                    server.unit_cost = 0.75
+                    server.output_limit = 1000
+                    server.context_limit = 32768
+                    server.response_steps = {
+                        1: {"usage": {"prompt_tokens": 40000, "total_tokens": 40020}},
+                        2: {"delta": {"role": "assistant", "content": "Summary: probe.txt was written. Further validation remains."}, "reason": "stop"},
+                        3: {"delta": {"role": "assistant", "content": ""}, "reason": "stop"},
+                        4: {"delta": {"role": "assistant", "content": "Continued the original task."}, "reason": "stop"},
+                    }
                 assignment = {"run": {"run_id": "probe-run", "metadata": {
                     "coding_harness": "OpenCode", "model": "openrouter/" + model,
                     "effort": effort, "completion_policy": "budget_or_target"}}}
@@ -180,6 +196,7 @@ else:
                    "XDG_CONFIG_HOME": str(home / ".config"), "XDG_DATA_HOME": str(home / ".local/share"),
                    "XDG_CACHE_HOME": str(home / ".cache"), "XDG_STATE_HOME": str(home / ".local/state"),
                    "OPENROUTER_API_KEY": "fake-native-test-key",
+                   "SCOREBENCH_OPENROUTER_IP_FAMILY": ip_family,
                    "OPENROUTER_BASE": f"http://127.0.0.1:{server.server_port}",
                    "PI_OFFLINE": "1", "PI_TELEMETRY": "0", "OPENCODE_DISABLE_MODELS_FETCH": "true"}
             prompt = "Use the write tool to create probe.txt containing scorebench-probe, then say done."
@@ -227,35 +244,49 @@ else:
                     self.assertEqual(auth, "Bearer fake-native-test-key")
                     self.assertEqual(request["model"], model)
                     self.assertEqual(request.get("reasoning", {}).get("effort"), effort)
-                    if length_stop:
-                        self.assertEqual(request.get("max_tokens"), 128000)
+                    if length_stop or early_stop:
+                        self.assertEqual(request.get("max_tokens"), 1000 if compaction else 128000)
                 ledger = [json.loads(line) for line in (work / ".scorebench/openrouter/usage.jsonl").read_text().splitlines()]
                 self.assertEqual(len(ledger), len(server.requests))
                 snapshots = [json.loads(line) for line in (work / "snapshots.jsonl").read_text().splitlines()]
                 first, last = snapshots[0], snapshots[-1]
                 self.assertEqual(first[first.index("--total-tokens") + 1], "0")
                 count = len(server.requests)
-                for flag, expected in (("--total-tokens", 80 * count), ("--input-tokens", 50 * count + (10 if receipt_lookup else 0)),
+                extra_input = 39900 if compaction else 0
+                for flag, expected in (("--total-tokens", 80 * count + extra_input), ("--input-tokens", 50 * count + extra_input + (10 if receipt_lookup else 0)),
                                        ("--output-tokens", 20 * count), ("--cache-read-tokens", 40 * count),
                                        ("--cache-creation-tokens", 10 * count - (10 if receipt_lookup else 0)),
-                                       ("--cost-usd", (1.0 if length_stop else 0.002) * count)):
+                                       ("--cost-usd", (0.75 if compaction else 1.0 if length_stop or early_stop else 0.002) * count)):
                     self.assertAlmostEqual(float(last[last.index(flag) + 1]), expected)
                 self.assertNotIn("fake-native-test-key", (work / ".scorebench/openrouter/usage.jsonl").read_text())
                 self.assertTrue(json.loads((work / ".scorebench/openrouter/result.json").read_text())["completion_confirmed"])
+                self.assertEqual(json.loads((work / ".scorebench/openrouter/result.json").read_text())["transport"]["ip_family"], ip_family)
+                self.assertIn(f"IP family {ip_family}; TLS verification enabled", result.stderr)
                 self.assertIn('"finish"', (work / "pings.jsonl").read_text())
                 if receipt_lookup:
                     self.assertEqual(server.generation_reads, ["gen-2"])
                     self.assertEqual(count, 2)
                     self.assertEqual(ledger[-1]["reconciliation"]["source"], "openrouter_generation_api")
                     self.assertFalse((work / ".scorebench/openrouter/reentries.json").exists())
-                if length_stop:
-                    self.assertEqual(count, 3)
+                if length_stop or early_stop:
+                    self.assertEqual(count, 4 if compaction else 3)
                     recovery = json.loads((work / ".scorebench/openrouter/reentries.json").read_text())
                     self.assertEqual(len(recovery["attempts"]), 1)
                     native = [json.loads(line) for line in (work / ".scorebench/openrouter/native-output.jsonl").read_text().splitlines()]
                     self.assertEqual({e["sessionID"] for e in native}, {recovery["session_id"]})
-                    self.assertTrue(any(e.get("part", {}).get("reason") == "length" for e in native))
+                    self.assertTrue(any(e.get("part", {}).get("reason") == ("stop" if early_stop else "length") for e in native))
+                    self.assertEqual(recovery["attempts"][0]["reason"], "early_stop" if early_stop else "length")
                     self.assertIn('"resume"', (work / "pings.jsonl").read_text())
+                    if compaction:
+                        export_env = dict(env, XDG_DATA_HOME=str(private_sessions))
+                        with tempfile.TemporaryFile() as out:
+                            exported = subprocess.run([binary, "--pure", "export", recovery["session_id"]],
+                                env=export_env, cwd=work, stdout=out, stderr=subprocess.PIPE, timeout=30)
+                            self.assertEqual(exported.returncode, 0)
+                            out.seek(0)
+                            messages = json.load(out)["messages"]
+                        self.assertTrue(any(m["info"].get("summary") for m in messages))
+                        self.assertTrue(any(p.get("type") == "compaction" for m in messages for p in m.get("parts", [])))
                 print(f"{kind}/{model}/{effort}: {count} real CLI requests, tool round trip, zero baseline and final snapshot verified")
             finally:
                 server.shutdown()
@@ -274,9 +305,30 @@ else:
     def test_opencode_retained_recovery_checks_then_resumes_without_reset(self):
         self.run_agent("OpenCode", os.environ["SCOREBENCH_TEST_OPENCODE_BIN"], effort="high", length_stop=True, retained_recovery=True)
 
+    @unittest.skipUnless(os.environ.get("SCOREBENCH_TEST_OPENCODE_BIN"), "set SCOREBENCH_TEST_OPENCODE_BIN")
+    def test_opencode_empty_stop_automatically_continues_same_session(self):
+        self.run_agent("OpenCode", os.environ["SCOREBENCH_TEST_OPENCODE_BIN"], early_stop=True)
+
+    @unittest.skipUnless(os.environ.get("SCOREBENCH_TEST_OPENCODE_BIN"), "set SCOREBENCH_TEST_OPENCODE_BIN")
+    def test_opencode_empty_stop_retained_recovery(self):
+        self.run_agent("OpenCode", os.environ["SCOREBENCH_TEST_OPENCODE_BIN"], early_stop=True, retained_recovery=True)
+
+    @unittest.skipUnless(os.environ.get("SCOREBENCH_TEST_OPENCODE_BIN"), "set SCOREBENCH_TEST_OPENCODE_BIN")
+    def test_opencode_compaction_then_empty_stop_continues(self):
+        self.run_agent("OpenCode", os.environ["SCOREBENCH_TEST_OPENCODE_BIN"], early_stop=True, compaction=True)
+
     @unittest.skipUnless(os.environ.get("SCOREBENCH_TEST_PI_BIN"), "set SCOREBENCH_TEST_PI_BIN")
     def test_pi(self):
         self.run_agent("Pi", os.environ["SCOREBENCH_TEST_PI_BIN"])
+
+    @unittest.skipUnless(os.environ.get("SCOREBENCH_TEST_PI_BIN"), "set SCOREBENCH_TEST_PI_BIN")
+    def test_pi_ipv4_with_receipt_lookup(self):
+        self.run_agent("Pi", os.environ["SCOREBENCH_TEST_PI_BIN"], receipt_lookup=True, ip_family="4")
+
+    @unittest.skipUnless(os.environ.get("SCOREBENCH_TEST_OPENCODE_BIN"), "set SCOREBENCH_TEST_OPENCODE_BIN")
+    def test_opencode_ipv4_retained_recovery(self):
+        self.run_agent("OpenCode", os.environ["SCOREBENCH_TEST_OPENCODE_BIN"],
+                       early_stop=True, retained_recovery=True, ip_family="4")
 
     @unittest.skipUnless(os.environ.get("SCOREBENCH_TEST_OPENCODE_BIN"), "set SCOREBENCH_TEST_OPENCODE_BIN")
     def test_opencode_missing_receipt_uses_generation_lookup(self):

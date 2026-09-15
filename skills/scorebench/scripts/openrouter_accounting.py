@@ -11,6 +11,7 @@ import time
 
 import token_usage
 from openrouter_gaps import PARTIAL_SOURCE
+from openrouter_transport import configured_ip_family
 
 
 class AccountingError(RuntimeError):
@@ -124,6 +125,7 @@ class Publisher:
                 confirmed = True
         partial = PARTIAL_SOURCE in (self.last_flags or [])
         report = {"harness_returncode": returncode, "accounting_ok": accounting_ok,
+                  "transport": {"ip_family": configured_ip_family(self.env)},
                   "accounting_complete": accounting_ok and not partial,
                   "accounting_quality": "partial" if partial else "exact" if accounting_ok else "unavailable",
                   "accounting_warnings": ["Missing OpenRouter receipt; tokens and cost are confirmed lower bounds, not complete totals"] if partial else [],

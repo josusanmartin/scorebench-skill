@@ -261,18 +261,57 @@ Only an OpenRouter API key is needed for these provider routes, not subscription
 logins to unrelated coding agents. Retain the native session/output logs;
 automatic trace upload is not available for these two harnesses. OpenCode's
 wrapper supports bounded same-session continuation after a structured `length`
-stop, with cumulative accounting, original assignment and remaining-budget
-checks. Pi reentry is not supported. Retained OpenCode recovery requires the
+or clean early `stop`, including an empty answer after compaction, with cumulative
+accounting, original assignment and remaining-budget checks. Let the wrapper
+continue without requesting another owner prompt; keep its existing foreground
+process attached. Inspect `reentries.json` for the reason, remaining allocation
+and the shared three-attempt limit. A stopped inner harness is not a terminal
+worker while the wrapper is admitting continuation. Pi reentry is not supported.
+After a terminal OpenCode failure, proactively use the
 runbook's read-only `--recover-session ... --check`, followed by explicit owner
 approval before execution. Never rerun preparation, reset a baseline, or create
 a replacement session to recover. Inspect `lifecycle_confirmed` in the wrapper
 result; missing server confirmation is an escalation, not proof of completion.
 Do not bind a coordinator Codex/Claude transcript to such a worker.
 
+Accounted retained `length` and clean premature `stop` exits both support the
+check. Session exports use a private regular file to avoid truncated piped output;
+malformed/oversized JSON still blocks admission. Report the check's concrete
+refusal or remaining budget and resume estimate. Do not patch helpers or retry
+an unsupported command indefinitely; consult the on-demand runbook and use the
+released skill. Explicit stops, incomplete accounting, native errors, and
+insufficient resume budget remain blockers, not automatic retry permissions.
+
 The proxy attempts bounded generation lookups for missing final stream receipts
 before stopping new workers. Only conclusive matching usage is accepted
 automatically; this does not authorize partial accounting or resume an exited
 worker. Dated model IDs require a recorded OpenRouter catalog alias mapping.
+
+### OpenRouter Address Family
+
+On a host with confirmed IPv6 upload failures, set
+`SCOREBENCH_OPENROUTER_IP_FAMILY=4` in the coordinator's launch environment
+before invoking the generated wrappers. The default `auto` keeps the system's
+address selection; `6` is available for explicit diagnostics. Other values fail
+preflight before model work. The setting applies only to ScoreBench's OpenRouter
+connections, including model metadata and receipt lookups, not the whole host
+or the ScoreBench server connection. HTTPS hostname/certificate verification
+remains enabled, and the provider/model/effort do not change. With an outbound
+HTTP proxy, it selects the connection to that proxy; it cannot control the
+proxy's own upstream route.
+
+Verify `ScoreBench OpenRouter transport: IP family 4` in wrapper output and
+`transport.ip_family` in the final `result.json`. Do not disable TLS checking,
+patch global DNS, or hard-code provider IPs. The transport never falls back to
+another family after a sent request fails. Existing bounded retries are only
+for confirmed unsent connection failures; an ambiguous upload retains its
+accounting gap. Changing transport does not repair a missing receipt or permit
+unapproved recovery. A supported owner-approved recovery must inherit the same
+explicit setting and preserve the original session and ledger.
+
+Refresh the complete skill before using this setting; a website deployment
+does not change installed helpers. Already-running wrappers are unchanged.
+Pi/OpenCode still use their current manual-workspace path, not Docker.
 
 For a retained OpenCode request/header transport gap or a missing final stream
 receipt with a captured generation ID, the runbook also offers

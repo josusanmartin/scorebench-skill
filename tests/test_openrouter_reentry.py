@@ -1,4 +1,5 @@
 import json
+import os
 from pathlib import Path
 import subprocess
 import sys
@@ -37,8 +38,12 @@ class ReentryTests(unittest.TestCase):
             {"info": {"role": "assistant", "providerID": "openrouter", "modelID": "a/b", "finish": "length"}}]}
 
     def admit(self, **kwargs):
-        with mock.patch("openrouter_reentry.inspect_session"):
+        with mock.patch("openrouter_reentry.inspect_session", return_value="length"):
             return admit_reentry(self.publisher, self.metadata, COMMAND, "ses_probe", **kwargs)
+
+    def export(self, *args, **kwargs):
+        kwargs["stdout"].write(json.dumps(self.session).encode())
+        return subprocess.CompletedProcess(args, 0, stderr=b"")
 
     def test_resume_reuses_exact_session_and_preserves_options(self):
         cmd = resume_command(COMMAND, "ses_probe")
@@ -50,6 +55,10 @@ class ReentryTests(unittest.TestCase):
                 resume_command([*COMMAND[:-1], *args, COMMAND[-1]], "ses_probe")
         with self.assertRaises(AccountingError):
             resume_command(COMMAND, "invalid")
+        resumed = resume_command(COMMAND, "ses_probe", finish_reason="stop")
+        self.assertIn("compaction", resumed[-1])
+        self.assertNotIn("output limit", resumed[-1])
+        self.assertNotIn("original goal", resumed)
 
     def test_parses_only_structured_root_terminal_events_not_tool_or_prompt_text(self):
         output = SessionOutput(self.directory)
@@ -108,9 +117,10 @@ class ReentryTests(unittest.TestCase):
         self.publisher.ping.assert_not_called()
 
     def test_finished_runs_and_changed_assignments_are_not_reopened(self):
-        self.progress["run"]["status"] = "finished"
-        with self.assertRaises(AccountingError):
-            self.admit()
+        for status in ("finished", "stopped", "revoked"):
+            self.progress["run"]["status"] = status
+            with self.subTest(status=status), self.assertRaises(AccountingError):
+                self.admit()
         self.progress["run"]["status"] = "failed"
         self.assignment["run"]["metadata"]["effort"] = "low"
         with self.assertRaises(AccountingError):
@@ -131,11 +141,10 @@ class ReentryTests(unittest.TestCase):
 
     def test_native_export_checks_workspace_model_and_terminal_reason(self):
         def check():
-            with mock.patch("openrouter_reentry.subprocess.run", return_value=
-                            subprocess.CompletedProcess("opencode", 0, json.dumps(self.session), "")):
+            with mock.patch("openrouter_reentry.subprocess.run", side_effect=self.export):
                 inspect_session(COMMAND, "ses_probe", self.root, {})
         check()
-        for key, value in (("finish", "stop"), ("error", {"name": "APIError"}), ("modelID", "other")):
+        for key, value in (("finish", "unknown"), ("error", {"name": "APIError"}), ("modelID", "other")):
             with self.subTest(key=key):
                 last = self.session["messages"][-1]["info"]
                 old = dict(last)
@@ -150,11 +159,9 @@ class ReentryTests(unittest.TestCase):
 
     def test_gap_recovery_preserves_native_identity_but_accepts_interrupted_response(self):
         self.session["messages"][-1]["info"].update(finish=None, error={"name": "APIError"})
-        with mock.patch("openrouter_reentry.subprocess.run", return_value=
-                        subprocess.CompletedProcess("opencode", 0, json.dumps(self.session), "")):
+        with mock.patch("openrouter_reentry.subprocess.run", side_effect=self.export):
             inspect_session(COMMAND, "ses_probe", self.root, {}, accounting_gap=True)
-        with mock.patch("openrouter_reentry.subprocess.run", return_value=
-                        subprocess.CompletedProcess("opencode", 0, json.dumps(self.session), "")):
+        with mock.patch("openrouter_reentry.subprocess.run", side_effect=self.export):
             with self.assertRaises(AccountingError):
                 inspect_session(COMMAND, "ses_probe", self.root, {})
         result = self.admit(check=True, accounting_gap=True)
@@ -163,3 +170,56 @@ class ReentryTests(unittest.TestCase):
         resumed = resume_command(COMMAND, "ses_probe", accounting_gap=True)
         self.assertIn("lower bounds", resumed[-1])
         self.assertNotIn("original goal", resumed)
+
+    def test_early_stop_is_audited_with_native_reason_and_bounded(self):
+        self.session["messages"][-1]["info"]["finish"] = "stop"
+        with mock.patch("openrouter_reentry.subprocess.run", side_effect=self.export):
+            check = admit_reentry(self.publisher, self.metadata, COMMAND, "ses_probe", manual=True, check=True)
+            self.assertEqual((check["reason"], check["native_finish_reason"], check["attempts_remaining"]),
+                             ("early_stop", "stop", 3))
+            self.publisher.publish.assert_not_called()
+            self.publisher.ping.assert_not_called()
+            for _ in range(3):
+                record = admit_reentry(self.publisher, self.metadata, COMMAND, "ses_probe", expected_finish="stop")
+                self.assertEqual(record["attempts"][-1]["reason"], "early_stop")
+            with self.assertRaisesRegex(AccountingError, "limit"):
+                admit_reentry(self.publisher, self.metadata, COMMAND, "ses_probe")
+
+    def test_capture_and_export_must_agree_before_resuming(self):
+        with self.assertRaisesRegex(AccountingError, "disagrees"):
+            self.admit(expected_finish="stop")
+        self.publisher.ping.assert_not_called()
+        self.assertFalse((self.directory / "reentries.json").exists())
+
+    def test_large_export_uses_private_regular_file_not_pipe(self):
+        self.session["padding"] = "long transcript " * 100000
+        def export(*args, **kwargs):
+            import stat
+            mode = os.fstat(kwargs["stdout"].fileno()).st_mode
+            self.assertTrue(stat.S_ISREG(mode))
+            self.assertEqual(mode & 0o777, 0o600)
+            return self.export(*args, **kwargs)
+        with mock.patch("openrouter_reentry.subprocess.run", side_effect=export):
+            self.assertEqual(inspect_session(COMMAND, "ses_probe", self.root, {}), "length")
+
+    def test_real_export_subprocess_keeps_complete_large_json(self):
+        self.session["padding"] = "a" * 1000000
+        payload = self.root / "export.json"
+        payload.write_text(json.dumps(self.session))
+        binary = self.root / "opencode"
+        binary.write_text(f'#!{sys.executable}\nimport os, sys\nfrom pathlib import Path\n'
+                          f'sys.stdout.write(Path({str(payload)!r}).read_text())\nos._exit(0)\n')
+        binary.chmod(0o700)
+        self.assertEqual(inspect_session([str(binary), *COMMAND[1:]], "ses_probe", self.root, {}), "length")
+
+    def test_malformed_and_oversized_export_remain_blocked(self):
+        def bad_export(*args, **kwargs):
+            kwargs["stdout"].write(b'{"info":')
+            return subprocess.CompletedProcess(args, 0, stderr=b"")
+        with mock.patch("openrouter_reentry.subprocess.run", side_effect=bad_export):
+            with self.assertRaisesRegex(AccountingError, "valid JSON"):
+                inspect_session(COMMAND, "ses_probe", self.root, {})
+        with mock.patch("openrouter_reentry.subprocess.run", side_effect=self.export), \
+                mock.patch("openrouter_reentry.MAX_EXPORT_BYTES", 1):
+            with self.assertRaisesRegex(AccountingError, "size limit"):
+                inspect_session(COMMAND, "ses_probe", self.root, {})
