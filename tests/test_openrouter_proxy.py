@@ -169,6 +169,52 @@ class OpenRouterProxyTests(unittest.TestCase):
     def _log_lines(self):
         return [json.loads(l) for l in self.log.read_text().splitlines() if l.strip()]
 
+    def test_attempt_is_committed_before_request_is_sent(self):
+        original = orp.open_upstream
+        def checked(request):
+            rows = self.proxy.usage_log.journal.rows()
+            self.assertEqual(len(rows), 1)
+            self.assertEqual(rows[0]["state"], "pending")
+            self.assertEqual(rows[0]["model"], "anthropic/claude")
+            return original(request)
+        with mock.patch.object(orp, "open_upstream", side_effect=checked):
+            self._post({"model": "anthropic/claude", "messages": []})
+        self.assertEqual(self.proxy.usage_log.journal.rows()[0]["state"], "accounted")
+
+    def test_first_generation_id_is_committed_before_forwarding_delta(self):
+        handler = object.__new__(orp.Handler)
+        handler.server, handler.command, handler.path = self.proxy, "POST", "/chat/completions"
+        handler.request_id = self.proxy.usage_log.journal.begin("anthropic/claude", b"{}", 1)
+        observed = []
+        class Sink:
+            def write(inner, chunk):
+                rows = self.proxy.usage_log.journal.rows()
+                observed.append(rows[0]["generation_id"])
+                self.assertEqual(rows[0]["generation_id"], "gen-stream")
+            def flush(inner):
+                pass
+        handler.wfile = Sink()
+        upstream = mock.Mock()
+        upstream.read1.side_effect = [STREAM_CHUNKS[0], b"".join(STREAM_CHUNKS[1:]), b""]
+        handler._pump_stream(upstream, record_usage=True)
+        self.assertEqual(len(observed), 2)
+        self.assertEqual(self._log_lines()[0]["request_id"], handler.request_id)
+
+    def test_stream_transport_diagnostic_uses_original_request_identity(self):
+        data = self._missing_stream()
+        handler = object.__new__(orp.Handler)
+        handler.server, handler.command, handler.path = self.proxy, "POST", "/chat/completions"
+        handler.request_model = "anthropic/claude"
+        handler.request_id = self.proxy.usage_log.journal.begin(handler.request_model, b"{}", 1)
+        handler.wfile = io.BytesIO()
+        upstream = mock.Mock()
+        upstream.read1.side_effect = [STREAM_CHUNKS[0], ConnectionResetError()]
+        with mock.patch.object(orp, "lookup_generation", return_value={"source": "openrouter_generation_api", "data": data}):
+            handler._pump_stream(upstream, record_usage=True)
+        diagnostic = json.loads(self.log.with_name("transport-errors.jsonl").read_text())
+        self.assertEqual(diagnostic["request_id"], handler.request_id)
+        self.assertEqual(self._log_lines()[0]["request_id"], handler.request_id)
+
     def _missing_stream(self, **changes):
         self.upstream.stream_chunks = STREAM_CHUNKS[:2]
         data = {"id": "gen-stream", "model": "anthropic/claude", "total_cost": 0.004,

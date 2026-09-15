@@ -29,6 +29,7 @@ from openrouter_accounting import Publisher
 from openrouter_reentry import CONTINUABLE_FINISHES, SessionOutput, admit_reentry, resume_command, write_json
 from openrouter_gaps import ACK_FILE, prepare_ack
 from openrouter_generations import lookup_generation
+from openrouter_journal import reconcile_requests
 
 
 OPENROUTER_HOST = "openrouter.ai"
@@ -348,6 +349,8 @@ def _run_supervised(
             reason = None
             try:
                 if publisher:
+                    if getattr(publisher, "receipt_reconciler", None):
+                        publisher.receipt_reconciler()
                     publisher.publish()
                 failures = 0
             except Exception:
@@ -501,6 +504,7 @@ def main(argv: Sequence[str] | None = None) -> int:
         raise SystemExit("OpenRouter ledger already belongs to a running worker")
 
     gap_ack = None
+    receipt_recovery = False
     if args.recover_session:
         # Recovery may neither initialize an absent baseline nor replace a live
         # writer. Validate everything under the same ledger lock used for launch.
@@ -510,6 +514,15 @@ def main(argv: Sequence[str] | None = None) -> int:
             result = json.loads((accounting_dir / "result.json").read_text())
             control_path = workspace / ".scorebench/runtime-control.json"
             control = json.loads(control_path.read_text()) if control_path.exists() else {}
+            if not args.accept_accounting_gap and result.get("accounting_ok") is False:
+                report = reconcile_requests(log_path, lambda generation_id, model: lookup_generation(
+                    generation_id, model, upstream=_upstream_for(protocol, env), api_key=api_key, require_final=True),
+                    check=args.check, abandoned=True)
+                if args.check and report["reconciled"]:
+                    raise RuntimeError("provider receipts are recoverable; run scorebench run reconcile, then repeat this read-only recovery check")
+                receipt_recovery = (report["accounting_complete"] and result.get("completion_confirmed") is False
+                                    and result.get("runtime_control") in ({}, {"reason": "accounting_unavailable"})
+                                    and control == result.get("runtime_control"))
             if args.accept_accounting_gap:
                 retry_partial = result.get("accounting_quality") == "partial" and result.get("accounting_complete") is False
                 if ((result.get("accounting_ok") is not False and not retry_partial) or result.get("completion_confirmed") is not False
@@ -521,11 +534,11 @@ def main(argv: Sequence[str] | None = None) -> int:
                                       session_id=args.recover_session, result=result, control=control,
                                       model=selected_model, lookup_generation=lambda generation_id, model:
                                           lookup_generation(generation_id, model, upstream=_upstream_for(protocol, env), api_key=api_key))
-            elif result.get("accounting_ok") is not True or result.get("completion_confirmed") is not False:
+            elif not receipt_recovery and (result.get("accounting_ok") is not True or result.get("completion_confirmed") is not False):
                 if result.get("runtime_control", {}).get("reason") == "accounting_unavailable":
                     raise RuntimeError("missing OpenRouter receipt blocks exact recovery; owner may explicitly use --accept-accounting-gap with --check to assess partial recovery")
                 raise RuntimeError("recovery requires an accounted, incomplete retained worker")
-            if result.get("runtime_control") and not args.accept_accounting_gap:
+            if result.get("runtime_control") and not args.accept_accounting_gap and not receipt_recovery:
                 raise RuntimeError("controlled stops cannot be recovered as ordinary native exits")
             recovery_env = dict(env)
             recovery_env["SCOREBENCH_OPENROUTER_LOG"] = str(log_path)
@@ -536,7 +549,15 @@ def main(argv: Sequence[str] | None = None) -> int:
             recovery_env["SCOREBENCH_ACCOUNTING_SUPERVISED"] = "1"
             preview_flags = preview.current_flags()  # Validate binding and all retained receipts without writes.
             assessment = admit_reentry(preview, metadata, command, args.recover_session, manual=True, check=True,
-                                       accounting_gap=args.accept_accounting_gap)
+                                       accounting_gap=args.accept_accounting_gap, receipt_recovery=receipt_recovery)
+            if receipt_recovery:
+                known_cost = float(preview_flags[preview_flags.index("--cost-usd") + 1])
+                budget = preview.read("progress")["progress"]["budget"]
+                if budget.get("type") == "cost":
+                    remaining = min(assessment["remaining"], max(0.0, float(budget["target"]) - known_cost))
+                    if remaining < metadata["resumeCostUpperBound"]:
+                        raise RuntimeError("insufficient remaining budget after receipt reconciliation")
+                    assessment.update(confirmed_cost_usd=known_cost, remaining=remaining)
             if gap_ack:
                 # The last server snapshot can predate several complete receipts.
                 known_cost = float(preview_flags[preview_flags.index("--cost-usd") + 1])
@@ -561,6 +582,10 @@ def main(argv: Sequence[str] | None = None) -> int:
     server.upstream = _upstream_for(protocol, env)  # type: ignore[attr-defined]
     server.api_key = api_key  # type: ignore[attr-defined]
     server.usage_log = UsageLog(log_path)  # type: ignore[attr-defined]
+    reconcile = lambda: server.usage_log.reconcile(lambda generation_id, model: lookup_generation(
+        generation_id, model, upstream=server.upstream, api_key=api_key, require_final=True), abandoned=True)
+    server.usage_log.reconcile(lambda generation_id, model: lookup_generation(
+        generation_id, model, upstream=server.upstream, api_key=api_key, require_final=True), abandoned=True)
     try:
         log_path.chmod(0o600)
     except OSError:
@@ -596,6 +621,14 @@ def main(argv: Sequence[str] | None = None) -> int:
                 server.allowed_models.add(small_model.removeprefix("openrouter/"))
         if env.get("SCOREBENCH_RUNTIME_CONTROL", "").lower() in TRUTHY:
             publisher = Publisher(workspace, env)
+            publisher.receipt_reconciler = reconcile
+            if receipt_recovery:
+                publisher.publish()
+                provenance_path = accounting_dir / "receipt-recovery.json"
+                provenance = json.loads(provenance_path.read_text()) if provenance_path.exists() else {"attempts": []}
+                provenance["attempts"].append({"previous_result": result, "previous_control": control, "at": time.time()})
+                write_json(provenance_path, provenance)
+                control_path.unlink(missing_ok=True)
             if gap_ack:
                 publisher.gap_preview = gap_ack
                 # Do not persist an acknowledgement or clear the old stop until
@@ -607,12 +640,15 @@ def main(argv: Sequence[str] | None = None) -> int:
                 write_json(accounting_dir / ACK_FILE, gap_ack)
                 publisher.gap_preview = None
                 control_path.unlink(missing_ok=True)
+                server.usage_log.blocked.clear()  # Explicit partial-accounting approval, not receipt certification.
             publisher.initialize()
         if publisher and agent_kind(args.harness) == "opencode":
             session = args.recover_session
             if session:
-                record = admit_reentry(publisher, metadata, command, session, manual=True, accounting_gap=args.accept_accounting_gap)
+                record = admit_reentry(publisher, metadata, command, session, manual=True, accounting_gap=args.accept_accounting_gap,
+                                       receipt_recovery=receipt_recovery)
                 routed_command = resume_command(routed_command, session, accounting_gap=args.accept_accounting_gap,
+                                                receipt_recovery=receipt_recovery,
                                                 finish_reason=record["attempts"][-1]["native_finish_reason"])
             while True:
                 output = SessionOutput(accounting_dir, session)
@@ -660,6 +696,7 @@ def main(argv: Sequence[str] | None = None) -> int:
             server.usage_log.error("worker exited with an unfinished upstream request")
         if publisher:
             try:
+                reconcile()
                 publisher.publish()
                 accounting_ok = True
             except Exception:

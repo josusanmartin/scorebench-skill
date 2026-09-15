@@ -23,6 +23,7 @@ Dependency-free (stdlib only). Reads OPENROUTER_API_KEY from the environment.
 from __future__ import annotations
 
 import argparse
+import fcntl
 from http.client import HTTPException
 import json
 import math
@@ -38,6 +39,8 @@ from pathlib import Path
 from uuid import uuid4
 
 from openrouter_generations import generation_usage, lookup_generation, stream_gap
+from openrouter_journal import RequestJournal, append_record, invalid_usage, read_records, reconcile_requests, resolved_error_lines, safe_usage
+from openrouter_gaps import ACK_FILE, load_ack
 from openrouter_transport import (
     UnsentRequestError, _HTTPConnection, _HTTPSConnection,
     configured_ip_family, openrouter_opener,
@@ -60,12 +63,40 @@ class UsageLog:
         self._idle = threading.Condition()
         self._active = 0
         self._reconciling = 0
+        self._repair_lock = threading.Lock()
         self.blocked = threading.Event()
         path.parent.mkdir(parents=True, exist_ok=True)
         # Create the file if absent so `token_usage.py start` sees a zero
         # baseline; never truncate, so a restarted proxy keeps prior usage and
         # the run baseline/delta stays correct.
-        path.touch(exist_ok=True)
+        fd = os.open(path, os.O_WRONLY | os.O_CREAT, 0o600)
+        os.close(fd)
+        self.journal = RequestJournal(path)
+        self._refresh_blocked()
+
+    def _refresh_blocked(self):
+        records = read_records(self.path)
+        resolved = resolved_error_lines(records)
+        acknowledged = set()
+        if self.path.with_name(ACK_FILE).exists():
+            ack = load_ack(self.path, self.path.with_name("token-state.json"))
+            resolved.update(int(number) for number in ack["gaps"])
+            acknowledged = {record.get("request_id") for number, _, record in records if number in resolved}
+        if any(record.get("accounting_error") and number not in resolved for number, _, record in records) or any(
+                row["state"] == "conflict" or (row["state"] == "unresolved" and row["request_id"] not in acknowledged)
+                for row in self.journal.rows()):
+            self.blocked.set()
+        else:
+            self.blocked.clear()
+
+    def reconcile(self, lookup, *, abandoned=False):
+        with self._repair_lock, self._idle:
+            if self._active:
+                return None
+            with self._lock:
+                result = reconcile_requests(self.path, lookup, abandoned=abandoned, max_lookups=1)
+                self._refresh_blocked()
+                return result
 
     def request_started(self) -> None:
         with self._idle:
@@ -94,6 +125,9 @@ class UsageLog:
             return self._idle.wait_for(lambda: self._reconciling == 0, timeout)
 
     def record(self, response_obj: dict) -> bool:
+        if response_obj.get("identity_conflict"):
+            self.error("conflicting generation identity", request_id=response_obj.get("request_id"))
+            return False
         usage = response_obj.get("usage")
         if not isinstance(usage, dict) or not usage:
             return False
@@ -102,14 +136,19 @@ class UsageLog:
             "model": response_obj.get("model"),
             "usage": usage,
         }
-        if response_obj.get("reconciliation"):
-            record["reconciliation"] = response_obj["reconciliation"]
+        for key in ("reconciliation", "request_id", "resolved_errors"):
+            if response_obj.get(key):
+                record[key] = response_obj[key]
         self._append(record)
+        if record.get("request_id"):
+            self.journal.finish(record["request_id"], "accounted")
         return True
 
     def error(self, reason: str, **details) -> None:
         self.blocked.set()
         self._append({"accounting_error": reason, **details})
+        if details.get("request_id"):
+            self.journal.finish(details["request_id"], "unresolved", reason)
 
     def transport_error(self, exc, *, request_id, phase, attempt):
         cause = exc.reason if isinstance(exc, urllib.error.URLError) else exc
@@ -123,11 +162,8 @@ class UsageLog:
         return details
 
     def _append(self, record: dict, path: Path | None = None) -> None:
-        line = json.dumps(record, sort_keys=True) + "\n"
         with self._lock:
-            with os.fdopen(os.open(path or self.path, os.O_WRONLY | os.O_APPEND | os.O_CREAT, 0o600), "a", encoding="utf-8") as handle:
-                handle.write(line)
-                handle.flush()
+            append_record(path or self.path, record)
 
 
 class Handler(BaseHTTPRequestHandler):
@@ -136,6 +172,17 @@ class Handler(BaseHTTPRequestHandler):
     api_key: str
     usage_log: UsageLog
     protocol_version = "HTTP/1.1"
+    request_id = None
+    request_model = None
+    request_attempt = 1
+
+    def _observe(self, response):
+        observation = {key: response.get(key) for key in ("id", "model", "identity_conflict")}
+        observation["usage"] = safe_usage(response.get("usage"))
+        observation["usage_invalid"] = invalid_usage(response.get("usage"))
+        if self.request_id and observation != getattr(self, "_last_observation", None):
+            self.server.usage_log.journal.observe(self.request_id, observation)
+            self._last_observation = observation
 
     def log_message(self, *args) -> None:  # keep the proxy quiet
         return
@@ -144,6 +191,11 @@ class Handler(BaseHTTPRequestHandler):
         self.server.usage_log.request_started()
         try:
             self._forward()
+        except Exception:
+            self.server.usage_log.blocked.set()
+            if getattr(self, "request_id", None):
+                self.server.usage_log.error("request handling interrupted; retain accounting evidence", request_id=self.request_id)
+            raise
         finally:
             self.server.usage_log.request_finished()
 
@@ -177,7 +229,7 @@ class Handler(BaseHTTPRequestHandler):
         headers["Authorization"] = f"Bearer {self.server.api_key}"  # type: ignore[attr-defined]
         headers["Accept-Encoding"] = "identity"  # keep the body parseable + forwardable
         request = urllib.request.Request(url, data=body, headers=headers, method=self.command)
-        request_id = uuid4().hex
+        self.request_id = None
         for attempt in range(1, 4):
             if self._generation_request() and not self.server.usage_log.wait_reconciled(25):
                 self._send_proxy_error(503, "OpenRouter receipt lookup pending; no inference request sent")
@@ -185,6 +237,11 @@ class Handler(BaseHTTPRequestHandler):
             if self._generation_request() and self.server.usage_log.blocked.is_set():
                 self._send_proxy_error(409, "OpenRouter accounting is incomplete; retain this run for review")
                 return
+            self.request_id = (self.server.usage_log.journal.begin(self.request_model, body, attempt)
+                               if self._generation_request() else None)
+            request_id = self.request_id or uuid4().hex
+            self.request_attempt = attempt
+            self._last_observation = None
             try:
                 upstream = open_upstream(request)
                 break
@@ -196,6 +253,8 @@ class Handler(BaseHTTPRequestHandler):
             except (urllib.error.URLError, OSError, HTTPException) as exc:
                 cause = exc.reason if isinstance(exc, urllib.error.URLError) else exc
                 unsent = isinstance(cause, UnsentRequestError)
+                if unsent and self.request_id:
+                    self.server.usage_log.journal.finish(self.request_id, "unsent")
                 details = self.server.usage_log.transport_error(exc, request_id=request_id,
                     phase="connect" if unsent else "request_or_headers", attempt=attempt)
                 if unsent and attempt < 3 and not isinstance(cause.cause, ssl.SSLCertVerificationError):
@@ -228,12 +287,15 @@ class Handler(BaseHTTPRequestHandler):
             body = None if streaming else upstream.read()
         except (OSError, HTTPException):
             if record_usage and self._generation_request():
-                self.server.usage_log.error("generation response interrupted before usage")
+                self.server.usage_log.error("generation response interrupted before usage", request_id=self.request_id)
             raise
         if body is not None and record_usage:
             recorded = self._record_body_usage(body)
             if not recorded and (200 <= status < 400 or status >= 500) and self._generation_request():
-                self.server.usage_log.error("generation response omitted usage")
+                self.server.usage_log.error("generation response omitted usage", request_id=self.request_id,
+                                           generation_id=getattr(self, "response_id", None), model=self.request_model)
+            elif not recorded and self.request_id:
+                self.server.usage_log.journal.finish(self.request_id, "rejected", "HTTP request rejected without usage")
         client_connected = True
         try:
             self.send_response(status)
@@ -269,15 +331,18 @@ class Handler(BaseHTTPRequestHandler):
             # Persist usage before exposing the response status/body. A client
             # disconnect after OpenRouter bills must not make the run cheaper.
             response = obj.get("response")
+            obj = response if isinstance(response, dict) else obj
+            if getattr(self, "request_id", None):
+                self._observe(obj)
+                obj["request_id"] = self.request_id
+                self.response_id = obj.get("id")
             if isinstance(obj.get("usage"), dict):
                 return self.server.usage_log.record(obj)  # type: ignore[attr-defined]
-            elif isinstance(response, dict):
-                return self.server.usage_log.record(response)  # type: ignore[attr-defined]
         return False
 
     def _pump_stream(self, upstream, *, record_usage: bool, client_connected: bool = True) -> None:
         buffer = b""
-        response_obj: dict = {"usage": {}}
+        response_obj: dict = {"usage": {}, "request_id": getattr(self, "request_id", None)}
         settlement_held = False
         try:
             while True:
@@ -287,8 +352,8 @@ class Handler(BaseHTTPRequestHandler):
                     chunk = getattr(upstream, "read1", upstream.read)(65536)
                 except (OSError, HTTPException, EOFError) as exc:
                     if record_usage:
-                        details = self.server.usage_log.transport_error(exc, request_id=uuid4().hex,
-                            phase="stream", attempt=1)
+                        details = self.server.usage_log.transport_error(exc, request_id=self.request_id,
+                            phase="stream", attempt=self.request_attempt)
                         if response_obj.get("complete"):
                             self.server.usage_log.record(response_obj)
                         else:
@@ -301,6 +366,8 @@ class Handler(BaseHTTPRequestHandler):
                     while b"\n" in buffer:
                         line, buffer = buffer.split(b"\n", 1)
                         self._scan_sse_line(line, response_obj)
+                        if self.request_id:
+                            self._observe(response_obj)
                     # A client can start its next turn as soon as it sees a
                     # terminal event, before this connection reaches EOF.
                     if response_obj.get("terminal_seen") and not settlement_held:
@@ -314,6 +381,8 @@ class Handler(BaseHTTPRequestHandler):
                         client_connected = False
             if record_usage and buffer:
                 self._scan_sse_line(buffer, response_obj)
+                if self.request_id:
+                    self._observe(response_obj)
             if record_usage and response_obj.get("complete"):
                 self.server.usage_log.record(response_obj)
             elif record_usage and self._generation_request():
@@ -348,8 +417,10 @@ class Handler(BaseHTTPRequestHandler):
             # Persist the missing-receipt reason and provider evidence with the
             # replacement receipt, without replaying the billable request.
             log.record({"id": generation_id, "model": model, "usage": usage,
+                        "request_id": getattr(self, "request_id", None),
                         "reconciliation": {**lookup, "reason": reason, "observed_usage": observed}})
         except (ValueError, OverflowError, OSError, HTTPException) as exc:
+            details.setdefault("request_id", getattr(self, "request_id", None))
             log.error(reason, generation_id=generation_id, model=response_obj.get("model") or model,
                       lookup_error_type=type(exc).__name__, **details)
         finally:
@@ -446,10 +517,19 @@ def main() -> int:
         print("no usage log path: pass --log or set SCOREBENCH_OPENROUTER_LOG", file=sys.stderr)
         return 2
 
+    path = Path(args.log).expanduser()
+    path.parent.mkdir(parents=True, exist_ok=True, mode=0o700)
+    lock = open(str(path) + ".lock", "a")
+    try:
+        fcntl.flock(lock, fcntl.LOCK_EX | fcntl.LOCK_NB)
+    except BlockingIOError:
+        raise SystemExit("OpenRouter ledger already belongs to a running worker")
     server = ThreadingHTTPServer((args.host, args.port), Handler)
     server.upstream = args.upstream  # type: ignore[attr-defined]
     server.api_key = api_key  # type: ignore[attr-defined]
-    server.usage_log = UsageLog(Path(args.log).expanduser())  # type: ignore[attr-defined]
+    server.usage_log = UsageLog(path)  # type: ignore[attr-defined]
+    server.usage_log.reconcile(lambda generation_id, model: lookup_generation(
+        generation_id, model, upstream=args.upstream, api_key=api_key, require_final=True), abandoned=True)
     port = server.server_address[1]
     base_url = f"http://{args.host}:{port}/api/v1"
     # One machine-readable line for scripts, then human guidance on stderr.
@@ -462,6 +542,7 @@ def main() -> int:
         pass
     finally:
         server.server_close()
+        lock.close()
     return 0
 
 

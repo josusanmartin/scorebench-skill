@@ -6,10 +6,11 @@ import socket
 import urllib.request
 
 IP_FAMILY_ENV = "SCOREBENCH_OPENROUTER_IP_FAMILY"
+DEFAULT_IP_FAMILY = "4"
 
 
 def configured_ip_family(env=None):
-    value = (os.environ if env is None else env).get(IP_FAMILY_ENV, "auto").strip().lower()
+    value = (os.environ if env is None else env).get(IP_FAMILY_ENV, DEFAULT_IP_FAMILY).strip().lower()
     if value not in {"auto", "4", "6"}:
         raise ValueError(f"{IP_FAMILY_ENV} must be auto, 4 or 6")
     return value
@@ -47,7 +48,7 @@ class UnsentRequestError(OSError):
 
 
 class _ConnectionPhase:
-    def __init__(self, *args, ip_family="auto", **kwargs):
+    def __init__(self, *args, ip_family=DEFAULT_IP_FAMILY, **kwargs):
         super().__init__(*args, **kwargs)
         selected = configured_ip_family({IP_FAMILY_ENV: ip_family})
         if selected != "auto":

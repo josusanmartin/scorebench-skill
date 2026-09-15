@@ -11,6 +11,7 @@ import subprocess
 import sys
 import tempfile
 import threading
+import time
 import unittest
 from urllib.parse import parse_qs, urlsplit
 from http.server import BaseHTTPRequestHandler, ThreadingHTTPServer
@@ -122,7 +123,7 @@ class Provider(BaseHTTPRequestHandler):
 
 
 class NativeE2ETests(unittest.TestCase):
-    def run_agent(self, kind, binary, model=MODEL, effort="low", length_stop=False, retained_recovery=False, receipt_lookup=False, early_stop=False, compaction=False, ip_family="auto"):
+    def run_agent(self, kind, binary, model=MODEL, effort="low", length_stop=False, retained_recovery=False, receipt_lookup=False, early_stop=False, compaction=False, ip_family=None, delayed_receipt=False):
         with tempfile.TemporaryDirectory(prefix="scorebench-native-") as root:
             root = Path(root)
             home, work, bin_dir = root / "home", root / "work", root / "bin"
@@ -167,6 +168,8 @@ else:
                     "native_tokens_prompt": 100, "native_tokens_completion": 20,
                     "native_tokens_cached": 40, "native_tokens_reasoning": 5,
                     "total_cost": 0.002, "finish_reason": "stop"}}
+                if delayed_receipt:
+                    server.generations["gen-2"].update(total_cost=1.0, finish_reason=None)
             if length_stop or early_stop:
                 server.length_steps = {2} if length_stop else set()
                 if early_stop:
@@ -196,9 +199,11 @@ else:
                    "XDG_CONFIG_HOME": str(home / ".config"), "XDG_DATA_HOME": str(home / ".local/share"),
                    "XDG_CACHE_HOME": str(home / ".cache"), "XDG_STATE_HOME": str(home / ".local/state"),
                    "OPENROUTER_API_KEY": "fake-native-test-key",
-                   "SCOREBENCH_OPENROUTER_IP_FAMILY": ip_family,
                    "OPENROUTER_BASE": f"http://127.0.0.1:{server.server_port}",
                    "PI_OFFLINE": "1", "PI_TELEMETRY": "0", "OPENCODE_DISABLE_MODELS_FETCH": "true"}
+            if ip_family is not None:
+                env["SCOREBENCH_OPENROUTER_IP_FAMILY"] = ip_family
+            expected_family = "4" if ip_family is None else ip_family
             prompt = "Use the write tool to create probe.txt containing scorebench-probe, then say done."
             if kind == "Pi":
                 command = [binary, "--provider", "openrouter", "--model", model,
@@ -221,6 +226,25 @@ else:
                     events = [json.loads(line) for line in (accounting / "native-output.jsonl").read_text().splitlines()]
                     session = events[-1]["sessionID"]
                     recovery = [*launcher, "--recover-session", session]
+                    if delayed_receipt:
+                        failed = json.loads((accounting / "result.json").read_text())
+                        self.assertFalse(failed["accounting_ok"])
+                        self.assertEqual(len(server.requests), 2)
+                        server.generations["gen-2"]["finish_reason"] = "stop"
+                        reconcile = [sys.executable, str(SCRIPTS / "openrouter_reconcile.py"), "--workspace", str(work)]
+                        deadline = time.monotonic() + 65
+                        while True:
+                            check = subprocess.run([*reconcile, "--check"], env=env, capture_output=True, text=True, timeout=30)
+                            self.assertEqual((accounting / "usage.jsonl").read_bytes(), prefix)
+                            if check.returncode == 0:
+                                break
+                            self.assertLess(time.monotonic(), deadline, check.stderr + check.stdout)
+                            time.sleep(1)
+                        repaired = subprocess.run(reconcile, env=env, capture_output=True, text=True, timeout=30)
+                        self.assertEqual(repaired.returncode, 0, repaired.stdout + repaired.stderr)
+                        self.assertEqual(len(server.requests), 2)
+                        prefix = (accounting / "usage.jsonl").read_bytes()
+                        self.assertEqual((accounting / "token-state.json").read_bytes(), baseline)
                     preview = subprocess.run([*recovery, "--check", "--", *command], env=env, cwd=work,
                                              capture_output=True, text=True, timeout=45)
                     self.assertEqual(preview.returncode, 0, preview.stderr)
@@ -247,7 +271,7 @@ else:
                     if length_stop or early_stop:
                         self.assertEqual(request.get("max_tokens"), 1000 if compaction else 128000)
                 ledger = [json.loads(line) for line in (work / ".scorebench/openrouter/usage.jsonl").read_text().splitlines()]
-                self.assertEqual(len(ledger), len(server.requests))
+                self.assertEqual(len(ledger), len(server.requests) + int(delayed_receipt))
                 snapshots = [json.loads(line) for line in (work / "snapshots.jsonl").read_text().splitlines()]
                 first, last = snapshots[0], snapshots[-1]
                 self.assertEqual(first[first.index("--total-tokens") + 1], "0")
@@ -260,14 +284,16 @@ else:
                     self.assertAlmostEqual(float(last[last.index(flag) + 1]), expected)
                 self.assertNotIn("fake-native-test-key", (work / ".scorebench/openrouter/usage.jsonl").read_text())
                 self.assertTrue(json.loads((work / ".scorebench/openrouter/result.json").read_text())["completion_confirmed"])
-                self.assertEqual(json.loads((work / ".scorebench/openrouter/result.json").read_text())["transport"]["ip_family"], ip_family)
-                self.assertIn(f"IP family {ip_family}; TLS verification enabled", result.stderr)
+                self.assertEqual(json.loads((work / ".scorebench/openrouter/result.json").read_text())["transport"]["ip_family"], expected_family)
+                self.assertIn(f"IP family {expected_family}; TLS verification enabled", result.stderr)
                 self.assertIn('"finish"', (work / "pings.jsonl").read_text())
                 if receipt_lookup:
-                    self.assertEqual(server.generation_reads, ["gen-2"])
-                    self.assertEqual(count, 2)
-                    self.assertEqual(ledger[-1]["reconciliation"]["source"], "openrouter_generation_api")
-                    self.assertFalse((work / ".scorebench/openrouter/reentries.json").exists())
+                    self.assertEqual(set(server.generation_reads), {"gen-2"})
+                    self.assertEqual(count, 3 if delayed_receipt else 2)
+                    self.assertEqual(next(r for r in ledger if r.get("reconciliation"))["reconciliation"]["source"], "openrouter_generation_api")
+                    if not delayed_receipt:
+                        self.assertEqual(server.generation_reads, ["gen-2"])
+                        self.assertFalse((work / ".scorebench/openrouter/reentries.json").exists())
                 if length_stop or early_stop:
                     self.assertEqual(count, 4 if compaction else 3)
                     recovery = json.loads((work / ".scorebench/openrouter/reentries.json").read_text())
@@ -275,7 +301,7 @@ else:
                     native = [json.loads(line) for line in (work / ".scorebench/openrouter/native-output.jsonl").read_text().splitlines()]
                     self.assertEqual({e["sessionID"] for e in native}, {recovery["session_id"]})
                     self.assertTrue(any(e.get("part", {}).get("reason") == ("stop" if early_stop else "length") for e in native))
-                    self.assertEqual(recovery["attempts"][0]["reason"], "early_stop" if early_stop else "length")
+                    self.assertEqual(recovery["attempts"][0]["reason"], "receipt_recovery" if delayed_receipt else "early_stop" if early_stop else "length")
                     self.assertIn('"resume"', (work / "pings.jsonl").read_text())
                     if compaction:
                         export_env = dict(env, XDG_DATA_HOME=str(private_sessions))
@@ -306,6 +332,11 @@ else:
         self.run_agent("OpenCode", os.environ["SCOREBENCH_TEST_OPENCODE_BIN"], effort="high", length_stop=True, retained_recovery=True)
 
     @unittest.skipUnless(os.environ.get("SCOREBENCH_TEST_OPENCODE_BIN"), "set SCOREBENCH_TEST_OPENCODE_BIN")
+    def test_opencode_delayed_receipt_repair_then_same_session_recovery(self):
+        self.run_agent("OpenCode", os.environ["SCOREBENCH_TEST_OPENCODE_BIN"], early_stop=True,
+                       retained_recovery=True, receipt_lookup=True, delayed_receipt=True)
+
+    @unittest.skipUnless(os.environ.get("SCOREBENCH_TEST_OPENCODE_BIN"), "set SCOREBENCH_TEST_OPENCODE_BIN")
     def test_opencode_empty_stop_automatically_continues_same_session(self):
         self.run_agent("OpenCode", os.environ["SCOREBENCH_TEST_OPENCODE_BIN"], early_stop=True)
 
@@ -324,6 +355,10 @@ else:
     @unittest.skipUnless(os.environ.get("SCOREBENCH_TEST_PI_BIN"), "set SCOREBENCH_TEST_PI_BIN")
     def test_pi_ipv4_with_receipt_lookup(self):
         self.run_agent("Pi", os.environ["SCOREBENCH_TEST_PI_BIN"], receipt_lookup=True, ip_family="4")
+
+    @unittest.skipUnless(os.environ.get("SCOREBENCH_TEST_PI_BIN"), "set SCOREBENCH_TEST_PI_BIN")
+    def test_pi_explicit_auto_override_with_receipt_lookup(self):
+        self.run_agent("Pi", os.environ["SCOREBENCH_TEST_PI_BIN"], receipt_lookup=True, ip_family="auto")
 
     @unittest.skipUnless(os.environ.get("SCOREBENCH_TEST_OPENCODE_BIN"), "set SCOREBENCH_TEST_OPENCODE_BIN")
     def test_opencode_ipv4_retained_recovery(self):
