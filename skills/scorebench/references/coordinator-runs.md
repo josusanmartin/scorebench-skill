@@ -269,11 +269,20 @@ a replacement session to recover. Inspect `lifecycle_confirmed` in the wrapper
 result; missing server confirmation is an escalation, not proof of completion.
 Do not bind a coordinator Codex/Claude transcript to such a worker.
 
-For a retained OpenCode request/header transport gap, the runbook also offers
+The proxy attempts bounded generation lookups for missing final stream receipts
+before stopping new workers. Only conclusive matching usage is accepted
+automatically; this does not authorize partial accounting or resume an exited
+worker. Dated model IDs require a recorded OpenRouter catalog alias mapping.
+
+For a retained OpenCode request/header transport gap or a missing final stream
+receipt with a captured generation ID, the runbook also offers
 `--accept-accounting-gap` with `--recover-session ... --check`. Explain that cost
 and tokens will remain lower bounds, not exact totals, and obtain explicit owner
-acceptance before executing. This does not reset the budget, recover an unknown
-receipt, or allow future gaps to be ignored. A guard refusal is not a new model
+acceptance before executing. Stream gaps require a matching generation metadata
+lookup; the check includes recovered usage without double-counting reasoning.
+Zero cost or a null finish reason is not proof of settled billing. Lookup source,
+time and metadata are retained on execution, while the run stays partial. This
+does not reset the budget or allow future gaps to be ignored. A guard refusal is not a new model
 failure and does not authorize a replacement run.
 
 1. Create and verify fresh lane-specific work and agent-state volumes.

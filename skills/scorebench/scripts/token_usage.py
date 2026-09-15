@@ -10,6 +10,7 @@ from pathlib import Path
 from typing import Any
 
 from openrouter_gaps import ACK_FILE, PARTIAL_SOURCE, digest, load_ack
+from openrouter_generations import generation_usage
 
 
 # No built-in default: any fixed value is either relative (and silently follows
@@ -677,6 +678,21 @@ def openrouter_jsonl_snapshot(path: Path, *, accepted_gaps: dict | None = None) 
         snapshots.append(snapshot)
         if snapshot.cost_usd is not None:
             costs.append(snapshot.cost_usd)
+    for generation_id, lookup in (accepted_gaps or {}).get("generation_lookups", {}).items():
+        recovered = openrouter_usage_snapshot(generation_usage(lookup["data"], generation_id, accepted_gaps["model"],
+                                                               model_alias=lookup.get("model_alias")))
+        if generation_id in seen:
+            record = seen[generation_id]
+            original = openrouter_usage_snapshot(record.get("usage") if isinstance(record.get("usage"), dict) else record)
+            fields = ("total_tokens", "output_tokens", "cache_read_tokens", "cost_usd")
+            if (record.get("model") not in (None, accepted_gaps["model"], lookup["data"]["model"])
+                    or any(getattr(original, field) != getattr(recovered, field) for field in fields)
+                    or (original.reasoning_output_tokens is not None and recovered.reasoning_output_tokens is not None
+                        and original.reasoning_output_tokens != recovered.reasoning_output_tokens)):
+                raise SystemExit(f"generation lookup conflicts with an existing receipt for {generation_id}")
+            continue
+        snapshots.append(recovered)
+        costs.append(recovered.cost_usd)
     if not snapshots:
         return UsageSnapshot(
             total_tokens=0,

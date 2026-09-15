@@ -10,6 +10,7 @@ import unittest
 from unittest import mock
 import urllib.error
 import urllib.request
+from concurrent.futures import ThreadPoolExecutor
 from http.server import BaseHTTPRequestHandler, ThreadingHTTPServer
 from pathlib import Path
 
@@ -68,6 +69,7 @@ class FakeUpstream(BaseHTTPRequestHandler):
         return
 
     def do_POST(self):
+        self.server.inference_requests = getattr(self.server, "inference_requests", 0) + 1
         length = int(self.headers.get("Content-Length") or 0)
         body = self.rfile.read(length) if length else b""
         # Echo the auth header the proxy injected so the test can assert it.
@@ -100,7 +102,7 @@ class FakeUpstream(BaseHTTPRequestHandler):
             elif self.path.endswith("/responses"):
                 chunks = RESPONSES_STREAM_CHUNKS
             else:
-                chunks = STREAM_CHUNKS
+                chunks = getattr(self.server, "stream_chunks", STREAM_CHUNKS)
             for chunk in chunks:
                 self.wfile.write(chunk)
                 self.wfile.flush()
@@ -113,6 +115,25 @@ class FakeUpstream(BaseHTTPRequestHandler):
             self.send_header("Content-Length", str(len(NONSTREAM_BODY)))
             self.end_headers()
             self.wfile.write(NONSTREAM_BODY)
+
+    def do_GET(self):
+        if self.path == "/api/v1/models":
+            body = json.dumps({"data": getattr(self.server, "model_catalog", [])}).encode()
+            self.send_response(200)
+            self.send_header("Content-Length", str(len(body)))
+            self.end_headers()
+            self.wfile.write(body)
+            return
+        self.server.generation_reads = getattr(self.server, "generation_reads", []) + [self.path]
+        assert self.headers.get("Authorization") == "Bearer test-key-123"
+        replies = getattr(self.server, "generation_replies", [])
+        status, payload = replies.pop(0) if len(replies) > 1 else replies[0] if replies else (404, {})
+        body = json.dumps(payload).encode()
+        self.send_response(status)
+        self.send_header("Content-Type", "application/json")
+        self.send_header("Content-Length", str(len(body)))
+        self.end_headers()
+        self.wfile.write(body)
 
 
 class OpenRouterProxyTests(unittest.TestCase):
@@ -147,6 +168,109 @@ class OpenRouterProxyTests(unittest.TestCase):
 
     def _log_lines(self):
         return [json.loads(l) for l in self.log.read_text().splitlines() if l.strip()]
+
+    def _missing_stream(self, **changes):
+        self.upstream.stream_chunks = STREAM_CHUNKS[:2]
+        data = {"id": "gen-stream", "model": "anthropic/claude", "total_cost": 0.004,
+                "native_tokens_prompt": 100, "native_tokens_completion": 20,
+                "native_tokens_cached": 80, "native_tokens_reasoning": 10,
+                "finish_reason": "stop", "provider_name": "local-test", **changes}
+        self.upstream.generation_replies = [(200, {"data": data})]
+        return data
+
+    def test_missing_stream_receipt_is_reconciled_without_replaying_inference(self):
+        self._missing_stream()
+        status, _, body = self._post({"model": "anthropic/claude", "stream": True})
+        self.assertEqual(status, 200)
+        self.assertEqual(body, b"".join(STREAM_CHUNKS[:2]))
+        self.assertEqual(self.upstream.inference_requests, 1)
+        self.assertEqual(self.upstream.generation_reads, ["/api/v1/generation?id=gen-stream"])
+        record = self._log_lines()[0]
+        self.assertEqual(record["reconciliation"]["reason"], "generation stream omitted final usage")
+        self.assertEqual(record["reconciliation"]["source"], "openrouter_generation_api")
+        snapshot = usage_helper.openrouter_jsonl_snapshot(self.log)
+        self.assertEqual((snapshot.input_tokens, snapshot.output_tokens, snapshot.cache_read_tokens), (20, 20, 80))
+        self.assertEqual(snapshot.cost_usd, 0.004)
+        self.assertFalse(snapshot.accounting_incomplete)
+        self.assertFalse(self.proxy.usage_log.blocked.is_set())
+        self._post({"model": "anthropic/claude"})
+        self.assertEqual(self.upstream.inference_requests, 2)
+
+    def test_generation_lookup_waits_for_terminal_metadata(self):
+        data = self._missing_stream()
+        self.upstream.generation_replies = [(404, {}), (200, {"data": {**data, "finish_reason": None}}), (200, {"data": data})]
+        with mock.patch.object(orp.time, "sleep"):
+            self._post({"model": "anthropic/claude", "stream": True})
+        self.assertEqual(len(self.upstream.generation_reads), 3)
+        self.assertEqual(self.upstream.inference_requests, 1)
+        self.assertFalse(self.proxy.usage_log.blocked.is_set())
+
+    def test_generation_dated_model_requires_published_alias_mapping(self):
+        self._missing_stream(model="anthropic/claude-20260910")
+        self.upstream.model_catalog = [{"id": "anthropic/claude", "canonical_slug": "anthropic/claude-20260910"}]
+        self._post({"model": "anthropic/claude", "stream": True})
+        self.assertFalse(self.proxy.usage_log.blocked.is_set())
+        lookup = self._log_lines()[0]["reconciliation"]
+        self.assertEqual(lookup["model_alias"]["data"], self.upstream.model_catalog[0])
+        self.assertEqual(usage_helper.openrouter_jsonl_snapshot(self.log).cost_usd, 0.004)
+
+    def test_inconclusive_lookup_remains_a_retained_gap_not_free_inference(self):
+        self._missing_stream(total_cost=0, finish_reason=None)
+        with mock.patch.object(orp.time, "sleep"):
+            self._post({"model": "anthropic/claude", "stream": True})
+        self.assertEqual(len(self.upstream.generation_reads), 3)
+        gap = self._log_lines()[0]
+        self.assertEqual(gap["generation_id"], "gen-stream")
+        self.assertEqual(gap["model"], "anthropic/claude")
+        self.assertEqual(gap["lookup_error_type"], "GenerationPending")
+        self.assertNotIn("usage", gap)
+        with self.assertRaises(SystemExit):
+            usage_helper.openrouter_jsonl_snapshot(self.log)
+        with self.assertRaises(urllib.error.HTTPError) as raised:
+            self._post({"model": "anthropic/claude"})
+        self.assertEqual(raised.exception.code, 409)
+        raised.exception.close()
+        self.assertEqual(self.upstream.inference_requests, 1)
+
+    def test_invalid_lookup_identity_or_usage_cannot_unblock_inference(self):
+        for changes in ({"id": "gen-other"}, {"model": "other/model"}, {"total_cost": None},
+                        {"native_tokens_cached": None}, {"total_cost": 10**500}):
+            with self.subTest(changes=changes):
+                self.log.write_text("")
+                self.proxy.usage_log.blocked.clear()
+                self._missing_stream(**changes)
+                self._post({"model": "anthropic/claude", "stream": True})
+                self.assertTrue(self.proxy.usage_log.blocked.is_set())
+                self.assertEqual(len(self._log_lines()), 1)
+                self.assertIn("accounting_error", self._log_lines()[0])
+
+    def test_new_inference_waits_for_receipt_reconciliation(self):
+        data = self._missing_stream()
+        lookup_entered, release, waiter_entered = threading.Event(), threading.Event(), threading.Event()
+        original_wait = self.proxy.usage_log.wait_reconciled
+        def lookup(*args, **kwargs):
+            lookup_entered.set()
+            assert release.wait(5)
+            return {"source": "openrouter_generation_api", "fetched_at": 1, "data": data}
+        def wait(timeout):
+            if self.proxy.usage_log._reconciling:
+                waiter_entered.set()
+            return original_wait(timeout)
+        with mock.patch.object(orp, "lookup_generation", side_effect=lookup), \
+                mock.patch.object(self.proxy.usage_log, "wait_reconciled", side_effect=wait), \
+                ThreadPoolExecutor(max_workers=2) as pool:
+            first = pool.submit(self._post, {"model": "anthropic/claude", "stream": True})
+            try:
+                self.assertTrue(lookup_entered.wait(3))
+                second = pool.submit(self._post, {"model": "anthropic/claude"})
+                self.assertTrue(waiter_entered.wait(3))
+                self.assertEqual(self.upstream.inference_requests, 1)
+                self.assertFalse(second.done())
+            finally:
+                release.set()
+            self.assertEqual(first.result(timeout=5)[0], 200)
+            self.assertEqual(second.result(timeout=5)[0], 200)
+        self.assertEqual(self.upstream.inference_requests, 2)
 
     def test_nonstreaming_passthrough_and_usage_capture(self):
         status, headers, body = self._post({"model": "anthropic/claude", "messages": []})
@@ -337,6 +461,36 @@ class OpenRouterProxyTests(unittest.TestCase):
         handler.wfile = io.BytesIO()
         handler._pump_stream(io.BytesIO(b"".join(ANTHROPIC_STREAM_CHUNKS[:-1])), record_usage=True)
         self.assertTrue(self.proxy.usage_log.blocked.is_set())
+        with self.assertRaises(SystemExit):
+            usage_helper.openrouter_jsonl_snapshot(self.log)
+
+    def test_final_usage_with_nonempty_choices_does_not_need_done_marker(self):
+        final = json.loads(STREAM_CHUNKS[2].decode().removeprefix("data: "))
+        final["choices"] = [{"delta": {}, "finish_reason": "stop"}]
+        handler = object.__new__(orp.Handler)
+        handler.server, handler.command, handler.path = self.proxy, "POST", "/chat/completions"
+        handler.wfile = io.BytesIO()
+        body = b"data: " + json.dumps(final).encode() + b"\n\n"
+        with mock.patch.object(orp, "lookup_generation") as lookup:
+            handler._pump_stream(io.BytesIO(body), record_usage=True)
+        lookup.assert_not_called()
+        self.assertFalse(self.proxy.usage_log.blocked.is_set())
+        self.assertEqual(usage_helper.openrouter_jsonl_snapshot(self.log).cost_usd, 0.004)
+
+    def test_stream_reset_lookup_cannot_erase_an_independent_gap(self):
+        self.proxy.usage_log.error("unknown accepted generation")
+        data = self._missing_stream()
+        handler = object.__new__(orp.Handler)
+        handler.server, handler.command, handler.path = self.proxy, "POST", "/chat/completions"
+        handler.request_model, handler.wfile = "anthropic/claude", io.BytesIO()
+        upstream = mock.Mock()
+        upstream.read1.side_effect = [b"".join(STREAM_CHUNKS[:2]), ConnectionResetError()]
+        lookup = {"source": "openrouter_generation_api", "fetched_at": 1, "data": data}
+        with mock.patch.object(orp, "lookup_generation", return_value=lookup):
+            handler._pump_stream(upstream, record_usage=True)
+        self.assertTrue(self.proxy.usage_log.blocked.is_set())
+        self.assertEqual(len(self._log_lines()), 2)
+        self.assertEqual(self._log_lines()[1]["usage"]["cost"], 0.004)
         with self.assertRaises(SystemExit):
             usage_helper.openrouter_jsonl_snapshot(self.log)
 

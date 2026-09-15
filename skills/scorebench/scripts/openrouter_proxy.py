@@ -37,6 +37,8 @@ from http.server import BaseHTTPRequestHandler, ThreadingHTTPServer
 from pathlib import Path
 from uuid import uuid4
 
+from openrouter_generations import generation_usage, lookup_generation, stream_gap
+
 DEFAULT_UPSTREAM = "https://openrouter.ai"
 # Hop-by-hop and content-coding headers we must not blindly forward.
 _SKIP_REQUEST_HEADERS = {"host", "authorization", "x-api-key", "proxy-authorization", "content-length", "accept-encoding", "connection"}
@@ -94,6 +96,7 @@ class UsageLog:
         self._lock = threading.Lock()
         self._idle = threading.Condition()
         self._active = 0
+        self._reconciling = 0
         self.blocked = threading.Event()
         path.parent.mkdir(parents=True, exist_ok=True)
         # Create the file if absent so `token_usage.py start` sees a zero
@@ -114,6 +117,19 @@ class UsageLog:
         with self._idle:
             return self._idle.wait_for(lambda: self._active == 0, timeout)
 
+    def begin_reconciliation(self) -> None:
+        with self._idle:
+            self._reconciling += 1
+
+    def end_reconciliation(self) -> None:
+        with self._idle:
+            self._reconciling -= 1
+            self._idle.notify_all()
+
+    def wait_reconciled(self, timeout: float) -> bool:
+        with self._idle:
+            return self._idle.wait_for(lambda: self._reconciling == 0, timeout)
+
     def record(self, response_obj: dict) -> bool:
         usage = response_obj.get("usage")
         if not isinstance(usage, dict) or not usage:
@@ -123,6 +139,8 @@ class UsageLog:
             "model": response_obj.get("model"),
             "usage": usage,
         }
+        if response_obj.get("reconciliation"):
+            record["reconciliation"] = response_obj["reconciliation"]
         self._append(record)
         return True
 
@@ -168,16 +186,21 @@ class Handler(BaseHTTPRequestHandler):
     def _forward(self) -> None:
         length = int(self.headers.get("Content-Length") or 0)
         body = self.rfile.read(length) if length else None
+        if self._generation_request() and not self.server.usage_log.wait_reconciled(25):
+            self._send_proxy_error(503, "OpenRouter receipt lookup pending; no inference request sent")
+            return
         if self._generation_request() and self.server.usage_log.blocked.is_set():
             self._send_proxy_error(409, "OpenRouter accounting is incomplete; retain this run for review")
             return
         allowed_models = getattr(self.server, "allowed_models", None)
-        if allowed_models and self._generation_request():
+        self.request_model = None
+        if self._generation_request():
             try:
                 selected = json.loads(body or b"{}").get("model")
             except (ValueError, AttributeError):
                 selected = None
-            if selected not in allowed_models:
+            self.request_model = selected if isinstance(selected, str) else None
+            if allowed_models and selected not in allowed_models:
                 self.send_error(400, "model does not match the assigned OpenRouter recipe")
                 self.close_connection = True
                 return
@@ -192,6 +215,9 @@ class Handler(BaseHTTPRequestHandler):
         request = urllib.request.Request(url, data=body, headers=headers, method=self.command)
         request_id = uuid4().hex
         for attempt in range(1, 4):
+            if self._generation_request() and not self.server.usage_log.wait_reconciled(25):
+                self._send_proxy_error(503, "OpenRouter receipt lookup pending; no inference request sent")
+                return
             if self._generation_request() and self.server.usage_log.blocked.is_set():
                 self._send_proxy_error(409, "OpenRouter accounting is incomplete; retain this run for review")
                 return
@@ -288,42 +314,82 @@ class Handler(BaseHTTPRequestHandler):
     def _pump_stream(self, upstream, *, record_usage: bool, client_connected: bool = True) -> None:
         buffer = b""
         response_obj: dict = {"usage": {}}
-        while True:
-            try:
-                # HTTPResponse.read waits to fill the buffer; read1 forwards
-                # available bytes immediately, including small token deltas.
-                chunk = getattr(upstream, "read1", upstream.read)(65536)
-            except (OSError, HTTPException, EOFError) as exc:
-                if record_usage:
-                    details = self.server.usage_log.transport_error(exc, request_id=uuid4().hex,
-                        phase="stream", attempt=1)
-                    if response_obj.get("complete"):
-                        self.server.usage_log.record(response_obj)
-                    else:
-                        self.server.usage_log.error("generation stream interrupted before final usage",
-                            generation_id=response_obj.get("id"), **details)
-                return
-            if not chunk:
-                break
-            if record_usage:
-                buffer += chunk
-                while b"\n" in buffer:
-                    line, buffer = buffer.split(b"\n", 1)
-                    self._scan_sse_line(line, response_obj)
-            if client_connected:
+        settlement_held = False
+        try:
+            while True:
                 try:
-                    self.wfile.write(chunk)
-                    self.wfile.flush()
-                except (BrokenPipeError, ConnectionResetError):
-                    # Keep draining the billed upstream response so the final
-                    # SSE usage event is still captured.
-                    client_connected = False
-        if record_usage and buffer:
-            self._scan_sse_line(buffer, response_obj)
-        if record_usage and response_obj.get("complete"):
-            self.server.usage_log.record(response_obj)  # type: ignore[attr-defined]
-        elif record_usage and self._generation_request():
-            self.server.usage_log.error("generation stream omitted final usage", generation_id=response_obj.get("id"))
+                    # read1 forwards available bytes without waiting to fill
+                    # the buffer, including small token deltas.
+                    chunk = getattr(upstream, "read1", upstream.read)(65536)
+                except (OSError, HTTPException, EOFError) as exc:
+                    if record_usage:
+                        details = self.server.usage_log.transport_error(exc, request_id=uuid4().hex,
+                            phase="stream", attempt=1)
+                        if response_obj.get("complete"):
+                            self.server.usage_log.record(response_obj)
+                        else:
+                            self._reconcile_stream(response_obj, "generation stream interrupted before final usage", **details)
+                    return
+                if not chunk:
+                    break
+                if record_usage:
+                    buffer += chunk
+                    while b"\n" in buffer:
+                        line, buffer = buffer.split(b"\n", 1)
+                        self._scan_sse_line(line, response_obj)
+                    # A client can start its next turn as soon as it sees a
+                    # terminal event, before this connection reaches EOF.
+                    if response_obj.get("terminal_seen") and not settlement_held:
+                        self.server.usage_log.begin_reconciliation()
+                        settlement_held = True
+                if client_connected:
+                    try:
+                        self.wfile.write(chunk)
+                        self.wfile.flush()
+                    except (BrokenPipeError, ConnectionResetError):
+                        client_connected = False
+            if record_usage and buffer:
+                self._scan_sse_line(buffer, response_obj)
+            if record_usage and response_obj.get("complete"):
+                self.server.usage_log.record(response_obj)
+            elif record_usage and self._generation_request():
+                self._reconcile_stream(response_obj, "generation stream omitted final usage")
+        finally:
+            if settlement_held:
+                self.server.usage_log.end_reconciliation()
+
+    def _reconcile_stream(self, response_obj: dict, reason: str, **details) -> None:
+        log = self.server.usage_log
+        generation_id = response_obj.get("id")
+        model = getattr(self, "request_model", None) or response_obj.get("model")
+        gap = {"accounting_error": reason, "generation_id": generation_id}
+        log.begin_reconciliation()
+        try:
+            if not stream_gap(gap) or not model or response_obj.get("identity_conflict"):
+                raise ValueError("stream has no consistent generation and model binding")
+            lookup = lookup_generation(generation_id, model, upstream=self.server.upstream,
+                                       api_key=self.server.api_key, require_final=True)
+            data = lookup["data"]
+            usage = generation_usage(data, generation_id, model, model_alias=lookup.get("model_alias"))
+            if response_obj.get("model") not in (None, model, data["model"]):
+                raise ValueError("generation lookup model differs from the observed stream")
+            if not data.get("finish_reason"):
+                raise ValueError("generation termination is not confirmed")
+            observed = response_obj.get("usage", {})
+            for field, recovered in (("prompt_tokens", usage["prompt_tokens"]),
+                                     ("completion_tokens", usage["completion_tokens"]), ("cost", usage["cost"])):
+                if field in observed and (type(observed[field]) not in (int, float)
+                        or not math.isfinite(observed[field]) or observed[field] < 0 or observed[field] > recovered):
+                    raise ValueError("generation lookup contradicts observed stream usage")
+            # Persist the missing-receipt reason and provider evidence with the
+            # replacement receipt, without replaying the billable request.
+            log.record({"id": generation_id, "model": model, "usage": usage,
+                        "reconciliation": {**lookup, "reason": reason, "observed_usage": observed}})
+        except (ValueError, OverflowError, OSError, HTTPException) as exc:
+            log.error(reason, generation_id=generation_id, model=response_obj.get("model") or model,
+                      lookup_error_type=type(exc).__name__, **details)
+        finally:
+            log.end_reconciliation()
 
     def _scan_sse_line(self, line: bytes, response_obj: dict) -> None:
         line = line.strip()
@@ -331,6 +397,7 @@ class Handler(BaseHTTPRequestHandler):
             return
         payload = line[len(b"data:"):].strip()
         if payload == b"[DONE]":
+            response_obj["terminal_seen"] = True
             response_obj["complete"] = self._complete_usage(response_obj["usage"])
             return
         if not payload:
@@ -350,15 +417,19 @@ class Handler(BaseHTTPRequestHandler):
             usage = response.get("usage")
         if isinstance(usage, dict):
             self._merge_usage(response_obj["usage"], usage)
-        response_obj["id"] = (
-            obj.get("id") or message.get("id") or response.get("id") or response_obj.get("id")
-        )
-        response_obj["model"] = (
-            obj.get("model") or message.get("model") or response.get("model") or response_obj.get("model")
-        )
+        for field in ("id", "model"):
+            value = obj.get(field) or message.get(field) or response.get(field)
+            if value:
+                if response_obj.get(field) not in (None, value):
+                    response_obj["identity_conflict"] = True
+                response_obj[field] = value
         terminal = (obj.get("type") in ("response.completed", "response.incomplete", "message_stop")
-                    or (isinstance(obj.get("usage"), dict) and obj.get("choices") == []))
+                    or (isinstance(obj.get("usage"), dict) and obj.get("choices") == [])
+                    or (isinstance(obj.get("choices"), list) and any(
+                        isinstance(choice, dict) and choice.get("finish_reason") is not None
+                        for choice in obj["choices"])))
         if terminal:
+            response_obj["terminal_seen"] = True
             response_obj["complete"] = self._complete_usage(response_obj["usage"])
 
     @staticmethod

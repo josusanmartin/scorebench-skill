@@ -27,6 +27,7 @@ from openrouter_agents import agent_kind, check_installation, model_metadata, ro
 from openrouter_accounting import Publisher
 from openrouter_reentry import SessionOutput, admit_reentry, resume_command, write_json
 from openrouter_gaps import ACK_FILE, prepare_ack
+from openrouter_generations import lookup_generation
 
 
 OPENROUTER_HOST = "openrouter.ai"
@@ -408,9 +409,9 @@ def main(argv: Sequence[str] | None = None) -> int:
     parser.add_argument("--expected-model", default="", help="immutable model identifier from the assigned recipe")
     parser.add_argument("--expected-effort", default="", help="immutable reasoning effort from the assigned recipe")
     parser.add_argument("--check", action="store_true", help="validate launch prerequisites without starting a run or model")
-    parser.add_argument("--recover-session", default="", help="explicitly resume a retained, length-limited OpenCode session")
+    parser.add_argument("--recover-session", default="", help="explicitly assess or resume a retained OpenCode session")
     parser.add_argument("--accept-accounting-gap", action="store_true",
-                        help="owner acknowledgement: resume a retained transport failure with incomplete cost/token totals")
+                        help="owner acknowledgement: recover a retained transport/stream receipt gap with partial cost/token totals")
     parser.add_argument("--no-auto-reentry", action="store_true", help="retain length-limited OpenCode exits for explicit recovery")
     parser.add_argument(
         "--runtime-control",
@@ -507,10 +508,12 @@ def main(argv: Sequence[str] | None = None) -> int:
                 if ((result.get("accounting_ok") is not False and not retry_partial) or result.get("completion_confirmed") is not False
                         or result.get("runtime_control") not in ({}, {"reason": "accounting_unavailable"})
                         or control != result["runtime_control"]):
-                    raise RuntimeError("partial recovery requires a retained accounting-unavailable transport stop")
+                    raise RuntimeError("partial recovery requires a retained accounting-unavailable receipt stop")
                 start = json.loads((workspace / ".scorebench/supervisor-run-start.json").read_text())
                 gap_ack = prepare_ack(log_path, state_path, run_id=start["run"]["run_id"],
-                                      session_id=args.recover_session, result=result, control=control)
+                                      session_id=args.recover_session, result=result, control=control,
+                                      model=selected_model, lookup_generation=lambda generation_id, model:
+                                          lookup_generation(generation_id, model, upstream=_upstream_for(protocol, env), api_key=api_key))
             elif result.get("accounting_ok") is not True or result.get("completion_confirmed") is not False:
                 if result.get("runtime_control", {}).get("reason") == "accounting_unavailable":
                     raise RuntimeError("missing OpenRouter receipt blocks exact recovery; owner may explicitly use --accept-accounting-gap with --check to assess partial recovery")
@@ -532,12 +535,13 @@ def main(argv: Sequence[str] | None = None) -> int:
                 known_cost = float(preview_flags[preview_flags.index("--cost-usd") + 1])
                 budget = preview.read("progress")["progress"]["budget"]
                 if budget.get("type") != "cost":
-                    raise RuntimeError("partial transport recovery currently requires a fixed cost budget")
+                    raise RuntimeError("partial receipt recovery currently requires a fixed cost budget")
                 remaining = min(assessment["remaining"], max(0.0, float(budget["target"]) - known_cost))
                 if remaining < metadata["resumeCostUpperBound"]:
                     raise RuntimeError("insufficient confirmed remaining budget for partial recovery")
                 assessment.update(confirmed_cost_usd=known_cost, unknown_cost_usd=None,
                                   acknowledged_gaps=len(gap_ack["gaps"]), remaining=remaining)
+                assessment["generation_lookups"] = gap_ack.get("generation_lookups", {})
             if args.check:
                 print(json.dumps(assessment))
                 lock.close()

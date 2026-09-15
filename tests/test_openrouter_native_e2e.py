@@ -12,6 +12,7 @@ import sys
 import tempfile
 import threading
 import unittest
+from urllib.parse import parse_qs, urlsplit
 from http.server import BaseHTTPRequestHandler, ThreadingHTTPServer
 
 SCRIPTS = Path(__file__).resolve().parents[1] / "skills/scorebench/scripts"
@@ -24,6 +25,28 @@ class Provider(BaseHTTPRequestHandler):
 
     def do_GET(self):
         model = getattr(self.server, "model", MODEL)
+        if self.path == "/api/v1/models":
+            body = json.dumps({"data": getattr(self.server, "model_catalog", [])}).encode()
+            self.send_response(200)
+            self.send_header("Content-Type", "application/json")
+            self.send_header("Content-Length", str(len(body)))
+            self.end_headers()
+            self.wfile.write(body)
+            return
+        if urlsplit(self.path).path == "/api/v1/generation":
+            generation_id = parse_qs(urlsplit(self.path).query).get("id", [""])[0]
+            self.server.generation_reads.append(generation_id)
+            data = self.server.generations.get(generation_id)
+            if not data:
+                self.send_error(404)
+                return
+            body = json.dumps({"data": data}).encode()
+            self.send_response(200)
+            self.send_header("Content-Type", "application/json")
+            self.send_header("Content-Length", str(len(body)))
+            self.end_headers()
+            self.wfile.write(body)
+            return
         if self.path != f"/api/v1/models/{model}/endpoints":
             self.send_error(404)
             return
@@ -76,6 +99,8 @@ class Provider(BaseHTTPRequestHandler):
             {**envelope, "choices": [{"index": 0, "delta": {}, "finish_reason": reason}]},
             {**envelope, "choices": [], "usage": usage},
         ]
+        if seq in getattr(self.server, "omit_final_usage", set()):
+            events = events[:-1]
         body = ("".join("data: " + json.dumps(event) + "\n\n" for event in events) + "data: [DONE]\n\n").encode()
         self.send_response(200)
         self.send_header("Content-Type", "text/event-stream")
@@ -93,7 +118,7 @@ class Provider(BaseHTTPRequestHandler):
 
 
 class NativeE2ETests(unittest.TestCase):
-    def run_agent(self, kind, binary, model=MODEL, effort="low", length_stop=False, retained_recovery=False):
+    def run_agent(self, kind, binary, model=MODEL, effort="low", length_stop=False, retained_recovery=False, receipt_lookup=False):
         with tempfile.TemporaryDirectory(prefix="scorebench-native-") as root:
             root = Path(root)
             home, work, bin_dir = root / "home", root / "work", root / "bin"
@@ -130,6 +155,14 @@ else:
             server = ThreadingHTTPServer(("127.0.0.1", 0), Provider)
             server.lock, server.requests, server.workspace = threading.Lock(), [], work
             server.model = model
+            if receipt_lookup:
+                server.omit_final_usage = {2}
+                server.generation_reads = []
+                server.model_catalog = [{"id": model, "canonical_slug": model + "-20260910"}]
+                server.generations = {"gen-2": {"id": "gen-2", "model": model + "-20260910",
+                    "native_tokens_prompt": 100, "native_tokens_completion": 20,
+                    "native_tokens_cached": 40, "native_tokens_reasoning": 5,
+                    "total_cost": 0.002, "finish_reason": "stop"}}
             if length_stop:
                 server.length_steps = {2}
                 server.unit_cost = 1.0
@@ -202,13 +235,19 @@ else:
                 first, last = snapshots[0], snapshots[-1]
                 self.assertEqual(first[first.index("--total-tokens") + 1], "0")
                 count = len(server.requests)
-                for flag, expected in (("--total-tokens", 80 * count), ("--input-tokens", 50 * count),
+                for flag, expected in (("--total-tokens", 80 * count), ("--input-tokens", 50 * count + (10 if receipt_lookup else 0)),
                                        ("--output-tokens", 20 * count), ("--cache-read-tokens", 40 * count),
-                                       ("--cache-creation-tokens", 10 * count), ("--cost-usd", (1.0 if length_stop else 0.002) * count)):
+                                       ("--cache-creation-tokens", 10 * count - (10 if receipt_lookup else 0)),
+                                       ("--cost-usd", (1.0 if length_stop else 0.002) * count)):
                     self.assertAlmostEqual(float(last[last.index(flag) + 1]), expected)
                 self.assertNotIn("fake-native-test-key", (work / ".scorebench/openrouter/usage.jsonl").read_text())
                 self.assertTrue(json.loads((work / ".scorebench/openrouter/result.json").read_text())["completion_confirmed"])
                 self.assertIn('"finish"', (work / "pings.jsonl").read_text())
+                if receipt_lookup:
+                    self.assertEqual(server.generation_reads, ["gen-2"])
+                    self.assertEqual(count, 2)
+                    self.assertEqual(ledger[-1]["reconciliation"]["source"], "openrouter_generation_api")
+                    self.assertFalse((work / ".scorebench/openrouter/reentries.json").exists())
                 if length_stop:
                     self.assertEqual(count, 3)
                     recovery = json.loads((work / ".scorebench/openrouter/reentries.json").read_text())
@@ -238,6 +277,14 @@ else:
     @unittest.skipUnless(os.environ.get("SCOREBENCH_TEST_PI_BIN"), "set SCOREBENCH_TEST_PI_BIN")
     def test_pi(self):
         self.run_agent("Pi", os.environ["SCOREBENCH_TEST_PI_BIN"])
+
+    @unittest.skipUnless(os.environ.get("SCOREBENCH_TEST_OPENCODE_BIN"), "set SCOREBENCH_TEST_OPENCODE_BIN")
+    def test_opencode_missing_receipt_uses_generation_lookup(self):
+        self.run_agent("OpenCode", os.environ["SCOREBENCH_TEST_OPENCODE_BIN"], receipt_lookup=True)
+
+    @unittest.skipUnless(os.environ.get("SCOREBENCH_TEST_PI_BIN"), "set SCOREBENCH_TEST_PI_BIN")
+    def test_pi_missing_receipt_uses_generation_lookup(self):
+        self.run_agent("Pi", os.environ["SCOREBENCH_TEST_PI_BIN"], receipt_lookup=True)
 
     def test_offered_models_and_efforts_reach_provider_unchanged(self):
         binaries = [(kind, os.environ.get(name)) for kind, name in (

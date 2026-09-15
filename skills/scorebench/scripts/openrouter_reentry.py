@@ -22,10 +22,11 @@ CONTINUE_PROMPT = (
     "and explicit stops; do not restart the run or repeat unchanged submissions."
 )
 GAP_PROMPT = (
-    "The owner explicitly accepted partial accounting to recover this transport interruption. "
+    "The owner explicitly accepted partial accounting to recover this missing-receipt interruption. "
     "Continue the original assigned ScoreBench goal in the SAME session and workspace; preserve "
-    "run identity, model, effort, receipts and zero baseline. Existing receipts omit an unknown "
-    "charge: cost and tokens are lower bounds, and remaining budget is only an upper bound. "
+    "run identity, model, effort, receipts and zero baseline. Generation lookups, when available, "
+    "are already included by the supervisor; do not add them again. Final charges remain uncertain: "
+    "cost and tokens are lower bounds, and remaining budget is only an upper bound. "
     "Do not claim exact accounting or reset the ledger. The supervisor owns finalization. "
     "Obey budget and explicit stops. Inspect your own history before retrying an uncertain "
     "submission; never duplicate it blindly. Use concrete, bounded tool work."
