@@ -275,20 +275,44 @@ and do not invalidate earlier receipts. Requests are not followed through
 redirects or replayed by the proxy after ambiguous acceptance.
 
 After a response starts, the proxy retains a conclusive final usage receipt even
-if the connection subsequently breaks. An interrupted stream with only partial
-usage, or a request sent without receiving a response, still has unknown cost.
-The ledger records that gap and the proxy blocks new inference requests while
+if the connection subsequently breaks or omits `[DONE]`. If a final stream receipt
+is missing but its generation ID was captured, bounded generation-metadata GETs
+run before accounting fails; new inference waits during this check. Valid native
+usage, reported cost and a terminal finish reason supply a receipt with lookup
+provenance, without replaying inference. The metadata must match the assigned
+model, or its dated canonical model through an explicit `/api/v1/models` alias
+mapping retained with the lookup. Never infer aliases from name prefixes.
+
+An inconclusive lookup, an interrupted stream without a generation ID, or a
+request sent without receiving a response still has unknown cost. The ledger
+records that gap and the proxy blocks new inference requests while
 allowing already-started responses to drain. Neither SDK retries nor later
 successful receipts resolve the missing cost. Do not use length-limit recovery
 for an incomplete ledger or report the last accepted snapshot as final spend.
 
-Retained OpenCode request/header transport failures have a separate owner-approved
+Retained OpenCode request/header transport failures and missing final stream
+receipts with a captured generation ID have a separate owner-approved
 partial-accounting recovery mode. See the canonical experiment-launching runbook:
 `--recover-session ses_ORIGINAL --accept-accounting-gap --check` assesses the same
 session without inference or accounting writes. Execution without `--check` needs
 explicit owner acceptance that missing charges remain unknown, confirmed tokens
 and cost are lower bounds, and remaining budget is only an upper bound. Do not
 choose this mode autonomously or imply a hard total-spend guarantee.
+
+For stream gaps, the check uses the existing OpenRouter key to retrieve generation
+metadata, validates the exact generation ID and assigned model, and requires native
+input/output/cache counts and reported `total_cost`. It includes the recovered
+usage once, with reasoning counted within output. A zero cost and null finish
+reason remain observed metadata, not proof of free inference or settled billing;
+the run stays partial. The check reports its proposed totals and lookup evidence
+without writing them. On approved execution, the acknowledgement preserves the
+source, retrieval time and metadata without replacing the original error row.
+Lookups with missing fields, mismatched IDs/models or conflicting receipts remain
+blockers. Retry transient lookup failures with another check, not inference.
+
+Refresh the complete coordinator skill before using this flow with an older
+retained workspace; `openrouter_generations.py` must accompany the entrypoint.
+An old helper refusing stream gaps cannot be fixed by repeating the same check.
 
 The supervisor preserves every receipt and the original baseline, records hashed
 evidence in `accepted-gaps.json`, and publishes `openrouter_usage_partial` with
