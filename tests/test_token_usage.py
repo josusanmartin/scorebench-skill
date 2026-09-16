@@ -107,6 +107,28 @@ class TokenUsageTests(unittest.TestCase):
 
         self.assertIn("--accounting-version 3", result.stdout)
 
+    def test_claude_companion_results_are_bound_to_baseline(self):
+        transcript = self.root / "claude.jsonl"
+        results = self.root / "results.jsonl"
+        transcript.write_text("")
+        results.write_text("")
+        self.run_helper("start", "--claude-jsonl", str(transcript),
+                        "--claude-results", str(results), "--allow-empty")
+        state = json.loads(self.state.read_text())
+        self.assertEqual(state["source_binding"]["paths"], {
+            "claude_jsonl": str(transcript.resolve()),
+            "claude_results": str(results.resolve()),
+        })
+
+    def test_openrouter_ledger_is_bound_to_baseline(self):
+        ledger = self.root / "openrouter.jsonl"
+        ledger.write_text("")
+        self.run_helper("start", "--openrouter-jsonl", str(ledger))
+        state = json.loads(self.state.read_text())
+        self.assertEqual(state["source_binding"]["paths"], {
+            "openrouter_jsonl": str(ledger.resolve()),
+        })
+
     def test_codex_jsonl_is_run_relative(self):
         log = self.root / "codex.jsonl"
         thread_id = "019fc3d8-e800-7f62-be5f-78bfdbeea6ba"
