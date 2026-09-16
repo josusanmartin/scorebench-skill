@@ -106,6 +106,55 @@ class ReentryTests(unittest.TestCase):
                 budget.update(old)
         self.publisher.ping.assert_not_called()
 
+    def test_recorded_budget_admits_reported_case_without_changing_budget(self):
+        budget = self.progress["progress"]["budget"]
+        budget.update(remaining=.2148, used=.7852, continuation={"policy": "cost-tail-v1", "admission": "recorded_budget"})
+        self.metadata["resumeCostUpperBound"] = .2903
+        before = dict(budget)
+        result = self.admit(check=True)
+        self.assertEqual(result["admission_method"], "recorded_budget")
+        self.assertNotIn("continuation_allowance_usd", result)
+        self.assertEqual(budget, before)
+        for i in range(3):
+            self.assertEqual(len(self.admit()["attempts"]), i + 1)
+        with self.assertRaisesRegex(AccountingError, "limit"):
+            self.admit()
+
+    def test_recorded_budget_never_waives_unknown_cost(self):
+        budget = self.progress["progress"]["budget"]
+        budget.update(remaining=.2148, continuation={"policy": "cost-tail-v1", "admission": "recorded_budget"})
+        self.metadata["resumeCostUpperBound"] = .01
+        # Explicit partial recovery keeps its conservative admission check.
+        with self.assertRaises(AccountingError):
+            self.metadata["resumeCostUpperBound"] = .2903
+            self.admit(accounting_gap=True)
+        self.metadata["resumeCostUpperBound"] = .01
+        for change in ({"accounting_complete": False},
+                       {"used_is_lower_bound": True}, {"remaining_is_upper_bound": True},
+                       {"reached": True}, {"target": True}, {"target": float("inf")},
+                       {"remaining": 0}, {"remaining": 2}, {"remaining": float("nan")},
+                       {"continuation": {"policy": "cost-tail-v1", "admission": "unknown"}}):
+            old = dict(budget)
+            budget.update(change)
+            with self.subTest(change=change), self.assertRaises(AccountingError):
+                self.admit()
+            budget.clear()
+            budget.update(old)
+        self.publisher.ping.assert_not_called()
+
+    def test_estimates_are_not_a_cutoff_for_new_protocol(self):
+        budget = self.progress["progress"]["budget"]
+        budget.update(continuation={"policy": "cost-tail-v1", "admission": "recorded_budget"})
+        for remaining in (.2148, .000001):
+            budget["remaining"] = remaining
+            for estimate in (.2903, .32, 100, None):
+                self.metadata["resumeCostUpperBound"] = estimate
+                with self.subTest(remaining=remaining, estimate=estimate):
+                    result = self.admit(check=True)
+                    self.assertTrue(result["recoverable"])
+                    self.assertEqual(result["admission_method"], "recorded_budget")
+        self.publisher.ping.assert_not_called()
+
     def test_wrong_run_or_owner_session_fails_closed(self):
         self.progress["run"]["run_id"] = "wrong-run"
         with self.assertRaises(AccountingError):

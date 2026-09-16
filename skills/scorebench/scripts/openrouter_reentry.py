@@ -17,6 +17,27 @@ from openrouter_accounting import AccountingError
 MAX_REENTRIES = 3
 MAX_EXPORT_BYTES = 64 * 1024 * 1024
 CONTINUABLE_FINISHES = {"length", "stop"}
+
+
+def cost_admission(budget: dict, estimate, *, remaining=None, accounting_gap=False) -> dict:
+    remaining = budget.get("remaining") if remaining is None else remaining
+    if (budget.get("type") != "cost" or budget.get("available") is not True or budget.get("reached") is not False
+            or type(remaining) not in (int, float) or not math.isfinite(remaining) or remaining <= 0):
+        raise AccountingError("insufficient resume budget: conclusive remaining budget required")
+    policy, target = budget.get("continuation"), budget.get("target")
+    if not accounting_gap and isinstance(policy, dict) and policy.get("policy") == "cost-tail-v1":
+        if (budget.get("accounting_complete") is False or budget.get("used_is_lower_bound") is True
+                or budget.get("remaining_is_upper_bound") is True or policy.get("admission") != "recorded_budget"
+                or type(target) not in (int, float) or not math.isfinite(target) or not 0 < remaining <= target):
+            raise AccountingError("insufficient resume budget: conclusive remaining recorded budget required")
+        return {"admission_method": "recorded_budget", "policy": "cost-tail-v1"}
+    # Historical protocols and explicitly approved partial recovery retain their
+    # conservative admission rule. Unknown charges are not spendable budget.
+    if type(estimate) not in (int, float) or not math.isfinite(estimate) or estimate <= 0 or remaining < estimate:
+        raise AccountingError("insufficient resume budget for a cold-context request; retain the worker")
+    return {"admission_method": "cold_context_estimate", "estimated_overrun_usd": max(0.0, estimate - remaining)}
+
+
 CONTINUE_PROMPT = (
     "The previous response reached its output limit. Continue the same assigned ScoreBench goal "
     "in this session and workspace. Keep the original run identity, model, effort, and token baseline. "
@@ -195,10 +216,7 @@ def admit_reentry(publisher, metadata: dict, command: list[str], session: str, *
             or type(remaining) not in (int, float) or not math.isfinite(remaining) or remaining <= 0):
         raise AccountingError("reentry requires a conclusive remaining fixed budget")
     estimate = metadata.get("resumeCostUpperBound")
-    if budget["type"] == "cost" and (
-        type(estimate) not in (int, float) or not math.isfinite(estimate) or estimate <= 0 or remaining < estimate
-    ):
-        raise AccountingError("insufficient resume budget for a cold-context request; retain the worker")
+    admission = cost_admission(budget, estimate, accounting_gap=accounting_gap) if budget["type"] == "cost" else {}
     if manual and publisher.read("gate").get("ready") is not True:
         raise AccountingError("retained worker execution gate is not ready")
     finish_reason = inspect_session(command, session, publisher.workspace, publisher.env,
@@ -215,10 +233,12 @@ def admit_reentry(publisher, metadata: dict, command: list[str], session: str, *
                 "reason": reason, "native_finish_reason": finish_reason,
                 "attempts_remaining": MAX_REENTRIES - len(record["attempts"]),
                 "remaining": remaining, "resume_cost_estimate": estimate,
+                **admission,
                 "accounting_complete": not accounting_gap,
                 "remaining_is_upper_bound": accounting_gap,
                 "context_window": metadata.get("contextWindow"), "max_output_tokens": metadata.get("maxTokens")}
     record["attempts"].append({"reason": reason, "native_finish_reason": finish_reason, "manual": manual, "remaining": remaining,
+                               **admission,
                                "resume_cost_estimate": estimate, "at": time.time(),
                                "context_window": metadata.get("contextWindow"), "max_output_tokens": metadata.get("maxTokens")})
     # Reserve the attempt before reopening lifecycle or launching another model.

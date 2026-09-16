@@ -220,9 +220,18 @@ checks. Pi reentry is not supported. OpenCode's output allowance is raised from
 32,000 to 128,000 where provider metadata supports it; context remains
 provider-derived and reasoning effort is unchanged. Provider limits can still
 truncate a response. Never reset the baseline or start a replacement session.
-Cost admission reserves a conservative cold full-context request plus output;
-if the remainder is too small, recovery is refused rather than overspending
-just to exhaust it. Actual cost still comes only from the response ledger.
+For new cost experiments with the server's `cost-tail-v1` policy, continuation
+requires conclusive positive remaining recorded budget. There is no percentage
+allowance or forecast-cost cutoff; any cold-context estimate is diagnostic only.
+This does not raise `budget.target`: stop when `budget.reached` is true. The
+three-attempt limit still applies. Partial or unknown accounting does not
+qualify for this automatic continuation policy; explicitly approved partial
+recovery retains conservative admission checks. Actual cost still comes only
+from the response ledger. In-flight requests may overshoot; this is not a hard
+billing cap.
+Under that policy, measured over-budget submissions retain their scores and
+evidence but are invalidated for comparison. Existing protocols and prepaid
+MPP allocations retain their original budget policies.
 For retained OpenCode workers, first run the documented `--recover-session
 ses_... --check` flow in the site's experiment-launching runbook, then request
 owner approval before executing it. It preserves pairing and run identity.
