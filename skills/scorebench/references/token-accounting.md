@@ -119,6 +119,17 @@ Use Claude Code's persisted project transcript, not captured
 per-message usage before its final `result` summary, so the helper rejects that
 shape rather than report an apparently exact undercount.
 
+New container supervisors also pin `SCOREBENCH_CLAUDE_RESULTS_JSONL`. Keep this
+binding unchanged. The helper uses only terminal, per-model `modelUsage` records
+from that companion stream, never provisional assistant usage. It reconciles
+those totals with the persisted transcript, includes auxiliary models such as
+Haiku, and reports their native USD costs including cache reads. Single-prompt
+invocation results are deduplicated by UUID and accumulated across supervised
+same-session reentries. Mixed sessions and regressing counters fail closed.
+Live transcript snapshots can precede the auxiliary-model final report; use
+supervisor-reconciled final totals for completed-run comparisons. Missing final
+model usage is an accounting warning/failure, not evidence of zero helper spend.
+
 For Grok, parse the active session's native `updates.jsonl` file. The launcher
 or active Grok session must identify the session ID; do not select an unrelated
 session by scanning all history.
