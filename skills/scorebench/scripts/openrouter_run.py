@@ -26,7 +26,7 @@ from openrouter_proxy import DEFAULT_UPSTREAM, Handler, UsageLog
 from openrouter_transport import IP_FAMILY_ENV, configured_ip_family
 from openrouter_agents import agent_kind, check_installation, model_metadata, route_agent, validate_route
 from openrouter_accounting import Publisher
-from openrouter_reentry import CONTINUABLE_FINISHES, SessionOutput, admit_reentry, resume_command, write_json
+from openrouter_reentry import CONTINUABLE_FINISHES, SessionOutput, admit_reentry, cost_admission, resume_command, write_json
 from openrouter_gaps import ACK_FILE, prepare_ack
 from openrouter_generations import lookup_generation
 from openrouter_journal import reconcile_requests
@@ -555,8 +555,7 @@ def main(argv: Sequence[str] | None = None) -> int:
                 budget = preview.read("progress")["progress"]["budget"]
                 if budget.get("type") == "cost":
                     remaining = min(assessment["remaining"], max(0.0, float(budget["target"]) - known_cost))
-                    if remaining < metadata["resumeCostUpperBound"]:
-                        raise RuntimeError("insufficient remaining budget after receipt reconciliation")
+                    assessment.update(cost_admission(budget, metadata["resumeCostUpperBound"], remaining=remaining))
                     assessment.update(confirmed_cost_usd=known_cost, remaining=remaining)
             if gap_ack:
                 # The last server snapshot can predate several complete receipts.
