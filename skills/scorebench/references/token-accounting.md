@@ -283,9 +283,33 @@ This is a local ledger read plus one ScoreBench request; it does not make an
 extra model call. A single in-flight model response can still cross the budget.
 Usage becomes available when that response completes; a flat ledger during a
 stream does not prove zero spend. Follow the assigned budget completion policy,
-not a rounded remaining-dollar estimate. Missing usage fails accounting; a
+not a rounded remaining-dollar estimate. Missing included usage fails accounting; a
 partial set of reported costs is never a complete run cost. Preserve the ledger
 and report the missing measurement rather than resetting or fabricating it.
+
+For scientific experiments, updated wrappers use the server-announced
+`openrouter-infrastructure-v1` policy. Explicit 408/429/500/502/503/504 upstream
+failures without model output are excluded infrastructure requests: zero
+experiment cost and tokens by definition, not a claim of zero provider billing.
+The append-only ledger preserves each exclusion, request ID, response digest,
+status/error code and any provider usage. Published provenance is
+`openrouter_experiment_usage`, confidence `exact`, accounting basis `experiment`.
+Final results separately report excluded requests, known excluded provider cost,
+and how many excluded requests have unknown provider cost. Do not mark these
+runs approximate solely because of excluded infrastructure overhead.
+
+The proxy retries header/non-stream gateway errors and 429 rate limits at most
+three times, with jitter/backoff or `Retry-After`; waits above 60 seconds are
+delegated to the native client with the header intact. Explicit stream gateway
+errors before output are excluded but passed through, never blindly replayed.
+Authentication/credits/invalid requests need correction. Model output (including
+reasoning and length stops) is still counted; missing receipts and ambiguous
+TLS disconnects are not automatically gateway exclusions. Standalone/prepaid
+allocations keep strict provider accounting. Existing historical gaps require
+evidence, not a baseline reset or a manual edit to the ledger.
+
+Keep `http-errors.jsonl` with the ledger and request journal. It saves only
+sanitized status/type/size/hash diagnostics, not prompt or response contents.
 
 Connection failures are not all accounting gaps. The proxy retries a connection
 that demonstrably failed before the inference request was sent, at most three

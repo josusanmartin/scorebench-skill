@@ -14,6 +14,7 @@ import time
 from uuid import uuid4
 
 from openrouter_generations import STREAM_ERRORS, generation_usage, stream_gap
+from openrouter_failures import exclusion_records
 
 JOURNAL_FILE = "requests.sqlite3"
 UNSETTLED = ("pending", "unresolved", "conflict")
@@ -225,6 +226,7 @@ def append_record(path, record):
 def reconcile_requests(path: Path, lookup, *, check=False, abandoned=False, max_lookups=4) -> dict:
     """Caller holds the ledger writer lock; lookup performs metadata GETs only."""
     records = read_records(path)
+    _, excluded = exclusion_records(records)
     resolved = resolved_error_lines(records)
     journal_path = path.with_name(JOURNAL_FILE)
     journal = RequestJournal(path, readonly=check) if journal_path.exists() or not check else None
@@ -245,6 +247,12 @@ def reconcile_requests(path: Path, lookup, *, check=False, abandoned=False, max_
     result = {"checked": check, "lookups": 0, "reconciled": 0, "unresolved": 0, "without_generation_id": 0}
     receipted_requests = {item.get("request_id") for _, _, item in records if item.get("usage")}
     for row in rows:
+        if row["request_id"] in excluded and row["state"] != "conflict":
+            if not check:
+                journal.finish(row["request_id"], "excluded", excluded[row["request_id"]]["accounting_policy"])
+            continue
+        if row["state"] == "excluded":
+            raise ValueError("excluded OpenRouter request has no durable policy evidence")
         if row["state"] == "accounted" and row["request_id"] not in receipted_requests:
             row["state"] = "pending"
         if row["state"] not in UNSETTLED or (row["state"] == "pending" and not abandoned):
@@ -297,6 +305,8 @@ def reconcile_requests(path: Path, lookup, *, check=False, abandoned=False, max_
     from token_usage import openrouter_usage_snapshot
     seen = {}
     for _, _, record in records:
+        if record.get("event") in {"accounting_policy", "infrastructure_excluded"}:
+            continue
         if not record.get("accounting_error"):
             if openrouter_usage_snapshot(record.get("usage", record)) is None:
                 raise ValueError("retained OpenRouter receipt has invalid usage")

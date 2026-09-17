@@ -287,6 +287,15 @@ before stopping new workers. Only conclusive matching usage is accepted
 automatically; this does not authorize partial accounting or resume an exited
 worker. Dated model IDs require a recorded OpenRouter catalog alias mapping.
 
+On updated experimental workers, classified gateway failures without model
+output use `openrouter-infrastructure-v1`: bounded retries and durable overhead
+exclusions instead of an accounting failure. Their experiment usage remains
+exact; excluded provider charges may be unknown. Inspect `result.json`'s
+accounting basis and excluded request counts, plus `http-errors.jsonl`, before
+calling a gateway retry an incident. Do not generalize this to unknown TLS
+acceptance, partial output, authentication failures, or old logs lacking HTTP
+evidence. See [the policy and failure modes](token-accounting.md#openrouter-automatic-detection-with-authoritative-usd-cost).
+
 Updated proxies journal every inference attempt before sending and persist its
 generation ID when first observed in the response. The private
 `.scorebench/openrouter/requests.sqlite3` stores identity, request hashes and

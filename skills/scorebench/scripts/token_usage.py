@@ -48,6 +48,7 @@ class UsageSnapshot:
     # of components() because it is a float, not a token count.
     cost_usd: float | None = None
     accounting_incomplete: bool = False
+    experiment_accounting: bool = False
 
     def components(self) -> dict[str, int]:
         return {
@@ -783,8 +784,11 @@ def openrouter_jsonl_snapshot(path: Path, *, accepted_gaps: dict | None = None) 
     raw = path.read_text(encoding="utf-8")
     lines = raw.splitlines()
     from openrouter_journal import read_records, resolved_error_lines
+    from openrouter_failures import exclusion_records
     try:
-        resolved = resolved_error_lines(read_records(path, allow_partial_tail=True, raw=raw))
+        records = read_records(path, allow_partial_tail=True, raw=raw)
+        resolved = resolved_error_lines(records)
+        experiment_accounting, _ = exclusion_records(records)
     except json.JSONDecodeError as exc:
         raise SystemExit(f"invalid OpenRouter usage JSONL at {path}: {exc.msg}") from exc
     except (ValueError, OSError, TypeError, KeyError) as exc:
@@ -810,6 +814,8 @@ def openrouter_jsonl_snapshot(path: Path, *, accepted_gaps: dict | None = None) 
                 and accepted_gaps["gaps"].get(str(line_number)) == digest(lines[line_number - 1].encode())):
             continue
         if line_number in resolved:
+            continue
+        if isinstance(record, dict) and record.get("event") in {"accounting_policy", "infrastructure_excluded"}:
             continue
         if not isinstance(record, dict) or record.get("accounting_error"):
             raise SystemExit(f"incomplete OpenRouter usage at {path}:{line_number}")
@@ -855,6 +861,7 @@ def openrouter_jsonl_snapshot(path: Path, *, accepted_gaps: dict | None = None) 
             reasoning_output_tokens=0,
             cost_usd=0.0,
             accounting_incomplete=accepted_gaps is not None,
+            experiment_accounting=experiment_accounting,
         )
     aggregated = aggregate_snapshots(snapshots, path, "OpenRouter usage")
     return UsageSnapshot(
@@ -868,6 +875,7 @@ def openrouter_jsonl_snapshot(path: Path, *, accepted_gaps: dict | None = None) 
             round(math.fsum(costs), COST_DECIMAL_PLACES) if len(costs) == len(snapshots) else None
         ),
         accounting_incomplete=accepted_gaps is not None,
+        experiment_accounting=experiment_accounting,
     )
 
 
@@ -1161,6 +1169,9 @@ def current_provenance(
 def cmd_status(args: argparse.Namespace) -> int:
     state, snapshot, run_total, run_components, run_cost = current_run_usage(args)
     tokens_source, usage_source, confidence = current_provenance(args, state)
+    if snapshot.experiment_accounting:
+        from openrouter_failures import SOURCE
+        tokens_source = SOURCE
     if snapshot.accounting_incomplete:
         tokens_source, confidence = PARTIAL_SOURCE, "parsed"
     payload = {
@@ -1178,6 +1189,10 @@ def cmd_status(args: argparse.Namespace) -> int:
     }
     if run_cost is not None:
         payload["run_cost_usd"] = run_cost
+    if snapshot.experiment_accounting:
+        from openrouter_failures import accounting_summary
+        from openrouter_journal import read_records
+        payload.update(accounting_summary(read_records(Path(args.openrouter_jsonl), allow_partial_tail=True)))
     print(json.dumps(payload, indent=2, sort_keys=True))
     return 0
 
@@ -1185,6 +1200,9 @@ def cmd_status(args: argparse.Namespace) -> int:
 def cmd_flags(args: argparse.Namespace) -> int:
     state, snapshot, run_total, run_components, run_cost = current_run_usage(args)
     tokens_source, usage_source, confidence = current_provenance(args, state)
+    if snapshot.experiment_accounting:
+        from openrouter_failures import SOURCE
+        tokens_source = SOURCE
     if snapshot.accounting_incomplete:
         tokens_source, confidence = PARTIAL_SOURCE, "parsed"
     component_flags = {

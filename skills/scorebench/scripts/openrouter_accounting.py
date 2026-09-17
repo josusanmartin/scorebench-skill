@@ -12,6 +12,8 @@ import time
 import token_usage
 from openrouter_gaps import PARTIAL_SOURCE
 from openrouter_transport import configured_ip_family
+from openrouter_failures import accounting_summary
+from openrouter_journal import read_records
 
 
 class AccountingError(RuntimeError):
@@ -71,7 +73,9 @@ class Publisher:
 
     def initialize(self) -> None:
         if not self.state.exists():
-            if self.log.stat().st_size:
+            records = read_records(self.log)
+            accounting_summary(records)
+            if any(record.get("event") != "accounting_policy" for _, _, record in records):
                 raise AccountingError("nonempty OpenRouter ledger has no baseline; refusing to discard previous usage")
             self.helper("start")
             state = json.loads(self.state.read_text())
@@ -132,6 +136,10 @@ class Publisher:
                   "completion_confirmed": completed, "runtime_control": control,
                   "trace_uploaded": False, "lifecycle_confirmed": confirmed,
                   "lifecycle_attempts": self.lifecycle_attempts}
+        try:
+            report.update(accounting_summary(read_records(self.log)))
+        except (ValueError, OSError):
+            report["accounting_basis"] = "unavailable"
         path = self.log.parent / "result.json"
         with os.fdopen(os.open(path, os.O_WRONLY | os.O_CREAT | os.O_TRUNC, 0o600), "w") as handle:
             json.dump(report, handle, indent=2)

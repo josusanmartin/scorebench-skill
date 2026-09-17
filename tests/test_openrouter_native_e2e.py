@@ -66,6 +66,16 @@ class Provider(BaseHTTPRequestHandler):
         with self.server.lock:
             self.server.requests.append((self.path, self.headers.get("Authorization"), request))
             seq = len(self.server.requests)
+        failure = getattr(self.server, "http_failures", {}).get(seq)
+        if failure:
+            body = b"Bad Gateway" if failure == 502 else b"Temporary upstream failure"
+            self.send_response(failure)
+            self.send_header("Content-Type", "text/plain")
+            self.send_header("Content-Length", str(len(body)))
+            self.send_header("Retry-After", "0")
+            self.end_headers()
+            self.wfile.write(body)
+            return
         if seq in getattr(self.server, "drop_before_headers", set()):
             # Acceptance is deliberately ambiguous: request arrived, receipt did not.
             self.connection.shutdown(socket.SHUT_RDWR)
@@ -123,7 +133,7 @@ class Provider(BaseHTTPRequestHandler):
 
 
 class NativeE2ETests(unittest.TestCase):
-    def run_agent(self, kind, binary, model=MODEL, effort="low", length_stop=False, retained_recovery=False, receipt_lookup=False, early_stop=False, compaction=False, ip_family=None, delayed_receipt=False):
+    def run_agent(self, kind, binary, model=MODEL, effort="low", length_stop=False, retained_recovery=False, receipt_lookup=False, early_stop=False, compaction=False, ip_family=None, delayed_receipt=False, gateway_failures=False):
         with tempfile.TemporaryDirectory(prefix="scorebench-native-") as root:
             root = Path(root)
             home, work, bin_dir = root / "home", root / "work", root / "bin"
@@ -141,7 +151,8 @@ elif sys.argv[1:3] == ['run','progress']:
         flags=snapshots[-1]; used=float(flags[flags.index('--cost-usd')+1])
         print(json.dumps({'scope':{'kind':'run_token'}, 'run':{'run_id':'probe-run','status':'active'},
           'progress':{'budget':{'available':True,'type':'cost','target':3.0,'used':used,'remaining':max(0,3-used),'reached':used>=3}}}))
-    else: print('{"progress":{"budget":{"reached":false,"type":"none"}}}')
+    else: print(json.dumps({'progress':{'budget':{'reached':False,'type':'none'},
+                          **({'openrouter_failure_policy':'openrouter-infrastructure-v1'} if Path('experiment-policy').exists() else {})}}))
 elif sys.argv[1:3] == ['run','current']:
     print(Path('assignment.json').read_text())
 elif sys.argv[1:3] == ['run','gate']:
@@ -160,6 +171,9 @@ else:
             server = ThreadingHTTPServer(("127.0.0.1", 0), Provider)
             server.lock, server.requests, server.workspace = threading.Lock(), [], work
             server.model = model
+            if gateway_failures:
+                server.http_failures = {1: 502, 2: 503, 4: 429}
+                (work / "experiment-policy").touch()
             if receipt_lookup:
                 server.omit_final_usage = {2}
                 server.generation_reads = []
@@ -271,11 +285,11 @@ else:
                     if length_stop or early_stop:
                         self.assertEqual(request.get("max_tokens"), 1000 if compaction else 128000)
                 ledger = [json.loads(line) for line in (work / ".scorebench/openrouter/usage.jsonl").read_text().splitlines()]
-                self.assertEqual(len(ledger), len(server.requests) + int(delayed_receipt))
+                self.assertEqual(len(ledger), len(server.requests) + int(delayed_receipt) + int(gateway_failures))
                 snapshots = [json.loads(line) for line in (work / "snapshots.jsonl").read_text().splitlines()]
                 first, last = snapshots[0], snapshots[-1]
                 self.assertEqual(first[first.index("--total-tokens") + 1], "0")
-                count = len(server.requests)
+                count = len(server.requests) - (3 if gateway_failures else 0)
                 extra_input = 39900 if compaction else 0
                 for flag, expected in (("--total-tokens", 80 * count + extra_input), ("--input-tokens", 50 * count + extra_input + (10 if receipt_lookup else 0)),
                                        ("--output-tokens", 20 * count), ("--cache-read-tokens", 40 * count),
@@ -287,6 +301,13 @@ else:
                 self.assertEqual(json.loads((work / ".scorebench/openrouter/result.json").read_text())["transport"]["ip_family"], expected_family)
                 self.assertIn(f"IP family {expected_family}; TLS verification enabled", result.stderr)
                 self.assertIn('"finish"', (work / "pings.jsonl").read_text())
+                if gateway_failures:
+                    report = json.loads((work / ".scorebench/openrouter/result.json").read_text())
+                    self.assertEqual(report["accounting_quality"], "exact")
+                    self.assertEqual(report["accounting_basis"], "experiment")
+                    self.assertEqual(report["excluded_infrastructure_requests"], 3)
+                    self.assertEqual(report["excluded_provider_cost_unknown_requests"], 3)
+                    self.assertIn("openrouter_experiment_usage", last)
                 if receipt_lookup:
                     self.assertEqual(set(server.generation_reads), {"gen-2"})
                     self.assertEqual(count, 3 if delayed_receipt else 2)
@@ -322,6 +343,14 @@ else:
     @unittest.skipUnless(os.environ.get("SCOREBENCH_TEST_OPENCODE_BIN"), "set SCOREBENCH_TEST_OPENCODE_BIN")
     def test_opencode(self):
         self.run_agent("OpenCode", os.environ["SCOREBENCH_TEST_OPENCODE_BIN"])
+
+    @unittest.skipUnless(os.environ.get("SCOREBENCH_TEST_OPENCODE_BIN"), "set SCOREBENCH_TEST_OPENCODE_BIN")
+    def test_opencode_gateway_retry(self):
+        self.run_agent("OpenCode", os.environ["SCOREBENCH_TEST_OPENCODE_BIN"], gateway_failures=True)
+
+    @unittest.skipUnless(os.environ.get("SCOREBENCH_TEST_PI_BIN"), "set SCOREBENCH_TEST_PI_BIN")
+    def test_pi_gateway_retry(self):
+        self.run_agent("Pi", os.environ["SCOREBENCH_TEST_PI_BIN"], gateway_failures=True)
 
     @unittest.skipUnless(os.environ.get("SCOREBENCH_TEST_OPENCODE_BIN"), "set SCOREBENCH_TEST_OPENCODE_BIN")
     def test_opencode_length_stop_resumes_same_session_with_cumulative_cost(self):
