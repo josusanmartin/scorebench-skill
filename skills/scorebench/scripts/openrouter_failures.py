@@ -23,6 +23,12 @@ ERROR_TYPES = {
     "image_too_small": 400, "unsupported_image_format": 400, "image_not_found": 404,
     "image_download_failed": 400, "unmapped": 0,
 }
+NATIVE_ERROR_TYPES = {
+    "rate_limit_exceeded": "rate_limit_exceeded", "rate_limit_error": "rate_limit_exceeded",
+    "overloaded_error": "provider_overloaded", "timeout_error": "timeout",
+    "authentication_error": "authentication", "invalid_api_key": "authentication",
+    "billing_error": "payment_required", "permission_error": "permission_denied",
+}
 
 
 def model_output(obj):
@@ -32,7 +38,7 @@ def model_output(obj):
     choices = obj.get("choices")
     return any(obj.get(key) for key in (
         "content", "text", "reasoning", "reasoning_content", "reasoning_details",
-        "tool_calls", "function_call", "output",
+        "tool_calls", "function_call", "output", "refusal", "audio", "images",
     )) or (isinstance(obj.get("delta"), str) and bool(obj["delta"])) or any(
         model_output(obj.get(key)) for key in ("message", "response", "delta", "content_block")) or any(
         model_output(choice) for choice in (choices if isinstance(choices, list) else []) if isinstance(choice, dict))
@@ -52,13 +58,17 @@ def classify_error(status, obj):
         choices = response.get("choices")
         error = next((choice["error"] for choice in (choices if isinstance(choices, list) else [])
                       if isinstance(choice, dict) and isinstance(choice.get("error"), dict)), {})
-    code = error.get("code") if isinstance(error, dict) else None
+    native_code = error.get("code") or error.get("type")
+    code = error.get("code")
     if isinstance(code, str) and code.isdecimal():
         code = int(code)
     if type(code) is not int:
         code = None
     metadata = error.get("metadata")
     error_type = (metadata.get("error_type") if isinstance(metadata, dict) else None) or error.get("error_type") or response.get("error_type")
+    if error_type is None and isinstance(native_code, str):
+        # Native server_error/api_error are lossy; never infer a category from them.
+        error_type = NATIVE_ERROR_TYPES.get(native_code)
     if error_type is not None:
         error_type = error_type if isinstance(error_type, str) and error_type in ERROR_TYPES else "unrecognized"
     return failure_status(status, code, error_type), code, error_type

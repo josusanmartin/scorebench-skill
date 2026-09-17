@@ -146,6 +146,10 @@ class FailurePolicyTests(unittest.TestCase):
             obj = {"error": {"code": "server_error"}, "error_type": error_type}
             code, _, _ = response_evidence(500, "application/json", json.dumps(obj).encode())
             self.assertNotIn(code, {408, 500, 502, 503, 504})
+        for native, status in (("rate_limit_exceeded", 429), ("overloaded_error", 503),
+                               ("authentication_error", 401), ("server_error", 200), ("api_error", 200)):
+            code, _, _ = response_evidence(200, "application/json", json.dumps({"error": {"code": native}}).encode())
+            self.assertEqual(code, status)
 
     def test_partial_model_work_is_never_excluded_or_replayed(self):
         for field in ("content", "reasoning", "tool_calls"):
