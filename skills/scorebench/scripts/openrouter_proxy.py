@@ -24,6 +24,7 @@ from __future__ import annotations
 
 import argparse
 import fcntl
+import hashlib
 from http.client import HTTPException
 import json
 import math
@@ -41,6 +42,7 @@ from uuid import uuid4
 from openrouter_generations import generation_usage, lookup_generation, stream_gap
 from openrouter_journal import RequestJournal, append_record, invalid_usage, read_records, reconcile_requests, resolved_error_lines, safe_usage
 from openrouter_gaps import ACK_FILE, load_ack
+from openrouter_failures import POLICY, INFRASTRUCTURE_CODES, classify_error, model_output, exclusion_records, response_evidence, retry_delay
 from openrouter_transport import (
     UnsentRequestError, _HTTPConnection, _HTTPSConnection,
     configured_ip_family, openrouter_opener,
@@ -74,8 +76,17 @@ class UsageLog:
         self.journal = RequestJournal(path)
         self._refresh_blocked()
 
+    def enable_experiment_policy(self):
+        with self._lock:
+            enabled, _ = exclusion_records(read_records(self.path))
+            if not enabled:
+                append_record(self.path, {"event": "accounting_policy", "accounting_policy": POLICY,
+                                         "accounting_basis": "experiment"})
+            self.experiment_policy = True
+
     def _refresh_blocked(self):
         records = read_records(self.path)
+        self.experiment_policy, _ = exclusion_records(records)
         resolved = resolved_error_lines(records)
         acknowledged = set()
         if self.path.with_name(ACK_FILE).exists():
@@ -149,6 +160,23 @@ class UsageLog:
         self._append({"accounting_error": reason, **details})
         if details.get("request_id"):
             self.journal.finish(details["request_id"], "unresolved", reason)
+
+    def exclude_infrastructure(self, request_id, model, evidence, obj):
+        receipt = obj if isinstance(obj, dict) else {}
+        if isinstance(receipt.get("response"), dict):
+            receipt = receipt["response"]
+        record = {"event": "infrastructure_excluded", "accounting_policy": POLICY,
+                  "request_id": request_id, "model": model, "evidence": evidence,
+                  "provider_usage": safe_usage(receipt.get("usage"))}
+        generation_id = receipt.get("id")
+        if isinstance(generation_id, str):
+            self.journal.observe(request_id, {"id": generation_id, "model": model})
+            record["generation_id"] = generation_id
+        with self._lock:
+            records = read_records(self.path)
+            exclusion_records([*records, (len(records) + 1, "", record)])
+            append_record(self.path, record)
+            self.journal.finish(request_id, "excluded", POLICY)
 
     def transport_error(self, exc, *, request_id, phase, attempt):
         cause = exc.reason if isinstance(exc, urllib.error.URLError) else exc
@@ -231,6 +259,10 @@ class Handler(BaseHTTPRequestHandler):
         request = urllib.request.Request(url, data=body, headers=headers, method=self.command)
         self.request_id = None
         for attempt in range(1, 4):
+            control = getattr(self.server, "runtime_control_path", None)
+            if getattr(self.server, "stopping", False) or (control and control.exists()):
+                self._send_proxy_error(409, "ScoreBench stopped this run; no inference request sent")
+                return
             if self._generation_request() and not self.server.usage_log.wait_reconciled(25):
                 self._send_proxy_error(503, "OpenRouter receipt lookup pending; no inference request sent")
                 return
@@ -242,14 +274,11 @@ class Handler(BaseHTTPRequestHandler):
             request_id = self.request_id or uuid4().hex
             self.request_attempt = attempt
             self._last_observation = None
+            self.response_id = None
             try:
                 upstream = open_upstream(request)
-                break
             except urllib.error.HTTPError as exc:
-                # Some provider failures can still report billable usage.
-                with exc:
-                    self._relay(exc, record_usage=True)
-                return
+                upstream = exc
             except (urllib.error.URLError, OSError, HTTPException) as exc:
                 cause = exc.reason if isinstance(exc, urllib.error.URLError) else exc
                 unsent = isinstance(cause, UnsentRequestError)
@@ -266,8 +295,11 @@ class Handler(BaseHTTPRequestHandler):
                 self._send_proxy_error(502, "upstream connection failed before sending request" if unsent
                     else "upstream transport failed; generation acceptance and cost are unknown", request_id)
                 return
-        with upstream:
-            self._relay(upstream, record_usage=True)
+            with upstream:
+                delay = self._relay(upstream, record_usage=True, allow_retry=True)
+            if delay is None:
+                return
+            time.sleep(delay)
 
     def _send_proxy_error(self, status, message, request_id=None):
         body = json.dumps({"error": {"code": status, "message": message, "request_id": request_id}}).encode()
@@ -279,7 +311,7 @@ class Handler(BaseHTTPRequestHandler):
         self.wfile.write(body)
         self.close_connection = True
 
-    def _relay(self, upstream, *, record_usage: bool) -> None:
+    def _relay(self, upstream, *, record_usage: bool, allow_retry: bool = False):
         status = getattr(upstream, "status", None) or upstream.getcode() or 200
         content_type = upstream.headers.get("Content-Type", "")
         streaming = "text/event-stream" in content_type.lower()
@@ -290,12 +322,27 @@ class Handler(BaseHTTPRequestHandler):
                 self.server.usage_log.error("generation response interrupted before usage", request_id=self.request_id)
             raise
         if body is not None and record_usage:
-            recorded = self._record_body_usage(body)
+            effective_status, evidence, obj = response_evidence(status, content_type, body)
+            log = self.server.usage_log
+            if self._generation_request() and (status >= 400 or effective_status != status):
+                log._append({"request_id": self.request_id, "attempt": self.request_attempt, **evidence},
+                            log.path.with_name("http-errors.jsonl"))
+            excluded = bool(self.request_id and log.experiment_policy
+                            and effective_status in INFRASTRUCTURE_CODES and not evidence["model_output"])
+            if excluded:
+                log.exclude_infrastructure(self.request_id, self.request_model, evidence, obj)
+            recorded = excluded or self._record_body_usage(body)
             if not recorded and (200 <= status < 400 or status >= 500) and self._generation_request():
-                self.server.usage_log.error("generation response omitted usage", request_id=self.request_id,
-                                           generation_id=getattr(self, "response_id", None), model=self.request_model)
+                log.error("generation response omitted usage", request_id=self.request_id,
+                          generation_id=getattr(self, "response_id", None), model=self.request_model,
+                          evidence=evidence)
             elif not recorded and self.request_id:
-                self.server.usage_log.journal.finish(self.request_id, "rejected", "HTTP request rejected without usage")
+                log.journal.finish(self.request_id, "rejected", "HTTP request rejected without usage")
+            if (allow_retry and self.request_id and log.experiment_policy and not log.blocked.is_set() and not evidence["model_output"]
+                    and (excluded or effective_status == 429)):
+                delay = retry_delay(effective_status, upstream.headers, self.request_attempt)
+                if delay is not None:
+                    return delay
         client_connected = True
         try:
             self.send_response(status)
@@ -342,6 +389,7 @@ class Handler(BaseHTTPRequestHandler):
 
     def _pump_stream(self, upstream, *, record_usage: bool, client_connected: bool = True) -> None:
         buffer = b""
+        digest, response_bytes = hashlib.sha256(), 0
         response_obj: dict = {"usage": {}, "request_id": getattr(self, "request_id", None)}
         settlement_held = False
         try:
@@ -354,13 +402,17 @@ class Handler(BaseHTTPRequestHandler):
                     if record_usage:
                         details = self.server.usage_log.transport_error(exc, request_id=self.request_id,
                             phase="stream", attempt=self.request_attempt)
-                        if response_obj.get("complete"):
+                        if self._exclude_failed_stream(response_obj, digest.hexdigest(), response_bytes):
+                            pass
+                        elif response_obj.get("complete"):
                             self.server.usage_log.record(response_obj)
                         else:
                             self._reconcile_stream(response_obj, "generation stream interrupted before final usage", **details)
                     return
                 if not chunk:
                     break
+                digest.update(chunk)
+                response_bytes += len(chunk)
                 if record_usage:
                     buffer += chunk
                     while b"\n" in buffer:
@@ -383,13 +435,26 @@ class Handler(BaseHTTPRequestHandler):
                 self._scan_sse_line(buffer, response_obj)
                 if self.request_id:
                     self._observe(response_obj)
-            if record_usage and response_obj.get("complete"):
+            if record_usage and self._exclude_failed_stream(response_obj, digest.hexdigest(), response_bytes):
+                pass
+            elif record_usage and response_obj.get("complete"):
                 self.server.usage_log.record(response_obj)
             elif record_usage and self._generation_request():
                 self._reconcile_stream(response_obj, "generation stream omitted final usage")
         finally:
             if settlement_held:
                 self.server.usage_log.end_reconciliation()
+
+    def _exclude_failed_stream(self, response, digest, size):
+        log = self.server.usage_log
+        if (not log.experiment_policy or not self.request_id or response.get("model_output")
+                or response.get("identity_conflict") or response.get("failure_status") not in INFRASTRUCTURE_CODES):
+            return False
+        evidence = {"http_status": 200, "error_code": response.get("error_code"),
+                    "error_type": response.get("error_type"), "model_output": False,
+                    "content_type": "text/event-stream", "response_bytes": size, "response_sha256": digest}
+        log.exclude_infrastructure(self.request_id, self.request_model, evidence, response)
+        return True
 
     def _reconcile_stream(self, response_obj: dict, reason: str, **details) -> None:
         log = self.server.usage_log
@@ -443,6 +508,13 @@ class Handler(BaseHTTPRequestHandler):
             return
         if not isinstance(obj, dict):
             return
+        failure, code, error_type = classify_error(200, obj)
+        response_obj["model_output"] = response_obj.get("model_output", False) or model_output(obj)
+        if failure in INFRASTRUCTURE_CODES:
+            response_obj["error_code"] = code
+            response_obj["error_type"] = error_type
+            response_obj["failure_status"] = failure
+            response_obj["terminal_seen"] = True
         message = obj.get("message") if isinstance(obj.get("message"), dict) else {}
         response = obj.get("response") if isinstance(obj.get("response"), dict) else {}
         usage = obj.get("usage")

@@ -30,6 +30,7 @@ from openrouter_reentry import CONTINUABLE_FINISHES, SessionOutput, admit_reentr
 from openrouter_gaps import ACK_FILE, prepare_ack
 from openrouter_generations import lookup_generation
 from openrouter_journal import reconcile_requests
+from openrouter_failures import POLICY
 
 
 OPENROUTER_HOST = "openrouter.ai"
@@ -580,6 +581,7 @@ def main(argv: Sequence[str] | None = None) -> int:
     server = ThreadingHTTPServer(("127.0.0.1", 0), Handler)
     server.upstream = _upstream_for(protocol, env)  # type: ignore[attr-defined]
     server.api_key = api_key  # type: ignore[attr-defined]
+    server.runtime_control_path = workspace / ".scorebench/runtime-control.json"
     server.usage_log = UsageLog(log_path)  # type: ignore[attr-defined]
     reconcile = lambda: server.usage_log.reconcile(lambda generation_id, model: lookup_generation(
         generation_id, model, upstream=server.upstream, api_key=api_key, require_final=True), abandoned=True)
@@ -641,6 +643,12 @@ def main(argv: Sequence[str] | None = None) -> int:
                 control_path.unlink(missing_ok=True)
                 server.usage_log.blocked.clear()  # Explicit partial-accounting approval, not receipt certification.
             publisher.initialize()
+            policy = publisher.read("progress").get("progress", {}).get("openrouter_failure_policy")
+            if policy == POLICY:
+                server.usage_log.enable_experiment_policy()
+                publisher.publish()
+            elif server.usage_log.experiment_policy:
+                raise RuntimeError("server no longer supports this run's experiment accounting policy")
         if publisher and agent_kind(args.harness) == "opencode":
             session = args.recover_session
             if session:
@@ -688,6 +696,7 @@ def main(argv: Sequence[str] | None = None) -> int:
             print(str(exc), file=sys.stderr)
         returncode = 1
     finally:
+        server.stopping = True
         server.shutdown()
         server.server_close()
         thread.join(timeout=5)
