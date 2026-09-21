@@ -12,7 +12,7 @@ ScoreBench run without adding a background process.
 
 ## Contract
 
-- `start` binds the current Codex, Claude, or Grok JSONL and records its byte
+- `start` only discovers the current Codex, Claude, or Grok JSONL and records its byte
   offset in local state.
 - `finish` freezes that offset range, normalizes it, redacts secrets, applies
   size limits, writes deterministic gzip NDJSON, and uploads it.
