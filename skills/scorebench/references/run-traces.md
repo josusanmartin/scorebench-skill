@@ -3,9 +3,16 @@
 Use the bundled helper to attach an observable agent transcript to the exact
 ScoreBench run without adding a background process.
 
+## Contents
+
+- [Contract](#contract)
+- [Start Boundary](#start-boundary)
+- [Final Upload](#final-upload)
+- [Security](#security)
+
 ## Contract
 
-- `start` only discovers the current Codex or Claude JSONL and records its byte
+- `start` only discovers the current Codex, Claude, or Grok JSONL and records its byte
   offset in local state.
 - `finish` freezes that offset range, normalizes it, redacts secrets, applies
   size limits, writes deterministic gzip NDJSON, and uploads it.
@@ -14,7 +21,7 @@ ScoreBench run without adding a background process.
 - Trace failure never changes a candidate score, status, or completion.
 
 This is an activity transcript, not hidden chain-of-thought. The helper drops
-Codex reasoning ciphertext, Claude thinking/signature blocks, system/developer
+Codex reasoning ciphertext, Claude thinking/signature blocks, Grok thought chunks, system/developer
 messages, repeated token counters, duplicate patch events, binary payloads, and
 other unsupported records.
 
@@ -37,9 +44,13 @@ Normally source discovery is automatic:
 - Claude uses a session environment identifier when available, then matches
   project JSONL records to the current workspace.
 
-Grok Build trace normalization is not supported yet. Do not run this helper for
-Grok workers. When `GROK_SESSION_JSONL` is present, automatic discovery fails
-closed instead of selecting an unrelated Codex or Claude transcript.
+Grok Build uses its bound `updates.jsonl`, not stdout or the shared unified log.
+The container supervisor uploads a sanitized native trace at finalization.
+For manual capture use `--provider grok --source "$GROK_SESSION_JSONL"`;
+`--from-start` includes earlier events from that explicitly bound session.
+Thought chunks are omitted, secrets are redacted, and mixed sessions are
+rejected. Automatic discovery never falls back to a coordinator's Codex or
+Claude transcript when `GROK_SESSION_JSONL` is set.
 
 For a runner-managed JSONL, pin it explicitly:
 

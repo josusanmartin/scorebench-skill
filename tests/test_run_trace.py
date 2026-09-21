@@ -32,6 +32,40 @@ def read_trace(path):
 
 
 class RunTraceTests(unittest.TestCase):
+    def test_grok_bound_native_trace_filters_thoughts_and_redacts_tools(self):
+        source = self.root / "grok.jsonl"
+        def update(kind, **fields):
+            return {"params": {"sessionId": "grok-session", "update": {"sessionUpdate": kind, **fields}}}
+        append_jsonl(source,
+            update("user_message_chunk", content={"type": "text", "text": "optimize the kernel"}),
+            update("agent_thought_chunk", content={"type": "text", "text": "private reasoning never uploaded"}),
+            update("agent_message_chunk", content={"type": "text", "text": "Testing a candidate"}),
+            update("tool_call", toolCallId="t1", title="run_terminal_command",
+                   rawInput={"command": "SCOREBENCH_RUN_TOKEN=hrun_secretvalue scorebench run progress"}),
+            update("tool_call_update", toolCallId="t1", status="in_progress", rawOutput="not complete"),
+            update("tool_call_update", toolCallId="t1", status="completed", rawOutput={"score": 1000}))
+        started = TRACE.trace_start(provider="grok", source=source, cwd=self.root,
+                                    state_path=self.state, from_start=True)
+        self.assertEqual(started["source_offset"], 0)
+        self.assertEqual(started["session_id"], "grok-session")
+        artifact, path = self.build()
+        encoded = json.dumps(read_trace(path))
+        self.assertIn("Testing a candidate", encoded)
+        self.assertIn("tool_call", encoded)
+        self.assertIn("tool_result", encoded)
+        self.assertNotIn("private reasoning", encoded)
+        self.assertNotIn("hrun_secretvalue", encoded)
+        self.assertNotIn("not complete", encoded)
+        self.assertEqual(artifact["provider"], "grok")
+
+    def test_grok_trace_rejects_mixed_sessions(self):
+        source = self.root / "grok.jsonl"
+        append_jsonl(source, {"params": {"sessionId": "first", "update": {}}})
+        self.start(source, "grok")
+        append_jsonl(source, {"params": {"sessionId": "other", "update": {}}})
+        with self.assertRaisesRegex(TRACE.TraceError, "another session"):
+            self.build()
+
     def setUp(self):
         self.tempdir = tempfile.TemporaryDirectory()
         self.root = Path(self.tempdir.name)
@@ -306,7 +340,7 @@ class RunTraceTests(unittest.TestCase):
             clear=False,
         ), mock.patch.object(TRACE, "discover_claude_source", return_value=claude_source):
             with self.assertRaisesRegex(
-                TRACE.TraceError, "Grok trace capture is not supported"
+                TRACE.TraceError, "Grok trace requires an explicit bound session JSONL"
             ):
                 TRACE.discover_source("auto", self.root)
 

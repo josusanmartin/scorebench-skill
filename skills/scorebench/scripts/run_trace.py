@@ -183,6 +183,9 @@ def _event_cwd(event: dict[str, Any], provider: str) -> str:
 
 
 def _session_id(event: dict[str, Any], provider: str) -> str:
+    if provider == "grok":
+        params = event.get("params")
+        return str(params.get("sessionId") or "") if isinstance(params, dict) else ""
     if provider == "codex" and event.get("type") == "session_meta":
         payload = event.get("payload")
         if isinstance(payload, dict):
@@ -213,6 +216,8 @@ def detect_provider(path: Path) -> str:
     if ".claude" in path.parts:
         return "claude"
     for event in head_events(path):
+        if isinstance(event.get("params"), dict) and isinstance(event["params"].get("update"), dict):
+            return "grok"
         event_type = event.get("type")
         if event_type in {
             "session_meta",
@@ -224,7 +229,7 @@ def detect_provider(path: Path) -> str:
             return "codex"
         if event_type in {"assistant", "user"} and isinstance(event.get("message"), dict):
             return "claude"
-    raise TraceError(f"cannot identify Codex or Claude JSONL format: {path}")
+    raise TraceError(f"cannot identify Codex, Claude, or Grok JSONL format: {path}")
 
 
 def path_matches_cwd(path: Path, provider: str, cwd: Path) -> bool:
@@ -280,6 +285,11 @@ def discover_claude_source(cwd: Path) -> Path | None:
 
 
 def discover_source(provider: str, cwd: Path) -> tuple[str, Path]:
+    if provider == "grok" or (provider == "auto" and os.environ.get("GROK_SESSION_JSONL")):
+        raw = os.environ.get("GROK_SESSION_JSONL")
+        if not raw or not Path(raw).is_file():
+            raise TraceError("Grok trace requires an explicit bound session JSONL")
+        return "grok", Path(raw).resolve()
     if provider == "codex":
         path = discover_codex_source(cwd)
         if path is None:
@@ -291,12 +301,6 @@ def discover_source(provider: str, cwd: Path) -> tuple[str, Path]:
             raise TraceError(f"no Claude session JSONL found for {cwd}")
         return provider, path
 
-    if os.environ.get("GROK_SESSION_JSONL"):
-        raise TraceError(
-            "Grok trace capture is not supported; refusing to auto-discover a "
-            "Codex or Claude transcript from this workspace"
-        )
-
     codex = discover_codex_source(cwd)
     claude = discover_claude_source(cwd)
     candidates = [path for path in (codex, claude) if path is not None]
@@ -307,7 +311,9 @@ def discover_source(provider: str, cwd: Path) -> tuple[str, Path]:
 
 
 def source_session_id(path: Path, provider: str) -> str:
-    if provider == "codex":
+    if provider == "grok":
+        hint = ""
+    elif provider == "codex":
         hint = os.environ.get("CODEX_THREAD_ID", "")
     else:
         hint = os.environ.get("CLAUDE_SESSION_ID") or os.environ.get(
@@ -319,6 +325,8 @@ def source_session_id(path: Path, provider: str) -> str:
         value = _session_id(event, provider)
         if value:
             return value
+    if provider == "grok":
+        raise TraceError("Grok trace source has no native session ID")
     return path.stem
 
 
@@ -328,6 +336,7 @@ def trace_start(
     source: Path | None,
     cwd: Path,
     state_path: Path,
+    from_start: bool = False,
 ) -> dict[str, Any]:
     if source is None:
         provider, source = discover_source(provider, cwd)
@@ -369,7 +378,7 @@ def trace_start(
         "provider": provider,
         "session_id": resolved_session_id,
         "source_path": str(source),
-        "source_offset": stat.st_size,
+        "source_offset": 0 if from_start else stat.st_size,
         "source_mtime_ns": stat.st_mtime_ns,
         "source_device": stat.st_dev,
         "source_inode": stat.st_ino,
@@ -383,7 +392,7 @@ def trace_start(
         "provider": provider,
         "session_id": payload["session_id"],
         "source": source.name,
-        "source_offset": stat.st_size,
+        "source_offset": payload["source_offset"],
         "state": str(state_path),
         "idempotent": False,
     }
@@ -613,10 +622,44 @@ def normalize_claude(event: dict[str, Any]) -> Iterable[dict[str, Any]]:
             }
 
 
+def normalize_grok(event: dict[str, Any]) -> Iterable[dict[str, Any]]:
+    params = event.get("params")
+    update = params.get("update") if isinstance(params, dict) else None
+    if not isinstance(update, dict):
+        return
+    kind = update.get("sessionUpdate")
+    timestamp = event.get("timestamp")
+    if kind in {"user_message_chunk", "agent_message_chunk"}:
+        content = update.get("content")
+        if isinstance(content, dict) and content.get("type") == "text" and content.get("text"):
+            yield {"timestamp": timestamp,
+                   "kind": "user_message" if kind == "user_message_chunk" else "assistant_message",
+                   "content": content["text"]}
+    elif kind == "tool_call":
+        yield {"timestamp": timestamp, "kind": "tool_call", "call_id": update.get("toolCallId"),
+               "name": update.get("title") or "tool", "input": update.get("rawInput")}
+    elif kind == "tool_call_update" and update.get("status") in {"completed", "failed"}:
+        output = update.get("rawOutput")
+        if output is None:
+            # ACP tool output wraps text inside a content block. Omit all
+            # metadata and unknown content kinds, including private reasoning.
+            output = "\n".join(str(item["content"].get("text") or "")
+                for item in (update.get("content") or []) if isinstance(item, dict)
+                and item.get("type") == "content" and isinstance(item.get("content"), dict)
+                and item["content"].get("type") == "text")
+        yield {"timestamp": timestamp, "kind": "tool_result", "call_id": update.get("toolCallId"),
+               "is_error": update["status"] == "failed", "output": output}
+    elif kind == "task_completed":
+        task = update.get("task_snapshot") or {}
+        if isinstance(task, dict):
+            yield {"timestamp": timestamp, "kind": "tool_result", "call_id": task.get("task_id"),
+                   "is_error": task.get("exit_code") not in (None, 0), "output": task.get("output")}
+
+
 def normalized_events(
     provider: str, event: dict[str, Any], sanitizer: Sanitizer
 ) -> Iterable[dict[str, Any]]:
-    normalizer = normalize_codex if provider == "codex" else normalize_claude
+    normalizer = {"codex": normalize_codex, "claude": normalize_claude, "grok": normalize_grok}[provider]
     for normalized in normalizer(event):
         cleaned = sanitizer.value(normalized)
         if isinstance(cleaned, dict):
@@ -715,7 +758,7 @@ def build_artifact(
 
     source = Path(str(state.get("source_path") or ""))
     provider = str(state.get("provider") or "")
-    if provider not in {"codex", "claude"} or not source.is_file():
+    if provider not in {"codex", "claude", "grok"} or not source.is_file():
         raise TraceError("trace state has an invalid provider or source path")
     start = int(state.get("source_offset") or 0)
     source_stat = source.stat()
@@ -773,6 +816,8 @@ def build_artifact(
                 if not isinstance(event, dict):
                     dropped["non_object_event"] += 1
                     continue
+                if provider == "grok" and _session_id(event, provider) not in ("", state["session_id"]):
+                    raise TraceError("Grok trace contains another session; refusing mixed-session upload")
                 produced = list(normalized_events(provider, event, sanitizer))
                 if not produced:
                     dropped[f"source_type:{event.get('type') or 'unknown'}"] += 1
@@ -1043,8 +1088,9 @@ def build_parser() -> argparse.ArgumentParser:
         "start",
         help="record the current session JSONL and byte offset; does not parse or upload",
     )
-    start.add_argument("--provider", choices=("auto", "codex", "claude"), default="auto")
-    start.add_argument("--source", type=Path, help="explicit Codex or Claude JSONL")
+    start.add_argument("--provider", choices=("auto", "codex", "claude", "grok"), default="auto")
+    start.add_argument("--source", type=Path, help="explicit native session JSONL")
+    start.add_argument("--from-start", action="store_true", help="capture the entire explicitly bound session")
     start.add_argument("--state", type=Path, help="state path; normally auto-selected")
     start.add_argument("--cwd", type=Path, help="agent workspace; defaults to current directory")
 
@@ -1079,6 +1125,7 @@ def main(argv: list[str] | None = None) -> int:
                 source=args.source,
                 cwd=cwd,
                 state_path=state_path,
+                from_start=args.from_start,
             )
         else:
             if args.retries < 0:
