@@ -3,9 +3,16 @@
 Use the bundled helper to attach an observable agent transcript to the exact
 ScoreBench run without adding a background process.
 
+## Contents
+
+- [Contract](#contract)
+- [Start Boundary](#start-boundary)
+- [Final Upload](#final-upload)
+- [Security](#security)
+
 ## Contract
 
-- `start` only discovers the current Codex or Claude JSONL and records its byte
+- `start` binds the current Codex, Claude, or Grok JSONL and records its byte
   offset in local state.
 - `finish` freezes that offset range, normalizes it, redacts secrets, applies
   size limits, writes deterministic gzip NDJSON, and uploads it.
@@ -14,7 +21,7 @@ ScoreBench run without adding a background process.
 - Trace failure never changes a candidate score, status, or completion.
 
 This is an activity transcript, not hidden chain-of-thought. The helper drops
-Codex reasoning ciphertext, Claude thinking/signature blocks, system/developer
+Codex reasoning ciphertext, Claude thinking/signature blocks, Grok thought chunks, system/developer
 messages, repeated token counters, duplicate patch events, binary payloads, and
 other unsupported records.
 
