@@ -162,6 +162,23 @@ The unified log is discovered from the normal Grok directory layout; use
 `--grok-log /absolute/path/to/unified.jsonl` only when a supervised launcher
 stores it elsewhere.
 
+New container supervisors fetch and pin the server's model price manifest in
+`SCOREBENCH_GROK_PRICING` before inference. The helper prices each deduplicated
+request using its inclusive prompt size: at or above 200,000 tokens, all input,
+cached-input, and output rates double. Reasoning is already included in output
+and is never added twice. Live snapshots and final flags include `cost_usd`;
+working-token counts remain unchanged. The manifest is saved with the baseline
+and cannot change mid-run. Cost-budget launches with missing pricing fail before
+model work, not after spending the allocation.
+
+These are global public API-equivalent costs, not subscription charges or a
+regional-endpoint invoice. Old cumulative-only snapshots cannot identify the
+request tiers. Deployment does not repair retained runs or update pinned workers.
+For a manual native run, save the scoped `run progress` response's
+`progress.model_pricing` object and pass its absolute file path as
+`--grok-pricing` on every helper invocation, including `start`; do not invent
+prices or attach a new price manifest to an existing baseline.
+
 For Gemini, use an exact current-session `/stats` total. For provider/API
 runners, sum the provider's usage fields for only this run and use
 `provider_usage` or `runner_measured` provenance. If a provider reports cached

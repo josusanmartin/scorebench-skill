@@ -2,7 +2,7 @@
 from __future__ import annotations
 
 import argparse
-from dataclasses import dataclass
+from dataclasses import dataclass, replace
 import json
 import itertools
 import math
@@ -13,6 +13,7 @@ from typing import Any
 
 from openrouter_gaps import ACK_FILE, PARTIAL_SOURCE, digest, load_ack
 from openrouter_generations import generation_usage
+from grok_pricing import inference_cost, load_pricing
 
 
 # No built-in default: any fixed value is either relative (and silently follows
@@ -565,7 +566,7 @@ def claude_jsonl_total(path: Path) -> int:
     return claude_jsonl_snapshot(path).total_tokens
 
 
-def grok_inference_snapshot(ctx: dict[str, Any]) -> UsageSnapshot:
+def grok_inference_snapshot(ctx: dict[str, Any], pricing: dict | None = None) -> UsageSnapshot:
     inclusive_input = usage_int(ctx, "prompt_tokens")
     output_tokens = usage_int(ctx, "completion_tokens")
     cache_read_tokens = usage_int(ctx, "cached_prompt_tokens")
@@ -596,6 +597,9 @@ def grok_inference_snapshot(ctx: dict[str, Any]) -> UsageSnapshot:
         cache_creation_tokens=0,
         cache_read_tokens=cache_read_tokens,
         reasoning_output_tokens=reasoning_tokens,
+        cost_usd=(inference_cost(pricing, input_tokens=fresh_input_tokens,
+                               cached_tokens=cache_read_tokens, output_tokens=output_tokens)
+                  if pricing is not None else None),
     )
 
 
@@ -609,7 +613,7 @@ def grok_unified_log_path(updates_path: Path) -> Path:
 
 
 def grok_jsonl_snapshot(
-    path: Path, *, unified_log_path: Path | None = None
+    path: Path, *, unified_log_path: Path | None = None, pricing: dict | None = None
 ) -> UsageSnapshot:
     session_ids: set[str] = set()
     with path.open("r", encoding="utf-8") as handle:
@@ -679,7 +683,7 @@ def grok_jsonl_snapshot(
                 raise SystemExit(
                     f"Grok inference usage is missing ctx in {log_path}"
                 )
-            snapshot = grok_inference_snapshot(ctx)
+            snapshot = grok_inference_snapshot(ctx, pricing)
             timestamp = event.get("ts")
             if not isinstance(timestamp, str) or not timestamp.strip():
                 raise SystemExit(
@@ -704,8 +708,11 @@ def grok_jsonl_snapshot(
             cache_creation_tokens=0,
             cache_read_tokens=0,
             reasoning_output_tokens=0,
+            cost_usd=0.0 if pricing is not None else None,
         )
-    return aggregate_snapshots(list(identified.values()), log_path, "Grok inference")
+    aggregate = aggregate_snapshots(list(identified.values()), log_path, "Grok inference")
+    return replace(aggregate, cost_usd=round(sum(item.cost_usd for item in identified.values()),
+                                           COST_DECIMAL_PLACES)) if pricing is not None else aggregate
 
 
 def usage_cost(usage: dict[str, Any]) -> float | None:
@@ -913,6 +920,7 @@ def read_snapshot(
         return grok_jsonl_snapshot(
             Path(args.grok_jsonl),
             unified_log_path=Path(args.grok_log) if args.grok_log else None,
+            pricing=load_pricing(args.grok_pricing) if args.grok_pricing else None,
         )
     if args.total_tokens is None:
         raise SystemExit(
@@ -1055,6 +1063,8 @@ def cmd_start(args: argparse.Namespace) -> int:
     }
     if snapshot.cost_usd is not None:
         state["baseline_cost_usd"] = snapshot.cost_usd
+    if args.grok_pricing:
+        state["grok_pricing"] = load_pricing(args.grok_pricing)
     source_binding = source_binding_from_args(args)
     if source_binding is not None:
         state["source_binding"] = source_binding
@@ -1082,6 +1092,12 @@ def current_run_usage(
             "Use the exact same native session log for start, status, and flags."
         )
     snapshot = read_snapshot(args, accounting_version=accounting_version)
+    if args.grok_jsonl:
+        pricing = load_pricing(args.grok_pricing) if args.grok_pricing else None
+        if state.get("grok_pricing") != pricing:
+            raise SystemExit("Grok pricing changed after the run baseline; retain this run for review")
+        if pricing is not None and baseline != 0 and "baseline_cost_usd" not in state:
+            raise SystemExit("Grok nonzero token baseline is missing its cost baseline")
     run_total = snapshot.total_tokens - baseline
     if run_total < 0:
         raise SystemExit(
@@ -1189,6 +1205,9 @@ def cmd_status(args: argparse.Namespace) -> int:
     }
     if run_cost is not None:
         payload["run_cost_usd"] = run_cost
+        if args.grok_jsonl:
+            payload["cost_basis"] = "public_api_list_price_per_request"
+            payload["pricing"] = state["grok_pricing"]
     if snapshot.experiment_accounting:
         from openrouter_failures import accounting_summary
         from openrouter_journal import read_records
@@ -1252,6 +1271,8 @@ def add_total_args(parser: argparse.ArgumentParser, *, allow_empty: bool = False
                         help="supervisor-owned single-prompt invocation stream for per-model final reconciliation")
     parser.add_argument("--grok-jsonl", help="current Grok session updates.jsonl to parse")
     parser.add_argument("--grok-log", help="Grok unified.jsonl override; normally discovered from --grok-jsonl")
+    parser.add_argument("--grok-pricing", default=os.environ.get("SCOREBENCH_GROK_PRICING", ""),
+                        help="pinned server model-pricing JSON for per-request Grok cost")
     parser.add_argument(
         "--openrouter-jsonl",
         default=DEFAULT_OPENROUTER_LOG,

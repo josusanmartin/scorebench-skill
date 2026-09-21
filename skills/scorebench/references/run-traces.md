@@ -37,9 +37,13 @@ Normally source discovery is automatic:
 - Claude uses a session environment identifier when available, then matches
   project JSONL records to the current workspace.
 
-Grok Build trace normalization is not supported yet. Do not run this helper for
-Grok workers. When `GROK_SESSION_JSONL` is present, automatic discovery fails
-closed instead of selecting an unrelated Codex or Claude transcript.
+Grok Build uses its bound `updates.jsonl`, not stdout or the shared unified log.
+The container supervisor uploads a sanitized native trace at finalization.
+For manual capture use `--provider grok --source "$GROK_SESSION_JSONL"`;
+`--from-start` includes earlier events from that explicitly bound session.
+Thought chunks are omitted, secrets are redacted, and mixed sessions are
+rejected. Automatic discovery never falls back to a coordinator's Codex or
+Claude transcript when `GROK_SESSION_JSONL` is set.
 
 For a runner-managed JSONL, pin it explicitly:
 

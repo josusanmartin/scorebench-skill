@@ -17,6 +17,49 @@ SCRIPT = (
 
 
 class TokenUsageTests(unittest.TestCase):
+    def test_grok_request_pricing_boundary_cache_dedup_and_baseline(self):
+        updates = self.root / "updates.jsonl"
+        log = self.root / "unified.jsonl"
+        price = self.root / "price.json"
+        pricing = {"provider": "xai", "key": "grok-4.7", "requested_model": "grok-4.7",
+                   "source_url": "https://docs.x.ai/developers/pricing",
+                   "input_per_million": 2, "cached_input_per_million": .5, "output_per_million": 6,
+                   "long_context_threshold_tokens": 200000, "long_context_multiplier": 2}
+        price.write_text(json.dumps(pricing))
+        updates.write_text(json.dumps({"params": {"sessionId": "parent"}}) + "\n")
+        def event(index, prompt, cached, sid="parent"):
+            return {"msg": "shell.turn.inference_done", "sid": sid, "pid": 1, "ts": str(index),
+                    "ctx": {"prompt_tokens": prompt, "cached_prompt_tokens": cached,
+                            "completion_tokens": 100, "reasoning_tokens": 80, "loop_index": index}}
+        before = event(1, 199999, 190000)
+        log.write_text(json.dumps(before) + "\n")
+        args = ["--grok-jsonl", str(updates), "--grok-log", str(log), "--grok-pricing", str(price)]
+        self.run_helper("start", *args)
+        baseline = self.state.read_bytes()
+        long = event(2, 200000, 190000)
+        spawn = {"msg": "subagent spawn credentials", "pid": 1, "ctx": {"subagent_id": "child"}}
+        child = event(3, 200001, 200001, "child")
+        records = [before, long, long, spawn, child, event(4, 500000, 0, "unrelated")]
+        log.write_text("".join(json.dumps(e) + "\n" for e in records))
+        snapshot = json.loads(self.run_helper("status", *args).stdout)
+        expected = 2 * (10000 * 2 + 190000 * .5 + 100 * 6) / 1e6 + 2 * (200001 * .5 + 100 * 6) / 1e6
+        self.assertAlmostEqual(snapshot["run_cost_usd"], expected)
+        self.assertEqual(snapshot["run_total_tokens"], 10200)
+        self.assertEqual(snapshot["run_usage"]["cache_read_tokens"], 390001)
+        self.assertEqual(snapshot["cost_basis"], "public_api_list_price_per_request")
+        self.assertIn(f"--cost-usd {expected}", self.run_helper("flags", *args).stdout)
+        self.assertEqual(self.state.read_bytes(), baseline)
+        pricing["long_context_multiplier"] = 3
+        price.write_text(json.dumps(pricing))
+        self.assertIn("pricing changed", self.run_helper("status", *args, check=False).stderr)
+
+    def test_grok_pricing_requires_valid_tier_and_immutable_manifest(self):
+        price = self.root / "price.json"
+        price.write_text(json.dumps({"provider": "xai"}))
+        result = self.run_helper("start", "--total-tokens", "0", "--grok-pricing", str(price), check=False)
+        self.assertNotEqual(result.returncode, 0)
+        self.assertFalse(self.state.exists())
+
     def setUp(self):
         self.tempdir = tempfile.TemporaryDirectory()
         self.root = Path(self.tempdir.name)
