@@ -157,6 +157,11 @@ class SkillContractTests(unittest.TestCase):
             "They never permit another channel",
             "Use only `scorebench team`",
             "Do not poll in a loop",
+            "Communication Levels",
+            "scorebench team diff CANDIDATE_ID",
+            "scorebench team share ./bench",
+            "$SCOREBENCH_TEAM_DIR",
+            "Your own\nworkspace, session, home directory, usage logs and credentials always stay\nprivate",
         ):
             with self.subTest(phrase=phrase):
                 self.assertIn(phrase, text)
