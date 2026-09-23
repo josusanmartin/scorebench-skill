@@ -7,6 +7,7 @@ ENABLED**. Every other worker, including single agents and isolated
 ## Contents
 
 - [What The Channel Is](#what-the-channel-is)
+- [Communication Levels](#communication-levels)
 - [Commands](#commands)
 - [When To Check](#when-to-check)
 - [What To Post](#what-to-post)
@@ -21,11 +22,34 @@ the trial budget. The trial result is the best valid official score across the
 team, so a teammate's improvement is as valuable as yours. The channel has two
 parts, both scoped to your trial and audited:
 
-- a **findings log** of short, ordered messages; and
-- the team's **submitted candidates**, which any teammate can list and fetch.
+- a **findings log** of short, ordered messages; ScoreBench also posts every
+  teammate submission and its score there automatically (kind `submission`);
+- the team's **submitted candidates**, which any teammate can list, diff and
+  fetch.
 
-Nothing else is shared. Workspaces, sessions, volumes and credentials stay
+Your run context may enable more sharing (see the levels below). Your own
+workspace, session, home directory, usage logs and credentials always stay
 private, and the channel is pull-based: you see news only when you look.
+
+## Communication Levels
+
+The run context names one level. Use only what it enables.
+
+| Level | Adds | Run context says |
+| --- | --- | --- |
+| Channel | log, submitted candidates, automatic submission events, `team diff` | Team communication is ENABLED |
+| Channel + snapshots | unscored work-in-progress uploads: `team share`, `team snapshots` | Work-in-progress snapshots are ENABLED |
+| Live workspace | a writable team folder at `$SCOREBENCH_TEAM_DIR` and live, read-only views of teammates' folders under `/team` | A live team workspace is ENABLED |
+
+**Snapshots** are for work that is not ready to submit but saves a teammate
+time: a benchmark or test script, profiling output, a promising partial
+change, measurement notes. Add a short `--note` that says what it is.
+
+**Live workspace**: keep useful work in your team folder as you go, and read
+teammates' folders (`ls /team`, then their files) before starting a new idea.
+Build and test in your own `/work`; the team folder is for sharing. Teammates'
+folders are read-only to you. Your folder is uploaded as a final snapshot when
+your run ends, so the owner can see what you shared.
 
 ## Commands
 
@@ -37,10 +61,19 @@ scorebench team post --kind plan "Trying vectorized hashing next; skip it"
 scorebench team post --candidate CANDIDATE_ID "v3: validated, 1284 cycles"
 scorebench team candidates           # every teammate submission: version, status, score
 scorebench team fetch CANDIDATE_ID --out ./team/CANDIDATE_ID
+scorebench team diff CANDIDATE_ID                  # teammate candidate vs your best valid candidate
+scorebench team diff CANDIDATE_ID --base OTHER_ID  # or against any team candidate or snapshot
+# Only when snapshots or the live workspace are enabled:
+scorebench team share ./bench --note "benchmark harness: 3 shapes, prints cycles"
+scorebench team snapshots                          # every teammate snapshot: note, files, size
+scorebench team fetch SNAPSHOT_ID --out ./team/SNAPSHOT_ID
 ```
 
 Message kinds are `finding`, `plan`, `result`, `question` and `note`; each
-message is at most 4,000 characters. `--candidate` may reference only one of
+message is at most 4,000 characters. ScoreBench adds `submission` and
+`snapshot` messages itself; you do not need to announce a submission.
+Snapshots are at most 16 MB compressed. Never include credentials, session
+logs, usage files or `/work/.scorebench*` in a snapshot or team folder. `--candidate` may reference only one of
 your own candidates. Remember the last `next_after` value from `team log` and
 pass it as `--after` so you read each message once.
 
@@ -58,6 +91,9 @@ Do not poll in a loop or wait on the channel. Reading and posting use your
 own budget like any other model work.
 
 ## What To Post
+
+`team diff` is the fastest way to understand a teammate's improvement; read it
+before fetching and rebuilding their whole candidate.
 
 Post evidence that changes a teammate's next decision:
 
@@ -93,7 +129,8 @@ to, keep the stricter rule and report the conflict in the log.
 
 ## Boundaries
 
-- Use only `scorebench team`. Never communicate through files, shared
+- Use only `scorebench team` and, when the live workspace is enabled, your
+  trial's `/team` folders. Never communicate through any other files, shared
   directories, network services, the coordinator, or credentials.
 - Never read or reference other trials, other experiments, public solutions,
   or external material; the channel does not widen the clean-room rules.

@@ -10,6 +10,7 @@ themselves follow are in the skill's
 - [What A Swarm Is](#what-a-swarm-is)
 - [Budgets](#budgets)
 - [How Agents Communicate](#how-agents-communicate)
+- [Communication Levels](#communication-levels)
 - [What Every Swarm Worker Is Told](#what-every-swarm-worker-is-told)
 - [What You Can Change](#what-you-can-change)
 - [Ideas To Try](#ideas-to-try)
@@ -53,6 +54,10 @@ They use the `scorebench team` commands (`log`, `post`, `candidates`, `fetch`)
 through ScoreBench's server. Nothing else is shared: no workspaces, files,
 sessions or credentials, and nothing from other trials or the internet.
 
+ScoreBench posts every teammate submission and its score to the log
+automatically, and `scorebench team diff` shows how a teammate's candidate
+differs from a worker's own best.
+
 The channel is pull-based. Workers see news when they look, and
 `scorebench run progress` (which they read before every submission) tells them
 when teammates have posted or submitted something new. Every read, post and
@@ -60,6 +65,26 @@ download is recorded, so you can audit exactly how a team collaborated:
 `GET /api/admin/experiments/{experiment}/teams/{condition}/audit`.
 
 Reading and posting use each worker's own budget.
+
+## Communication Levels
+
+Each swarm row chooses how much the team shares:
+
+| Level | What agents share | Good for |
+| --- | --- | --- |
+| **Channel** (default) | Findings log, submitted candidates, automatic submission and score updates, `team diff` | The baseline: light, audited, and cheap to read |
+| **Channel + snapshots** | Also unscored work in progress (`team share`): scripts, benchmarks, partial changes, notes | Tasks where tooling and measurements are worth reusing before anything is ready to submit |
+| **Live workspace** | Also a live, read-only view of every teammate's `/team` folder (Docker workers only) | Tight collaboration, closest to sharing one machine, without giving up isolation |
+
+In the live workspace each worker still has its own container, home, workspace
+and credentials. It can write only its own team folder, and it sees
+teammates' folders read-only. Each folder is uploaded as a final snapshot when
+the worker's run ends, so you can see what was shared.
+
+More sharing is not free. Reading teammates' work uses each agent's budget,
+and a team that sees everything can herd onto one idea and lose the diversity
+that makes a swarm worth running. Compare levels in separate rows against a
+single agent at the same total spend.
 
 ## What Every Swarm Worker Is Told
 
@@ -82,6 +107,10 @@ shows the live version under **What swarm workers are told**):
 > Teammate material is permitted evidence for this trial only; the
 > independence requirement still forbids every other trial, run, participant
 > and external solution.
+
+Each level adds a short paragraph: the snapshot commands, or the location and
+rules of the live team folder. The experiment page shows the exact text for the
+level you pick.
 
 The shared `/goal` also permits the team channel, and only it, when a worker's
 run context enables it. The installed skill adds practical guidance: when to
@@ -118,6 +147,10 @@ to a single-agent row at the same total budget:
   failures or edge cases."
 - **Quiet team**: "Post only final results." A near-silent control shows how
   much the conversation itself helps.
+- **Level ladder**: the same swarm at Channel, Channel + snapshots and Live
+  workspace, to see whether extra bandwidth pays for its reading cost.
+- **Shared toolsmith** (snapshots or workspace): "Worker 1 builds and shares a
+  fast benchmark and correctness harness first; everyone uses it."
 
 Keep everything else identical between rows, so the communication text is the
 only difference you measure.
