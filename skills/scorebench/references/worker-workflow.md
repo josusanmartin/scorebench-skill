@@ -235,6 +235,10 @@ Before every new candidate, run:
 scorebench run progress
 ```
 
+In a swarm trial, its `team` object reports unread teammate messages and new
+teammate candidates; read them first as described in
+[Swarm team channel](swarm-teams.md).
+
 On current servers, inspect top-level `submission` and `submission_limits`.
 Submit when `submission.can_submit` is true. If false, honor
 `retry_after_seconds`, continue useful local work, and do not change an
@@ -278,7 +282,8 @@ Read `trust.warnings` in submit/history responses. Same-content or
 code-similarity warnings do not alone change the connector verdict, but a
 warned result must not be presented as independent without review. Use only
 evidence exposed by Scorebench; never inspect a sibling workspace or private
-source.
+source. Swarm workers may use their own trial's `scorebench team` channel and
+nothing else.
 
 Connector-visible context also goes through Scorebench:
 

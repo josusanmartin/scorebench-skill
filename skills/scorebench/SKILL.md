@@ -27,6 +27,7 @@ triggered by the task:
 | Supervise long-running tmux workers | [tmux watchers](references/tmux-watchers.md) |
 | Collect low-overhead timing-v2 shadow evidence | [passive timing observer](references/timing-observer.md) |
 | Build isolated workers without prior artifacts | [Clean-room Docker](references/clean-room-docker.md) |
+| Work in a swarm trial (run context says team communication is ENABLED) | [Swarm team channel](references/swarm-teams.md), plus worker workflow |
 
 ## Required Installation Gate
 
