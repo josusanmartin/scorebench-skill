@@ -161,6 +161,18 @@ class SkillContractTests(unittest.TestCase):
             with self.subTest(phrase=phrase):
                 self.assertIn(phrase, text)
 
+    def test_owner_swarm_readme_explains_budgets_rules_and_customization(self):
+        readme = (SKILL_DIR.parents[1] / "README.md").read_text(encoding="utf-8")
+        self.assertIn("(swarm/README.md)", readme)
+        text = (SKILL_DIR.parents[1] / "swarm" / "README.md").read_text(encoding="utf-8")
+        for phrase in (
+            "Split the trial budget", "Full budget for every agent", "Different budget for this\nrow",
+            "What Every Swarm Worker Is Told", "How should the swarm communicate?",
+            "cannot open another channel", "(../skills/scorebench/references/swarm-teams.md)",
+        ):
+            with self.subTest(phrase=phrase):
+                self.assertIn(phrase, text)
+
     def test_run_trace_is_end_only_sanitized_and_bounded(self):
         script = (SKILL_DIR / "scripts" / "run_trace.py").read_text(
             encoding="utf-8"
