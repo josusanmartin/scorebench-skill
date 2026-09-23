@@ -67,6 +67,40 @@ class ClaudeCostStateTests(unittest.TestCase):
             result = usage.claude_result_ledger(path)
             self.assertEqual(result["modelUsage"]["fable"]["inputTokens"],100)
 
+    def resumed_ledger(self, second_model_usage, second_usage):
+        def counters(inputs, outputs, cost):
+            return {"haiku": dict(inputTokens=inputs, outputTokens=outputs, cacheCreationInputTokens=0,
+                                  cacheReadInputTokens=0, costUSD=cost)}
+        first_usage = dict(input_tokens=10, output_tokens=1, cache_creation_input_tokens=0, cache_read_input_tokens=0)
+        records = [
+            {"type": "scorebench_invocation", "id": "first"},
+            {"type": "result", "uuid": "a", "session_id": "session-1", "modelUsage": counters(10, 1, 1.5e-05),
+             "usage": first_usage},
+            {"type": "scorebench_invocation", "id": "second"},
+            {"type": "result", "uuid": "b", "session_id": "session-1",
+             "modelUsage": counters(*second_model_usage), "usage": dict(first_usage, **second_usage)},
+        ]
+        with tempfile.TemporaryDirectory() as directory:
+            path = Path(directory) / "results.jsonl"
+            path.write_text("".join(json.dumps(record) + "\n" for record in records))
+            return usage.claude_result_ledger(path)["modelUsage"]["haiku"]
+
+    def test_cumulative_resume_report_is_not_added_twice(self):
+        # Claude Code 2.1.281: the resumed result reports session totals (20/2, $3e-05)
+        # while its own usage is just this invocation (10/1).
+        result = self.resumed_ledger((20, 2, 3e-05), {})
+        self.assertEqual((result["inputTokens"], result["outputTokens"]), (20, 2))
+        self.assertAlmostEqual(result["costUSD"], 3e-05)
+
+    def test_per_invocation_resume_report_is_still_added(self):
+        # Claude Code 2.1.259: the resumed result reports only its own invocation.
+        result = self.resumed_ledger((10, 1, 1.5e-05), {})
+        self.assertEqual((result["inputTokens"], result["outputTokens"]), (20, 2))
+        self.assertAlmostEqual(result["costUSD"], 3e-05)
+        # A larger resumed invocation that is not previous + its own usage is added, never netted.
+        result = self.resumed_ledger((30, 3, 4.5e-05), dict(input_tokens=30, output_tokens=3))
+        self.assertEqual(result["inputTokens"], 40)
+
     def test_empty_native_report_certifies_only_zero_usage(self):
         with tempfile.TemporaryDirectory() as directory:
             transcript = Path(directory) / "session.jsonl"
