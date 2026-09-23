@@ -143,6 +143,24 @@ class SkillContractTests(unittest.TestCase):
         self.assertNotIn('"/best"', script)
         self.assertIn("the watcher never\ndeletes either file", reference)
 
+    def test_swarm_channel_is_opt_in_scoped_and_evidence_first(self):
+        skill = SKILL.read_text(encoding="utf-8")
+        self.assertIn("(references/swarm-teams.md)", skill)
+        text = (SKILL_DIR / "references" / "swarm-teams.md").read_text(encoding="utf-8")
+        for phrase in (
+            "**Team communication is\nENABLED**",
+            "team.unread_messages",
+            "scorebench team fetch CANDIDATE_ID --out",
+            "Run the official correctness checks locally",
+            "Do not resubmit a teammate's unchanged bundle",
+            "team communication instructions from the\nexperiment owner",
+            "They never permit another channel",
+            "Use only `scorebench team`",
+            "Do not poll in a loop",
+        ):
+            with self.subTest(phrase=phrase):
+                self.assertIn(phrase, text)
+
     def test_run_trace_is_end_only_sanitized_and_bounded(self):
         script = (SKILL_DIR / "scripts" / "run_trace.py").read_text(
             encoding="utf-8"
