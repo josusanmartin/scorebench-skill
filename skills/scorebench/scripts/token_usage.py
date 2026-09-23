@@ -390,19 +390,58 @@ def claude_result_ledger(path: Path) -> dict[str, Any] | None:
     if len(sessions) != 1 or not all(isinstance(value, str) and value for value in sessions):
         raise SystemExit("mixed Claude terminal sessions")
     models: dict[str, dict] = {}
+    previous: dict[str, dict] | None = None
     for result in results.values():
+        current: dict[str, dict] = {}
         for model, counters in result["modelUsage"].items():
             if not isinstance(counters, dict):
                 raise SystemExit("invalid Claude terminal model usage")
-            combined = models.setdefault(model, {})
-            for key in ("inputTokens", "outputTokens", "cacheCreationInputTokens", "cacheReadInputTokens", "costUSD"):
+            checked = current.setdefault(model, {})
+            for key in CLAUDE_LEDGER_KEYS:
                 value = counters.get(key)
                 if type(value) not in (int, float) or not math.isfinite(value) or value < 0:
                     raise SystemExit("incomplete Claude terminal model usage")
                 if key != "costUSD" and type(value) is not int:
                     raise SystemExit("Claude token counter is not an integer")
-                combined[key] = combined.get(key, 0) + value
+                checked[key] = value
+        # Newer Claude Code reports session-cumulative modelUsage after --resume;
+        # older releases report each invocation alone. Add only the new part.
+        cumulative = previous is not None and claude_resume_is_cumulative(previous, current, result.get("usage"))
+        for model, counters in current.items():
+            combined = models.setdefault(model, {})
+            for key, value in counters.items():
+                earlier = previous.get(model, {}).get(key, 0) if cumulative else 0
+                combined[key] = combined.get(key, 0) + value - earlier
+        previous = current
     return {"type": "cost-state", "sessionId": next(iter(sessions)), "modelUsage": models}
+
+
+CLAUDE_LEDGER_KEYS = ("inputTokens", "outputTokens", "cacheCreationInputTokens", "cacheReadInputTokens", "costUSD")
+CLAUDE_RESULT_USAGE_KEYS = {"inputTokens": "input_tokens", "outputTokens": "output_tokens",
+                            "cacheCreationInputTokens": "cache_creation_input_tokens",
+                            "cacheReadInputTokens": "cache_read_input_tokens"}
+
+
+def claude_resume_is_cumulative(previous: dict[str, dict], current: dict[str, dict], usage: Any) -> bool:
+    """True only when a resumed result is exactly the previous totals plus its own usage.
+
+    The terminal `usage` always covers just this invocation. A cumulative report
+    therefore grows by exactly that much for the main model; a per-invocation
+    report equals it instead, which cannot also match once the earlier
+    invocation used tokens. Anything ambiguous keeps the adding behavior, which
+    may overcount but never undercounts.
+    """
+    if not isinstance(usage, dict) or not previous or not set(previous).issubset(current):
+        return False
+    if any(current[model][key] < previous[model][key] for model in previous for key in CLAUDE_LEDGER_KEYS):
+        return False
+    for model, earlier in previous.items():
+        if not any(earlier[key] for key in CLAUDE_RESULT_USAGE_KEYS):
+            continue
+        if all(type(usage.get(field)) is int and current[model][key] - earlier[key] == usage[field]
+               for key, field in CLAUDE_RESULT_USAGE_KEYS.items()):
+            return True
+    return False
 
 
 def claude_jsonl_snapshot(
