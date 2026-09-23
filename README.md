@@ -306,6 +306,12 @@ for GLM, and the actual native coding harness for other models. If Claude was
 run inside Codex, record `Codex`; the historical `claude-codex-*` runs are the
 known crossed case.
 
+## Swarm collaboration
+
+Experiments can run each trial with a swarm of agents that share findings and
+submitted candidates. [Swarm collaboration](swarm/README.md) explains budgets,
+exactly what swarm workers are told, what you can customize, and ideas to try.
+
 ## Repository layout
 
 ```text
@@ -319,12 +325,14 @@ skills/scorebench/references/paradigm-puzzles.md   # Paradigm exercise file and 
 skills/scorebench/references/run-traces.md         # end-only sanitized trace capture
 skills/scorebench/references/tmux-goal-sessions.md # long-running tmux /goal sessions
 skills/scorebench/references/tmux-watchers.md      # recovery and active-time monitors
+skills/scorebench/references/swarm-teams.md        # rules for swarm workers on the team channel
 skills/scorebench/references/token-accounting.md   # exact run-relative usage
 skills/scorebench/references/worker-workflow.md     # one scoped run from bootstrap to final usage
 skills/scorebench/scripts/install_scorebench_cli.sh # CLI bootstrap (hosted installer + fallback)
 skills/scorebench/scripts/scorebench_watch.py      # durable worker monitors
 skills/scorebench/scripts/run_trace.py             # post-run trace sanitizer/uploader
 skills/scorebench/scripts/token_usage.py           # run-relative token accounting
+swarm/README.md                                     # for owners: how swarms collaborate and what to try
 ```
 
 ## Links
