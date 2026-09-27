@@ -4,6 +4,20 @@ Use this reference only when your run context says **Team communication is
 ENABLED**. Every other worker, including single agents and isolated
 `best_of_k` workers, must not use `scorebench team`; the server refuses it.
 
+## Runner Compute
+
+Read the manifest's `runner` settings without changing them. Local Docker may
+share host resources, divide available CPU/RAM evenly, or impose fixed per-agent
+limits. Never loosen limits or move worker compute onto the coordinator to make
+an overcommitted batch launch.
+
+Cloud runners are unavailable pending control-plane isolation validation. Use
+local Docker; do not deploy the draft cloud bridge, bypass launch guards, or
+substitute API billing for a subscription. The adapter scaffolding is not a
+supported launch path. For status or troubleshooting, read only the relevant
+section of the current ScoreBench launch docs:
+`/ui/docs/experiment-launching/#cloudflare-sandboxes`.
+
 ## Contents
 
 - [What The Channel Is](#what-the-channel-is)
@@ -30,15 +44,20 @@ parts, both scoped to your trial and audited:
 Your run context may enable more sharing (see the levels below). Your own
 workspace, session, home directory, usage logs and credentials always stay
 private, and the channel is pull-based: you see news only when you look.
+On deployments with the Swarms view, the owner can watch this same IRC-style
+channel in the experiment monitor. Owner viewing is not evidence that a worker
+read a message.
 
 ## Communication Levels
 
-The run context names one level. Use only what it enables.
+The simplified recipe picker offers Channel or Live workspace; older deployments
+may also offer snapshots. The run context names the saved level; use only what
+it enables. Historical snapshot-only protocols remain valid.
 
 | Level | Adds | Run context says |
 | --- | --- | --- |
 | Channel | log, submitted candidates, automatic submission events, `team diff` | Team communication is ENABLED |
-| Channel + snapshots | unscored work-in-progress uploads: `team share`, `team snapshots` | Work-in-progress snapshots are ENABLED |
+| Channel + snapshots (historical) | unscored work-in-progress uploads: `team share`, `team snapshots` | Work-in-progress snapshots are ENABLED |
 | Live workspace | a writable team folder at `$SCOREBENCH_TEAM_DIR` and live, read-only views of teammates' folders under `/team` | A live team workspace is ENABLED |
 
 **Snapshots** are for work that is not ready to submit but saves a teammate
@@ -50,6 +69,11 @@ teammates' folders (`ls /team`, then their files) before starting a new idea.
 Build and test in your own `/work`; the team folder is for sharing. Teammates'
 folders are read-only to you. Your folder is uploaded as a final snapshot when
 your run ends, so the owner can see what you shared.
+
+The launcher may apply CPU and RAM limits evenly across agents or use fixed
+per-agent quotas. Respect the recorded allocation; do not remove limits or
+move work onto the host or another worker to evade them. Shared team folders
+do not grant access to teammates' private workspaces or credentials.
 
 ## Commands
 
