@@ -11,12 +11,21 @@ share host resources, divide available CPU/RAM evenly, or impose fixed per-agent
 limits. Never loosen limits or move worker compute onto the coordinator to make
 an overcommitted batch launch.
 
-Cloud runners are unavailable pending control-plane isolation validation. Use
-local Docker; do not deploy the draft cloud bridge, bypass launch guards, or
-substitute API billing for a subscription. The adapter scaffolding is not a
-supported launch path. For status or troubleshooting, read only the relevant
-section of the current ScoreBench launch docs:
-`/ui/docs/experiment-launching/#cloudflare-sandboxes`.
+On deployments offering experimental Cloudflare runners, use the generated
+launch block unchanged. It prepares a private bridge from the verified archive
+using the coordinator's existing Cloudflare authentication, before redeeming the
+launch token. It never purchases a plan. Each worker gets a separate cloud
+instance; compute charges are additional to the selected model budget.
+
+Cloud support currently requires Claude Code subscription authentication,
+parallel launch and Channel sharing for swarms. Live workspace stays on local
+Docker. Keep the coordinator and its Claude login alive; only access tokens are
+forwarded, never refresh tokens. The hard cloud runtime and coordinator lease
+still apply. Do not bypass guards, substitute API billing, or replace a lost VM.
+Preserve downloaded evidence; checkpoints are not resumable VM snapshots.
+For setup or failures, read only the relevant section on the run's ScoreBench
+server: `/ui/docs/experiment-launching/#cloudflare-sandboxes`. Older deployments
+may not offer cloud launches; their server-side availability remains authoritative.
 
 ## Contents
 
