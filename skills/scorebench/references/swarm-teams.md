@@ -11,21 +11,48 @@ share host resources, divide available CPU/RAM evenly, or impose fixed per-agent
 limits. Never loosen limits or move worker compute onto the coordinator to make
 an overcommitted batch launch.
 
-On deployments offering experimental Cloudflare runners, use the generated
-launch block unchanged. It prepares a private bridge from the verified archive
-using the coordinator's existing Cloudflare authentication, before redeeming the
-launch token. It never purchases a plan. Each worker gets a separate cloud
-instance; compute charges are additional to the selected model budget.
+Some deployments offer experimental cloud runners: Cloudflare sandboxes,
+AWS EC2 VMs and, where the server lists it, OVHcloud VMs. Use the generated
+launch block exactly as written. Backend, size, region or location, worker count
+and lifetime are fixed by the saved experiment; never edit them, retry a
+consumed launch token, replay a pairing, or re-run the launcher to recover. Each
+worker gets its own sandbox or VM. Cloud compute is billed to the coordinator's
+cloud account, on top of the selected model budget, and setup never purchases a
+plan.
 
-Cloud support currently requires Claude Code subscription authentication,
-parallel launch and Channel sharing for swarms. Live workspace stays on local
-Docker. Keep the coordinator and its Claude login alive; only access tokens are
-forwarded, never refresh tokens. The hard cloud runtime and coordinator lease
-still apply. Do not bypass guards, substitute API billing, or replace a lost VM.
-Preserve downloaded evidence; checkpoints are not resumable VM snapshots.
-For setup or failures, read only the relevant section on the run's ScoreBench
-server: `/ui/docs/experiment-launching/#cloudflare-sandboxes`. Older deployments
-may not offer cloud launches; their server-side availability remains authoritative.
+Before launching, sign in on the coordinator machine where the prompt is pasted.
+A login on another device does not count:
+
+- Cloudflare: `wrangler whoami` succeeds (use `wrangler login`, or
+  `wrangler login --device --browser=false` on a headless host). The launcher
+  prepares a private bridge from the verified archive before redeeming the token.
+- AWS: `aws sts get-caller-identity` succeeds for the intended profile. Cloud
+  credentials stay on the coordinator; never copy them into a VM, Terraform
+  variables or chat.
+- Both: Claude Code is signed in with the subscription, and that login stays
+  alive. Only access tokens are forwarded, never refresh tokens.
+
+New Cloudflare experiments are automatically restricted to **EU only**. There is
+no selector, and reproduced recipes keep their saved policy. The launcher checks
+each sandbox's reported country and region before it sends any credentials. A
+sandbox missing that report, or placed outside the policy, stops the launch
+without a replacement. The restriction covers the sandbox VM only, not the bridge
+or the path credentials take, so it is not a data-residency guarantee.
+
+Cloud runners currently support Claude Code subscription workers, parallel
+launch, and Channel or Live workspace swarms. On current servers the live
+workspace is synced by the coordinator, so it works on cloud runners too (see
+[Communication Levels](#communication-levels)). Older servers may keep the live
+workspace on local Docker only. The server's availability for the run is always
+authoritative. The hard cloud runtime and coordinator lease still apply.
+
+Do not bypass guards, substitute API billing, or replace a lost sandbox or VM.
+A failure before release stops that batch without replacement. Preserve the
+downloaded evidence; checkpoints are not resumable VM snapshots. For setup or
+failures, read only the relevant section on the run's ScoreBench server:
+`/ui/docs/experiment-launching/#cloudflare-sandboxes` or
+`/ui/docs/experiment-launching/#worker-compute`. Older deployments may not offer
+cloud launches.
 
 ## Contents
 
@@ -67,7 +94,7 @@ it enables. Historical snapshot-only protocols remain valid.
 | --- | --- | --- |
 | Channel | log, submitted candidates, automatic submission events, `team diff` | Team communication is ENABLED |
 | Channel + snapshots (historical) | unscored work-in-progress uploads: `team share`, `team snapshots` | Work-in-progress snapshots are ENABLED |
-| Live workspace | a writable team folder at `$SCOREBENCH_TEAM_DIR` and live, read-only views of teammates' folders under `/team` | A live team workspace is ENABLED |
+| Live workspace | a writable team folder at `$SCOREBENCH_TEAM_DIR` and read-only views of teammates' folders under `/team` (live mounts on local Docker, synced copies on cloud runners) | A live team workspace is ENABLED |
 
 **Snapshots** are for work that is not ready to submit but saves a teammate
 time: a benchmark or test script, profiling output, a promising partial
@@ -76,8 +103,14 @@ change, measurement notes. Add a short `--note` that says what it is.
 **Live workspace**: keep useful work in your team folder as you go, and read
 teammates' folders (`ls /team`, then their files) before starting a new idea.
 Build and test in your own `/work`; the team folder is for sharing. Teammates'
-folders are read-only to you. Your folder is uploaded as a final snapshot when
-your run ends, so the owner can see what you shared.
+folders are read-only to you. On cloud runners the coordinator copies folders
+between workers every few seconds. This is eventual, not a shared filesystem:
+expect a delay, and don't rely on file locking or immediate visibility. Check
+`/team/sync-status.json` (`ok` or `degraded`, plus peer observation times)
+before trusting a teammate's copy. Each folder is limited to 4 MiB and 512
+entries. Symlinks, special files and files that change during export block an
+update, and the previous version stays readable. Your folder is uploaded as a
+final snapshot when your run ends, so the owner can see what you shared.
 
 The launcher may apply CPU and RAM limits evenly across agents or use fixed
 per-agent quotas. Respect the recorded allocation; do not remove limits or

@@ -74,7 +74,7 @@ Each swarm row chooses how much the team shares:
 | --- | --- | --- |
 | **Channel** (default) | Findings log, submitted candidates, automatic submission and score updates, `team diff` | The baseline: light, audited, and cheap to read |
 | **Channel + snapshots** | Also unscored work in progress (`team share`): scripts, benchmarks, partial changes, notes | Tasks where tooling and measurements are worth reusing before anything is ready to submit |
-| **Live workspace** | Also a live, read-only view of every teammate's `/team` folder (Docker workers only) | Tight collaboration, closest to sharing one machine, without giving up isolation |
+| **Live workspace** | Also a live, read-only view of every teammate's `/team` folder (live mounts on local Docker; coordinator-synced copies every few seconds on cloud runners) | Tight collaboration, closest to sharing one machine, without giving up isolation |
 
 In the live workspace each worker still has its own container, home, workspace
 and credentials. It can write only its own team folder, and it sees

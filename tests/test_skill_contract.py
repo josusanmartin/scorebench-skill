@@ -166,6 +166,19 @@ class SkillContractTests(unittest.TestCase):
             with self.subTest(phrase=phrase):
                 self.assertIn(phrase, text)
 
+    def test_cloud_runner_guidance_is_fixed_launch_and_current(self):
+        text = (SKILL_DIR / "references" / "swarm-teams.md").read_text(encoding="utf-8")
+        self.assertNotIn("Live workspace stays on local", text)
+        for phrase in (
+            "AWS EC2 VMs", "OVHcloud", "never edit them, retry a\nconsumed launch token, replay a pairing",
+            "`wrangler whoami`", "`aws sts get-caller-identity`", "**EU only**",
+            "before it sends any credentials", "not a data-residency guarantee",
+            "live\nworkspace is synced by the coordinator", "`/team/sync-status.json`",
+            "replace a lost sandbox or VM", "/ui/docs/experiment-launching/#cloudflare-sandboxes",
+        ):
+            with self.subTest(phrase=phrase):
+                self.assertIn(phrase, text)
+
     def test_owner_swarm_readme_explains_budgets_rules_and_customization(self):
         readme = (SKILL_DIR.parents[1] / "README.md").read_text(encoding="utf-8")
         self.assertIn("(swarm/README.md)", readme)
