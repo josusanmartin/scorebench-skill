@@ -141,6 +141,67 @@ class ClaudeCostStateTests(unittest.TestCase):
         self.assertEqual(result.total_tokens, 345)
         self.assertIsNone(result.cost_usd)
 
+    def test_live_tail_advances_even_below_checkpoint_counters(self):
+        # The checkpoint includes requests missing from the native message log.
+        result = self.parse(message(90), ledger(), message(5, identifier="new"))
+        self.assertEqual(result.input_tokens, 115)
+        self.assertEqual(result.output_tokens, 115)
+        self.assertEqual(result.cache_read_tokens, 575)
+        self.assertIsNone(result.cost_usd)
+
+    def test_duplicate_message_after_checkpoint_is_not_live_tail(self):
+        result = self.parse(message(90), ledger(), message(90))
+        self.assertEqual(result.total_tokens, 330)
+        self.assertAlmostEqual(result.cost_usd, .21)
+
+    def test_stale_checkpoint_cannot_hide_already_observed_live_tail(self):
+        with self.assertRaisesRegex(SystemExit, "preceding native usage"):
+            self.parse(message(90), ledger(), message(5, identifier="new"), ledger())
+
+    def test_checkpoint_cost_regression_is_refused(self):
+        with self.assertRaisesRegex(SystemExit, "cost decreased"):
+            self.parse(ledger(), ledger(main=110, cost=.1))
+
+    def test_repeated_message_cannot_change_its_model(self):
+        with self.assertRaisesRegex(SystemExit, "conflicting Claude model"):
+            self.parse(message(), message(model="haiku"), ledger())
+
+    def test_interrupted_resume_uses_matching_native_checkpoints(self):
+        first, second = ledger(), ledger(main=250, cost=.5)
+        own_usage = message(140)["message"]["usage"]
+        records = [
+            {"type": "scorebench_invocation", "id": "first"},
+            {"type": "result", "uuid": "a", "session_id": "session-1",
+             "modelUsage": first["modelUsage"], "usage": message()["message"]["usage"]},
+            {"type": "scorebench_invocation", "id": "second"},
+            {"type": "result", "uuid": "b", "session_id": "session-1",
+             "modelUsage": second["modelUsage"], "usage": own_usage,
+             "subtype": "error_during_execution", "is_error": True},
+        ]
+        native = [message(), first, message(140, identifier="second"), second]
+        with tempfile.TemporaryDirectory() as directory:
+            transcript = Path(directory) / "native.jsonl"
+            results = Path(directory) / "results.jsonl"
+            results.write_text("".join(json.dumps(record) + "\n" for record in records))
+            transcript.write_text("".join(json.dumps(record) + "\n" for record in native))
+            stopped = usage.claude_jsonl_snapshot(transcript, results_path=results)
+            self.assertEqual(stopped.total_tokens, 780)
+            self.assertAlmostEqual(stopped.cost_usd, .51)
+            result_ledger = usage.claude_result_ledger(results, native_path=transcript)
+            self.assertEqual(result_ledger["modelUsage"], second["modelUsage"])
+            with transcript.open("a") as output:
+                output.write(json.dumps(message(5, identifier="third")) + "\n")
+            live = usage.claude_jsonl_snapshot(transcript, results_path=results)
+            self.assertEqual(live.total_tokens, 795)
+            self.assertEqual(live.cache_read_tokens, 1325)
+            self.assertIsNone(live.cost_usd)
+            mismatched = dict(second, sessionId="another-session")
+            with self.assertRaisesRegex(SystemExit, "do not match"):
+                usage.claude_result_ledger(results, native_checkpoints=[first, mismatched])
+            # A partial checkpoint chain cannot prove the scope of earlier results.
+            with self.assertRaisesRegex(SystemExit, "do not match"):
+                usage.claude_result_ledger(results, native_checkpoints=[second])
+
     def test_partial_or_regressing_ledger_fails_instead_of_undercounting(self):
         with self.assertRaises(SystemExit):
             self.parse(ledger(), ledger(main=90))

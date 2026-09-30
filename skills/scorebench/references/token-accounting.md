@@ -126,9 +126,22 @@ those totals with the persisted transcript, includes auxiliary models such as
 Haiku, and reports their native USD costs including cache reads. Single-prompt
 invocation results are deduplicated by UUID and accumulated across supervised
 same-session reentries. Newer Claude Code releases report session-cumulative
-`modelUsage` after `--resume`; the helper recognizes that report (previous
-totals plus the result's own `usage`) and adds only the new part, so a resumed
-session is never counted twice. Mixed sessions and regressing counters fail closed.
+`modelUsage` after `--resume`. When the native transcript contains `cost-state`
+checkpoints, every terminal result must match an ordered checkpoint from the
+same session. Those cumulative totals replace earlier checkpoints, including
+after an interrupted response whose own `usage` omits in-flight work. Results
+without checkpoints retain the older per-invocation interpretation, except
+where the exact difference proves they are cumulative. A partial or conflicting
+checkpoint chain requires reconciliation rather than guessing its scope.
+
+After a checkpoint, new deduplicated native messages are added to that saved
+total, not hidden behind a per-counter maximum against the whole transcript.
+This preserves auxiliary and interrupted usage absent from message records.
+Repeated message IDs are not counted again. A live tail does not certify a
+current native USD total; final reconciliation is still required. Mixed sessions,
+regressing checkpoints, and checkpoints that omit already-observed new usage
+fail closed. Never reset the baseline or edit recorded usage to repair a prior
+overcount: an already-accepted server total needs an audited owner correction.
 Live transcript snapshots can precede the auxiliary-model final report; use
 supervisor-reconciled final totals for completed-run comparisons. Missing final
 model usage is an accounting warning/failure, not evidence of zero helper spend.

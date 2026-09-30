@@ -357,7 +357,14 @@ def claude_usage_total(usage: dict[str, Any]) -> int | None:
     return usage_total(usage)
 
 
-def claude_result_ledger(path: Path) -> dict[str, Any] | None:
+def claude_result_ledger(
+    path: Path, *, native_checkpoints: list[dict] | None = None,
+    native_path: Path | None = None,
+) -> dict[str, Any] | None:
+    if native_path is not None:
+        if native_checkpoints is not None:
+            raise ValueError("pass native_path or native_checkpoints, not both")
+        native_checkpoints = claude_native_checkpoints(native_path)
     results: dict[str, dict] = {}
     invocation = None
     seen_results: dict[str, dict] = {}
@@ -391,6 +398,8 @@ def claude_result_ledger(path: Path) -> dict[str, Any] | None:
         raise SystemExit("mixed Claude terminal sessions")
     models: dict[str, dict] = {}
     previous: dict[str, dict] | None = None
+    checkpoint_index = -1
+    checkpoint_chain = bool(native_checkpoints)
     for result in results.values():
         current: dict[str, dict] = {}
         for model, counters in result["modelUsage"].items():
@@ -404,6 +413,34 @@ def claude_result_ledger(path: Path) -> dict[str, Any] | None:
                 if key != "costUSD" and type(value) is not int:
                     raise SystemExit("Claude token counter is not an integer")
                 checked[key] = value
+        # A persisted native cost-state is session-cumulative, including after
+        # an interrupted invocation whose per-turn usage omits in-flight work.
+        # Require a matching checkpoint for every result; a version string or
+        # merely larger counters does not prove cumulative accounting.
+        matched_checkpoint = None
+        if checkpoint_chain:
+            for index, checkpoint in enumerate(native_checkpoints or []):
+                if index < checkpoint_index or checkpoint.get("sessionId") != result["session_id"]:
+                    continue
+                values = checkpoint.get("modelUsage")
+                if isinstance(values, dict) and set(values) == set(current) and all(
+                    isinstance(values[model], dict)
+                    and all(values[model].get(key) == count for key, count in counters.items())
+                    for model, counters in current.items()
+                ):
+                    matched_checkpoint = index
+                    break
+        checkpoint_chain = checkpoint_chain and matched_checkpoint is not None
+        if checkpoint_chain:
+            if previous and (not set(previous).issubset(current) or any(
+                current[model][key] < previous[model][key]
+                for model in previous for key in CLAUDE_LEDGER_KEYS
+            )):
+                raise SystemExit("Claude cumulative terminal usage decreased")
+            checkpoint_index = matched_checkpoint
+            models = {model: dict(counters) for model, counters in current.items()}
+            previous = current
+            continue
         # Newer Claude Code reports session-cumulative modelUsage after --resume;
         # older releases report each invocation alone. Add only the new part.
         cumulative = previous is not None and claude_resume_is_cumulative(previous, current, result.get("usage"))
@@ -413,7 +450,25 @@ def claude_result_ledger(path: Path) -> dict[str, Any] | None:
                 earlier = previous.get(model, {}).get(key, 0) if cumulative else 0
                 combined[key] = combined.get(key, 0) + value - earlier
         previous = current
+    if native_checkpoints and not checkpoint_chain:
+        raise SystemExit(
+            "Claude terminal results do not match persisted cumulative checkpoints; "
+            "accounting needs reconciliation"
+        )
     return {"type": "cost-state", "sessionId": next(iter(sessions)), "modelUsage": models}
+
+
+def claude_native_checkpoints(path: Path) -> list[dict]:
+    checkpoints = []
+    with path.open("r", encoding="utf-8") as handle:
+        for line in handle:
+            try:
+                event = json.loads(line)
+            except ValueError:
+                continue
+            if isinstance(event, dict) and event.get("type") == "cost-state":
+                checkpoints.append(event)
+    return checkpoints
 
 
 CLAUDE_LEDGER_KEYS = ("inputTokens", "outputTokens", "cacheCreationInputTokens", "cacheReadInputTokens", "costUSD")
@@ -455,12 +510,23 @@ def claude_jsonl_snapshot(
     identified: dict[str, UsageSnapshot] = {}
     message_models: dict[str, str] = {}
     ledger: dict[str, UsageSnapshot] = {}
+    ledger_costs: dict[str, float] = {}
     ledger_cost: float | None = None
     ledger_session: str | None = None
     native_sessions: set[str] = set()
-    terminal_ledger = claude_result_ledger(results_path) if results_path else None
+    native_checkpoints: list[dict] = []
+    checkpoint_messages: set[str] = set()
+    # Collect the native checkpoints before interpreting terminal results. The
+    # latter must not replace a saved cumulative total with an invocation sum.
+    if results_path:
+        native_checkpoints = claude_native_checkpoints(path)
+    terminal_ledger = claude_result_ledger(
+        results_path, native_checkpoints=native_checkpoints,
+    ) if results_path else None
+    terminal_events = [json.dumps(terminal_ledger)] if terminal_ledger and not native_checkpoints else []
+    has_native_checkpoint = bool(native_checkpoints) or terminal_ledger is None
     with path.open("r", encoding="utf-8") as handle:
-        for line in itertools.chain(handle, [json.dumps(terminal_ledger)] if terminal_ledger else []):
+        for line in itertools.chain(handle, terminal_events):
             line = line.strip()
             if not line:
                 continue
@@ -499,11 +565,37 @@ def claude_jsonl_snapshot(
                     cost = values.get("costUSD")
                     if type(cost) not in (int, float) or not math.isfinite(cost) or cost < 0:
                         raise SystemExit("invalid Claude cost-state model cost")
+                    if cost < ledger_costs.get(model, 0):
+                        raise SystemExit("Claude cost-state cost decreased; refusing undercount")
                     costs.append(float(cost))
                 if not set(ledger).issubset(current):
                     raise SystemExit("Claude cost-state lost a previously recorded model")
+                if ledger and has_native_checkpoint:
+                    # Advancing the checkpoint boundary cannot hide native work
+                    # already observed since the preceding checkpoint.
+                    expected: dict[str, list[UsageSnapshot]] = {}
+                    actual: dict[str, list[UsageSnapshot]] = {}
+                    for model, value in ledger.items():
+                        expected.setdefault(re.sub(r"-\d{8}$", "", model), []).append(value)
+                    for identity, value in identified.items():
+                        if identity not in checkpoint_messages:
+                            model = re.sub(r"-\d{8}$", "", message_models[identity])
+                            expected.setdefault(model, []).append(value)
+                    for model, value in current.items():
+                        actual.setdefault(re.sub(r"-\d{8}$", "", model), []).append(value)
+                    for model, values in expected.items():
+                        floor = aggregate_snapshots(values, path, "Claude checkpoint floor")
+                        observed = (aggregate_snapshots(actual[model], path, "Claude checkpoint")
+                                    if model in actual else UsageSnapshot(total_tokens=0))
+                        if any((getattr(floor, key) or 0) > (getattr(observed, key) or 0) for key in fields):
+                            raise SystemExit("Claude cost-state does not cover preceding native usage")
                 ledger = current
+                ledger_costs = {model: float(values["costUSD"]) for model, values in models.items()}
                 ledger_cost = None if event.get("hasUnknownModelCost") else sum(costs)
+                # Only native checkpoints identify a position in the transcript.
+                # A synthetic terminal ledger has no such tail boundary.
+                if has_native_checkpoint:
+                    checkpoint_messages = set(identified)
                 continue
             if event.get("type") == "result" and isinstance(event.get("usage"), dict):
                 raise SystemExit(
@@ -538,7 +630,10 @@ def claude_jsonl_snapshot(
                         f"{stable_id} in {path}"
                     )
                 identified[stable_id] = snapshot
-                message_models[stable_id] = str(message.get("model") or "") if isinstance(message, dict) else ""
+                model = str(message.get("model") or "") if isinstance(message, dict) else ""
+                if stable_id in message_models and message_models[stable_id] != model:
+                    raise SystemExit("conflicting Claude model for a repeated message")
+                message_models[stable_id] = model
                 continue
             snapshots.append(snapshot)
     if ledger:
@@ -569,12 +664,19 @@ def claude_jsonl_snapshot(
                 complete_cost = False
                 continue
             counters = {}
+            tail = [value for key, value in identified.items()
+                    if key not in checkpoint_messages and message_models[key] == model]
+            tail_usage = (aggregate_snapshots(tail, path, "Claude live tail")
+                          if tail and has_native_checkpoint else None)
             for key in ("input_tokens", "output_tokens", "cache_creation_tokens", "cache_read_tokens"):
                 observed = getattr(messages, key)
                 if observed is None:
                     raise SystemExit("incomplete Claude messages alongside cost-state")
-                counters[key] = max(observed, getattr(recorded, key))
-                if observed > getattr(recorded, key):
+                increment = getattr(tail_usage, key) if tail_usage is not None else 0
+                if increment is None:
+                    raise SystemExit("incomplete Claude live usage after cost-state")
+                counters[key] = max(observed, getattr(recorded, key) + increment)
+                if increment or observed > getattr(recorded, key):
                     complete_cost = False
             ledger[model] = UsageSnapshot(
                 total_tokens=counters["input_tokens"] + counters["output_tokens"] + counters["cache_creation_tokens"],
