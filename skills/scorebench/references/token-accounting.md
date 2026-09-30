@@ -135,7 +135,14 @@ where the exact difference proves they are cumulative. A partial or conflicting
 checkpoint chain requires reconciliation rather than guessing its scope.
 
 After a checkpoint, new deduplicated native messages are added to that saved
-total, not hidden behind a per-counter maximum against the whole transcript.
+total only after a verified supervisor invocation boundary. Before resuming,
+the supervisor records the native transcript's byte length, SHA-256 and session
+ID in its `scorebench_invocation` record, after the old process has exited and
+before starting the next one. The helper verifies that prefix on a complete
+record boundary. Timestamps and native queue markers alone are not proof: an
+old process can append a delayed message after its checkpoint. Nonzero messages
+between a checkpoint and the next verified boundary require reconciliation.
+The new tail is not hidden behind a maximum against the whole transcript.
 This preserves auxiliary and interrupted usage absent from message records.
 Repeated message IDs are not counted again. A live tail does not certify a
 current native USD total; final reconciliation is still required. Mixed sessions,
