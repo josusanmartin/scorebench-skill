@@ -1,4 +1,5 @@
 import importlib.util
+import hashlib
 import json
 from pathlib import Path
 import sys
@@ -118,11 +119,18 @@ class ClaudeCostStateTests(unittest.TestCase):
             with self.assertRaises(SystemExit):
                 usage.claude_jsonl_snapshot(transcript, results_path=results)
 
-    def parse(self, *events):
+    def parse(self, *events, resume_after=()):
         with tempfile.TemporaryDirectory() as directory:
             path = Path(directory) / "session.jsonl"
             path.write_text("".join(json.dumps(event) + "\n" for event in events))
-            return usage.claude_jsonl_snapshot(path)
+            results = Path(directory) / "results.jsonl"
+            boundaries = []
+            for index in resume_after:
+                prefix = "".join(json.dumps(event) + "\n" for event in events[:index]).encode()
+                boundaries.append(dict(type="scorebench_invocation", id=f"resume-{index}", session_id="session-1",
+                                       native_transcript_prefix=[len(prefix), hashlib.sha256(prefix).hexdigest()]))
+            results.write_text("".join(json.dumps(event) + "\n" for event in boundaries))
+            return usage.claude_jsonl_snapshot(path, results_path=results if resume_after else None)
 
     def test_auxiliary_usage_and_cache_priced_once_without_terminal_result(self):
         result = self.parse(message(), ledger(), ledger())
@@ -132,14 +140,129 @@ class ClaudeCostStateTests(unittest.TestCase):
         self.assertAlmostEqual(result.cost_usd, .21)
 
     def test_message_and_cumulative_ledger_are_not_added(self):
-        result = self.parse(message(), ledger(), message(identifier="message-2"), ledger(main=200, cost=.4))
+        result = self.parse(message(), ledger(), message(identifier="message-2"), ledger(main=200, cost=.4),
+                            resume_after=(2,))
         self.assertEqual(result.total_tokens, 630)
         self.assertAlmostEqual(result.cost_usd, .41)
 
     def test_new_message_beyond_ledger_is_counted_but_stale_cost_is_not_reported(self):
-        result = self.parse(message(), ledger(), message(5, identifier="message-2"))
+        result = self.parse(message(), ledger(), message(5, identifier="message-2"), resume_after=(2,))
         self.assertEqual(result.total_tokens, 345)
         self.assertIsNone(result.cost_usd)
+
+    def test_live_tail_advances_even_below_checkpoint_counters(self):
+        # The checkpoint includes requests missing from the native message log.
+        result = self.parse(message(90), ledger(), message(5, identifier="new"), resume_after=(2,))
+        self.assertEqual(result.input_tokens, 115)
+        self.assertEqual(result.output_tokens, 115)
+        self.assertEqual(result.cache_read_tokens, 575)
+        self.assertIsNone(result.cost_usd)
+
+    def test_duplicate_message_after_checkpoint_is_not_live_tail(self):
+        result = self.parse(message(90), ledger(), message(90))
+        self.assertEqual(result.total_tokens, 330)
+        self.assertAlmostEqual(result.cost_usd, .21)
+
+    def test_stale_checkpoint_cannot_hide_already_observed_live_tail(self):
+        with self.assertRaisesRegex(SystemExit, "preceding native usage"):
+            self.parse(message(90), ledger(), message(5, identifier="new"), ledger(), resume_after=(2,))
+
+    def test_late_old_invocation_message_inside_prefix_is_ambiguous(self):
+        with self.assertRaisesRegex(SystemExit, "no verified next-invocation boundary"):
+            self.parse(message(90), ledger(), message(5, identifier="late"),
+                       message(5, identifier="new"), resume_after=(3,))
+
+    def test_unproved_live_tail_is_refused_even_if_timestamp_looks_new(self):
+        late = dict(message(5, identifier="late"), timestamp="2099-01-01T00:00:00Z")
+        with self.assertRaisesRegex(SystemExit, "no verified next-invocation boundary"):
+            self.parse(message(90), ledger(), late)
+
+    def test_duplicate_old_message_after_verified_boundary_is_not_new_usage(self):
+        result = self.parse(message(90), ledger(), message(90), message(5, identifier="new"), resume_after=(2,))
+        self.assertEqual(result.total_tokens, 345)
+
+    def test_prefix_checks_hash_size_session_and_record_boundary(self):
+        with tempfile.TemporaryDirectory() as directory:
+            native, results = Path(directory) / "native.jsonl", Path(directory) / "results.jsonl"
+            prefix = (json.dumps(ledger()) + "\n").encode()
+            native.write_bytes(prefix + (json.dumps(message(5)) + "\n").encode())
+            good = [len(prefix), hashlib.sha256(prefix).hexdigest()]
+            for proof, session in (([len(prefix), "0" * 64], "session-1"),
+                                   ([len(prefix) - 1, hashlib.sha256(prefix[:-1]).hexdigest()], "session-1"),
+                                   ([native.stat().st_size + 1, "0" * 64], "session-1"),
+                                   (good, "other-session"), ([True, "0" * 64], "session-1")):
+                with self.subTest(proof=proof, session=session):
+                    results.write_text(json.dumps(dict(type="scorebench_invocation", id="resume",
+                        session_id=session, native_transcript_prefix=proof)) + "\n")
+                    with self.assertRaises(SystemExit):
+                        usage.claude_jsonl_snapshot(native, results_path=results)
+
+    def test_initial_empty_prefix_must_match_the_session_even_before_a_checkpoint(self):
+        with tempfile.TemporaryDirectory() as directory:
+            native, results = Path(directory) / "native.jsonl", Path(directory) / "results.jsonl"
+            boundary = dict(type="scorebench_invocation", id="first", session_id="other-session",
+                            native_transcript_prefix=[0, hashlib.sha256(b"").hexdigest()])
+            results.write_text(json.dumps(boundary) + "\n")
+            for event in (ledger(), dict(message(5), sessionId="session-1")):
+                with self.subTest(event=event["type"]):
+                    native.write_text(json.dumps(event) + "\n")
+                    with self.assertRaisesRegex(SystemExit, "session"):
+                        usage.claude_jsonl_snapshot(native, results_path=results)
+
+    def test_invalid_utf8_is_not_silently_discarded_as_usage_free(self):
+        with tempfile.TemporaryDirectory() as directory:
+            native = Path(directory) / "native.jsonl"
+            native.write_bytes((json.dumps(message(5)) + "\n").encode() + b'\xff\n')
+            with self.assertRaises(UnicodeDecodeError):
+                usage.claude_jsonl_snapshot(native)
+
+    def test_checkpoint_cost_regression_is_refused(self):
+        with self.assertRaisesRegex(SystemExit, "cost decreased"):
+            self.parse(ledger(), ledger(main=110, cost=.1))
+
+    def test_repeated_message_cannot_change_its_model(self):
+        with self.assertRaisesRegex(SystemExit, "conflicting Claude model"):
+            self.parse(message(), message(model="haiku"), ledger())
+
+    def test_interrupted_resume_uses_matching_native_checkpoints(self):
+        first, second = ledger(), ledger(main=250, cost=.5)
+        own_usage = message(140)["message"]["usage"]
+        records = [
+            {"type": "scorebench_invocation", "id": "first"},
+            {"type": "result", "uuid": "a", "session_id": "session-1",
+             "modelUsage": first["modelUsage"], "usage": message()["message"]["usage"]},
+            {"type": "scorebench_invocation", "id": "second"},
+            {"type": "result", "uuid": "b", "session_id": "session-1",
+             "modelUsage": second["modelUsage"], "usage": own_usage,
+             "subtype": "error_during_execution", "is_error": True},
+        ]
+        native = [message(), first, message(140, identifier="second"), second]
+        with tempfile.TemporaryDirectory() as directory:
+            transcript = Path(directory) / "native.jsonl"
+            results = Path(directory) / "results.jsonl"
+            results.write_text("".join(json.dumps(record) + "\n" for record in records))
+            transcript.write_text("".join(json.dumps(record) + "\n" for record in native))
+            stopped = usage.claude_jsonl_snapshot(transcript, results_path=results)
+            self.assertEqual(stopped.total_tokens, 780)
+            self.assertAlmostEqual(stopped.cost_usd, .51)
+            result_ledger = usage.claude_result_ledger(results, native_path=transcript)
+            self.assertEqual(result_ledger["modelUsage"], second["modelUsage"])
+            prefix = transcript.read_bytes()
+            with results.open("a") as output:
+                output.write(json.dumps(dict(type="scorebench_invocation", id="third", session_id="session-1",
+                    native_transcript_prefix=[len(prefix), hashlib.sha256(prefix).hexdigest()])) + "\n")
+            with transcript.open("a") as output:
+                output.write(json.dumps(message(5, identifier="third")) + "\n")
+            live = usage.claude_jsonl_snapshot(transcript, results_path=results)
+            self.assertEqual(live.total_tokens, 795)
+            self.assertEqual(live.cache_read_tokens, 1325)
+            self.assertIsNone(live.cost_usd)
+            mismatched = dict(second, sessionId="another-session")
+            with self.assertRaisesRegex(SystemExit, "do not match"):
+                usage.claude_result_ledger(results, native_checkpoints=[first, mismatched])
+            # A partial checkpoint chain cannot prove the scope of earlier results.
+            with self.assertRaisesRegex(SystemExit, "do not match"):
+                usage.claude_result_ledger(results, native_checkpoints=[second])
 
     def test_partial_or_regressing_ledger_fails_instead_of_undercounting(self):
         with self.assertRaises(SystemExit):

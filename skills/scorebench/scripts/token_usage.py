@@ -3,6 +3,7 @@ from __future__ import annotations
 
 import argparse
 from dataclasses import dataclass, replace
+import hashlib
 import json
 import itertools
 import math
@@ -357,7 +358,14 @@ def claude_usage_total(usage: dict[str, Any]) -> int | None:
     return usage_total(usage)
 
 
-def claude_result_ledger(path: Path) -> dict[str, Any] | None:
+def claude_result_ledger(
+    path: Path, *, native_checkpoints: list[dict] | None = None,
+    native_path: Path | None = None,
+) -> dict[str, Any] | None:
+    if native_path is not None:
+        if native_checkpoints is not None:
+            raise ValueError("pass native_path or native_checkpoints, not both")
+        native_checkpoints = claude_native_checkpoints(native_path)
     results: dict[str, dict] = {}
     invocation = None
     seen_results: dict[str, dict] = {}
@@ -391,6 +399,8 @@ def claude_result_ledger(path: Path) -> dict[str, Any] | None:
         raise SystemExit("mixed Claude terminal sessions")
     models: dict[str, dict] = {}
     previous: dict[str, dict] | None = None
+    checkpoint_index = -1
+    checkpoint_chain = bool(native_checkpoints)
     for result in results.values():
         current: dict[str, dict] = {}
         for model, counters in result["modelUsage"].items():
@@ -404,6 +414,34 @@ def claude_result_ledger(path: Path) -> dict[str, Any] | None:
                 if key != "costUSD" and type(value) is not int:
                     raise SystemExit("Claude token counter is not an integer")
                 checked[key] = value
+        # A persisted native cost-state is session-cumulative, including after
+        # an interrupted invocation whose per-turn usage omits in-flight work.
+        # Require a matching checkpoint for every result; a version string or
+        # merely larger counters does not prove cumulative accounting.
+        matched_checkpoint = None
+        if checkpoint_chain:
+            for index, checkpoint in enumerate(native_checkpoints or []):
+                if index < checkpoint_index or checkpoint.get("sessionId") != result["session_id"]:
+                    continue
+                values = checkpoint.get("modelUsage")
+                if isinstance(values, dict) and set(values) == set(current) and all(
+                    isinstance(values[model], dict)
+                    and all(values[model].get(key) == count for key, count in counters.items())
+                    for model, counters in current.items()
+                ):
+                    matched_checkpoint = index
+                    break
+        checkpoint_chain = checkpoint_chain and matched_checkpoint is not None
+        if checkpoint_chain:
+            if previous and (not set(previous).issubset(current) or any(
+                current[model][key] < previous[model][key]
+                for model in previous for key in CLAUDE_LEDGER_KEYS
+            )):
+                raise SystemExit("Claude cumulative terminal usage decreased")
+            checkpoint_index = matched_checkpoint
+            models = {model: dict(counters) for model, counters in current.items()}
+            previous = current
+            continue
         # Newer Claude Code reports session-cumulative modelUsage after --resume;
         # older releases report each invocation alone. Add only the new part.
         cumulative = previous is not None and claude_resume_is_cumulative(previous, current, result.get("usage"))
@@ -413,7 +451,80 @@ def claude_result_ledger(path: Path) -> dict[str, Any] | None:
                 earlier = previous.get(model, {}).get(key, 0) if cumulative else 0
                 combined[key] = combined.get(key, 0) + value - earlier
         previous = current
+    if native_checkpoints and not checkpoint_chain:
+        raise SystemExit(
+            "Claude terminal results do not match persisted cumulative checkpoints; "
+            "accounting needs reconciliation"
+        )
     return {"type": "cost-state", "sessionId": next(iter(sessions)), "modelUsage": models}
+
+
+def claude_native_checkpoints(path: Path) -> list[dict]:
+    checkpoints = []
+    with path.open("r", encoding="utf-8") as handle:
+        for line in handle:
+            try:
+                event = json.loads(line)
+            except ValueError:
+                continue
+            if isinstance(event, dict) and event.get("type") == "cost-state":
+                checkpoints.append(event)
+    return checkpoints
+
+
+def claude_invocation_prefixes(path: Path) -> dict[int, tuple[str, str]]:
+    """Read supervisor boundaries recorded after exit and before the next spawn."""
+    prefixes: dict[int, tuple[str, str]] = {}
+    with path.open(encoding="utf-8") as handle:
+        for line in handle:
+            try:
+                event = json.loads(line)
+            except ValueError:
+                continue
+            if not isinstance(event, dict) or event.get("type") != "scorebench_invocation":
+                continue
+            prefix = event.get("native_transcript_prefix")
+            if prefix is None:
+                continue
+            session = event.get("session_id")
+            if (not isinstance(prefix, list) or len(prefix) != 2
+                    or type(prefix[0]) is not int or prefix[0] < 0
+                    or not isinstance(prefix[1], str) or not re.fullmatch(r"[0-9a-f]{64}", prefix[1])
+                    or not isinstance(session, str) or not session):
+                raise SystemExit("invalid Claude supervisor transcript prefix")
+            size, checksum = prefix
+            proof = (checksum, session)
+            if (prefixes and size < max(prefixes)) or (size in prefixes and prefixes[size] != proof):
+                raise SystemExit("conflicting Claude supervisor transcript prefixes")
+            prefixes[size] = proof
+    return prefixes
+
+
+def claude_native_events(path: Path, prefixes: dict[int, tuple[str, str]]):
+    """Verify prefix hashes on record boundaries without loading the transcript."""
+    remaining = dict(prefixes)
+    size, checksum = 0, hashlib.sha256()
+    with path.open("rb") as handle:
+        for line in itertools.chain(handle, [None]):
+            if size in remaining:
+                expected, session = remaining.pop(size)
+                if checksum.hexdigest() != expected:
+                    raise SystemExit("Claude supervisor transcript prefix hash mismatch")
+                yield None, session
+            if remaining and min(remaining) < size:
+                raise SystemExit("Claude supervisor transcript prefix splits a record")
+            if line is None:
+                break
+            checksum.update(line)
+            size += len(line)
+            try:
+                event = json.loads(line.decode("utf-8"))
+            except json.JSONDecodeError:
+                continue
+            if isinstance(event, dict):
+                yield event, None
+    if remaining:
+        raise SystemExit("Claude supervisor transcript prefix exceeds the transcript")
 
 
 CLAUDE_LEDGER_KEYS = ("inputTokens", "outputTokens", "cacheCreationInputTokens", "cacheReadInputTokens", "costUSD")
@@ -455,92 +566,154 @@ def claude_jsonl_snapshot(
     identified: dict[str, UsageSnapshot] = {}
     message_models: dict[str, str] = {}
     ledger: dict[str, UsageSnapshot] = {}
+    ledger_costs: dict[str, float] = {}
     ledger_cost: float | None = None
     ledger_session: str | None = None
     native_sessions: set[str] = set()
-    terminal_ledger = claude_result_ledger(results_path) if results_path else None
-    with path.open("r", encoding="utf-8") as handle:
-        for line in itertools.chain(handle, [json.dumps(terminal_ledger)] if terminal_ledger else []):
-            line = line.strip()
-            if not line:
-                continue
-            try:
-                event = json.loads(line)
-            except json.JSONDecodeError:
-                continue
-            if not isinstance(event, dict):
-                continue
-            if event.get("type") in {"user", "assistant"} and event.get("sessionId"):
-                native_sessions.add(str(event["sessionId"]))
-            if event.get("type") == "cost-state":
-                session = event.get("sessionId")
-                models = event.get("modelUsage")
-                if not isinstance(session, str) or not isinstance(models, dict):
-                    raise SystemExit("invalid Claude cost-state identity or model usage")
-                if ledger_session is not None and ledger_session != session:
-                    raise SystemExit("mixed Claude cost-state sessions")
-                ledger_session = session
-                current = {}
-                costs = []
-                for model, values in models.items():
-                    if not isinstance(values, dict):
-                        raise SystemExit("invalid Claude cost-state model counters")
-                    fields = {"input_tokens": "inputTokens", "output_tokens": "outputTokens",
-                              "cache_creation_tokens": "cacheCreationInputTokens", "cache_read_tokens": "cacheReadInputTokens"}
-                    counters = {field: usage_int(values, key) for field, key in fields.items()}
-                    if any(value is None for value in counters.values()):
-                        raise SystemExit("incomplete Claude cost-state model counters")
-                    previous = ledger.get(model)
-                    if previous and any(counters[key] < getattr(previous, key) for key in counters):
-                        raise SystemExit("Claude cost-state counters decreased; refusing undercount")
-                    current[model] = UsageSnapshot(
-                        total_tokens=counters["input_tokens"] + counters["output_tokens"] + counters["cache_creation_tokens"],
-                        **counters, reasoning_output_tokens=usage_int(values, "thinkingTokens"))
-                    cost = values.get("costUSD")
-                    if type(cost) not in (int, float) or not math.isfinite(cost) or cost < 0:
-                        raise SystemExit("invalid Claude cost-state model cost")
-                    costs.append(float(cost))
-                if not set(ledger).issubset(current):
-                    raise SystemExit("Claude cost-state lost a previously recorded model")
-                ledger = current
-                ledger_cost = None if event.get("hasUnknownModelCost") else sum(costs)
-                continue
-            if event.get("type") == "result" and isinstance(event.get("usage"), dict):
+    native_checkpoints: list[dict] = []
+    checkpoint_messages: set[str] = set()
+    ambiguous_messages: set[str] = set()
+    tail_boundary_verified = False
+    prefixes = claude_invocation_prefixes(results_path) if results_path else {}
+    prefix_sessions = {session for _, session in prefixes.values()}
+    if len(prefix_sessions) > 1:
+        raise SystemExit("Claude supervisor prefixes belong to mixed sessions")
+    if prefixes and max(prefixes) > path.stat().st_size:
+        raise SystemExit("Claude supervisor transcript prefix exceeds the transcript")
+    # Collect the native checkpoints before interpreting terminal results. The
+    # latter must not replace a saved cumulative total with an invocation sum.
+    if results_path:
+        native_checkpoints = claude_native_checkpoints(path)
+    terminal_ledger = claude_result_ledger(
+        results_path, native_checkpoints=native_checkpoints,
+    ) if results_path else None
+    if terminal_ledger and prefix_sessions and prefix_sessions != {terminal_ledger["sessionId"]}:
+        raise SystemExit("Claude supervisor prefix does not match the terminal session")
+    terminal_events = [json.dumps(terminal_ledger)] if terminal_ledger and not native_checkpoints else []
+    has_native_checkpoint = bool(native_checkpoints) or terminal_ledger is None
+    events = itertools.chain(claude_native_events(path, prefixes),
+                             ((json.loads(line), None) for line in terminal_events))
+    for event, boundary_session in events:
+        if boundary_session is not None:
+            if ledger_session is not None and boundary_session != ledger_session:
+                raise SystemExit("Claude supervisor prefix belongs to another session")
+            tail_boundary_verified = True
+            continue
+        if event.get("type") in {"user", "assistant"} and event.get("sessionId"):
+            native_sessions.add(str(event["sessionId"]))
+        if event.get("type") == "cost-state":
+            session = event.get("sessionId")
+            models = event.get("modelUsage")
+            if not isinstance(session, str) or not isinstance(models, dict):
+                raise SystemExit("invalid Claude cost-state identity or model usage")
+            if prefix_sessions and prefix_sessions != {session}:
+                raise SystemExit("Claude supervisor prefix belongs to another session")
+            if ledger_session is not None and ledger_session != session:
+                raise SystemExit("mixed Claude cost-state sessions")
+            ledger_session = session
+            current = {}
+            costs = []
+            for model, values in models.items():
+                if not isinstance(values, dict):
+                    raise SystemExit("invalid Claude cost-state model counters")
+                fields = {"input_tokens": "inputTokens", "output_tokens": "outputTokens",
+                          "cache_creation_tokens": "cacheCreationInputTokens", "cache_read_tokens": "cacheReadInputTokens"}
+                counters = {field: usage_int(values, key) for field, key in fields.items()}
+                if any(value is None for value in counters.values()):
+                    raise SystemExit("incomplete Claude cost-state model counters")
+                previous = ledger.get(model)
+                if previous and any(counters[key] < getattr(previous, key) for key in counters):
+                    raise SystemExit("Claude cost-state counters decreased; refusing undercount")
+                current[model] = UsageSnapshot(
+                    total_tokens=counters["input_tokens"] + counters["output_tokens"] + counters["cache_creation_tokens"],
+                    **counters, reasoning_output_tokens=usage_int(values, "thinkingTokens"))
+                cost = values.get("costUSD")
+                if type(cost) not in (int, float) or not math.isfinite(cost) or cost < 0:
+                    raise SystemExit("invalid Claude cost-state model cost")
+                if cost < ledger_costs.get(model, 0):
+                    raise SystemExit("Claude cost-state cost decreased; refusing undercount")
+                costs.append(float(cost))
+            if not set(ledger).issubset(current):
+                raise SystemExit("Claude cost-state lost a previously recorded model")
+            if ledger and has_native_checkpoint:
+                # Advancing the checkpoint boundary cannot hide native work
+                # already observed since the preceding checkpoint.
+                expected: dict[str, list[UsageSnapshot]] = {}
+                actual: dict[str, list[UsageSnapshot]] = {}
+                for model, value in ledger.items():
+                    expected.setdefault(re.sub(r"-\d{8}$", "", model), []).append(value)
+                for identity, value in identified.items():
+                    if identity not in checkpoint_messages and identity not in ambiguous_messages:
+                        model = re.sub(r"-\d{8}$", "", message_models[identity])
+                        expected.setdefault(model, []).append(value)
+                for model, value in current.items():
+                    actual.setdefault(re.sub(r"-\d{8}$", "", model), []).append(value)
+                for model, values in expected.items():
+                    floor = aggregate_snapshots(values, path, "Claude checkpoint floor")
+                    observed = (aggregate_snapshots(actual[model], path, "Claude checkpoint")
+                                if model in actual else UsageSnapshot(total_tokens=0))
+                    if any((getattr(floor, key) or 0) > (getattr(observed, key) or 0) for key in fields):
+                        raise SystemExit("Claude cost-state does not cover preceding native usage")
+            ledger = current
+            ledger_costs = {model: float(values["costUSD"]) for model, values in models.items()}
+            ledger_cost = None if event.get("hasUnknownModelCost") else sum(costs)
+            # Only native checkpoints identify a position in the transcript.
+            # A synthetic terminal ledger has no such tail boundary.
+            if has_native_checkpoint:
+                checkpoint_messages = set(identified)
+                ambiguous_messages.clear()
+                tail_boundary_verified = False
+            continue
+        if event.get("type") == "result" and isinstance(event.get("usage"), dict):
+            raise SystemExit(
+                "Claude stream-json output is not an exact session transcript; "
+                "its assistant usage can be provisional. Use the persisted "
+                "~/.claude/projects/.../<session>.jsonl file instead."
+            )
+        message = event.get("message")
+        usage = None
+        if isinstance(message, dict):
+            usage = message.get("usage")
+        if not isinstance(usage, dict):
+            usage = event.get("usage")
+        if not isinstance(usage, dict):
+            continue
+        snapshot = usage_snapshot(usage, claude=True)
+        if snapshot is None:
+            continue
+        message_id = message.get("id") if isinstance(message, dict) else None
+        if not isinstance(message_id, str) or not message_id.strip():
+            message_id = event.get("requestId")
+        if (
+            accounting_version >= CACHE_AWARE_ACCOUNTING_VERSION
+            and isinstance(message_id, str)
+            and message_id.strip()
+        ):
+            stable_id = message_id.strip()
+            previous = identified.get(stable_id)
+            if previous is not None and previous != snapshot:
                 raise SystemExit(
-                    "Claude stream-json output is not an exact session transcript; "
-                    "its assistant usage can be provisional. Use the persisted "
-                    "~/.claude/projects/.../<session>.jsonl file instead."
+                    "conflicting Claude usage records for message/request "
+                    f"{stable_id} in {path}"
                 )
-            message = event.get("message")
-            usage = None
-            if isinstance(message, dict):
-                usage = message.get("usage")
-            if not isinstance(usage, dict):
-                usage = event.get("usage")
-            if not isinstance(usage, dict):
-                continue
-            snapshot = usage_snapshot(usage, claude=True)
-            if snapshot is None:
-                continue
-            message_id = message.get("id") if isinstance(message, dict) else None
-            if not isinstance(message_id, str) or not message_id.strip():
-                message_id = event.get("requestId")
-            if (
-                accounting_version >= CACHE_AWARE_ACCOUNTING_VERSION
-                and isinstance(message_id, str)
-                and message_id.strip()
-            ):
-                stable_id = message_id.strip()
-                previous = identified.get(stable_id)
-                if previous is not None and previous != snapshot:
-                    raise SystemExit(
-                        "conflicting Claude usage records for message/request "
-                        f"{stable_id} in {path}"
-                    )
-                identified[stable_id] = snapshot
-                message_models[stable_id] = str(message.get("model") or "") if isinstance(message, dict) else ""
-                continue
-            snapshots.append(snapshot)
+            identified[stable_id] = snapshot
+            model = str(message.get("model") or "") if isinstance(message, dict) else ""
+            if stable_id in message_models and message_models[stable_id] != model:
+                raise SystemExit("conflicting Claude model for a repeated message")
+            message_models[stable_id] = model
+            if (ledger and has_native_checkpoint and stable_id not in checkpoint_messages
+                    and previous is None and not tail_boundary_verified
+                    and (snapshot.total_tokens or snapshot.cache_read_tokens)):
+                ambiguous_messages.add(stable_id)
+            continue
+        snapshots.append(snapshot)
+    if prefix_sessions and native_sessions and prefix_sessions != native_sessions:
+        raise SystemExit("Claude supervisor prefix does not match the native session")
+    if ambiguous_messages:
+        raise SystemExit(
+            "Claude usage after a cost-state has no verified next-invocation boundary; "
+            "preserve evidence for reconciliation"
+        )
     if ledger:
         if native_sessions and native_sessions != {ledger_session}:
             raise SystemExit("Claude terminal usage does not match the native transcript session")
@@ -569,12 +742,19 @@ def claude_jsonl_snapshot(
                 complete_cost = False
                 continue
             counters = {}
+            tail = [value for key, value in identified.items()
+                    if key not in checkpoint_messages and message_models[key] == model]
+            tail_usage = (aggregate_snapshots(tail, path, "Claude live tail")
+                          if tail and has_native_checkpoint else None)
             for key in ("input_tokens", "output_tokens", "cache_creation_tokens", "cache_read_tokens"):
                 observed = getattr(messages, key)
                 if observed is None:
                     raise SystemExit("incomplete Claude messages alongside cost-state")
-                counters[key] = max(observed, getattr(recorded, key))
-                if observed > getattr(recorded, key):
+                increment = getattr(tail_usage, key) if tail_usage is not None else 0
+                if increment is None:
+                    raise SystemExit("incomplete Claude live usage after cost-state")
+                counters[key] = max(observed, getattr(recorded, key) + increment)
+                if increment or observed > getattr(recorded, key):
                     complete_cost = False
             ledger[model] = UsageSnapshot(
                 total_tokens=counters["input_tokens"] + counters["output_tokens"] + counters["cache_creation_tokens"],
