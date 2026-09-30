@@ -209,6 +209,13 @@ class ClaudeCostStateTests(unittest.TestCase):
                     with self.assertRaisesRegex(SystemExit, "session"):
                         usage.claude_jsonl_snapshot(native, results_path=results)
 
+    def test_invalid_utf8_is_not_silently_discarded_as_usage_free(self):
+        with tempfile.TemporaryDirectory() as directory:
+            native = Path(directory) / "native.jsonl"
+            native.write_bytes((json.dumps(message(5)) + "\n").encode() + b'\xff\n')
+            with self.assertRaises(UnicodeDecodeError):
+                usage.claude_jsonl_snapshot(native)
+
     def test_checkpoint_cost_regression_is_refused(self):
         with self.assertRaisesRegex(SystemExit, "cost decreased"):
             self.parse(ledger(), ledger(main=110, cost=.1))

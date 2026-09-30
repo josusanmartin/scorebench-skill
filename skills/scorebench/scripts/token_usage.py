@@ -518,8 +518,8 @@ def claude_native_events(path: Path, prefixes: dict[int, tuple[str, str]]):
             checksum.update(line)
             size += len(line)
             try:
-                event = json.loads(line)
-            except ValueError:
+                event = json.loads(line.decode("utf-8"))
+            except json.JSONDecodeError:
                 continue
             if isinstance(event, dict):
                 yield event, None
