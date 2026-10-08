@@ -359,6 +359,8 @@ class TokenUsageTests(unittest.TestCase):
                 "cache_creation_input_tokens": 10, "cache_read_input_tokens": 100}}}) + "\n"
 
         with log.open("a", encoding="utf-8") as handle:
+            handle.write(message("msg_0", "<synthetic>", 0, 0).replace('"cache_creation_input_tokens": 10, '
+                         '"cache_read_input_tokens": 100', '"cache_creation_input_tokens": 0, "cache_read_input_tokens": 0'))
             handle.write(message("msg_1", "claude-opus-5", 5, 50))
             handle.write(message("msg_2", "claude-opus-4-8-20251001", 7, 70))
             handle.write(message("msg_3", "claude-opus-4-8", 1, 10))

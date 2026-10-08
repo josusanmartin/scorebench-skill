@@ -1249,7 +1249,10 @@ def served_model_usage(
                for model, values in sorted(snapshot.by_model.items())]
     if any(not isinstance(entry[key], int) for entry in entries for key in SERVED_MODEL_FIELDS):
         return None
-    if any(sum(entry[key] for entry in entries) != run_components.get(key) for key in SERVED_MODEL_FIELDS):
+    # Zero-use entries, such as Claude Code's <synthetic> notices, are not usage.
+    entries = [entry for entry in entries if any(entry[key] for key in SERVED_MODEL_FIELDS)]
+    if not entries or any(sum(entry[key] for entry in entries) != run_components.get(key)
+                          for key in SERVED_MODEL_FIELDS):
         return None
     return entries
 
