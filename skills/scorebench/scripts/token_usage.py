@@ -2,7 +2,7 @@
 from __future__ import annotations
 
 import argparse
-from dataclasses import dataclass, replace
+from dataclasses import dataclass, field, replace
 import json
 import itertools
 import math
@@ -50,6 +50,9 @@ class UsageSnapshot:
     cost_usd: float | None = None
     accounting_incomplete: bool = False
     experiment_accounting: bool = False
+    # Claude only: token components per model that answered (date suffix removed),
+    # so a server can price each at its own rate. None when not every record is attributed.
+    by_model: dict[str, dict[str, int]] | None = field(default=None, compare=False)
 
     def components(self) -> dict[str, int]:
         return {
@@ -581,7 +584,15 @@ def claude_jsonl_snapshot(
                 **counters, reasoning_output_tokens=recorded.reasoning_output_tokens)
         combined = aggregate_snapshots(list(ledger.values()), path, "Claude cost-state")
         return UsageSnapshot(total_tokens=combined.total_tokens, **combined.components(),
-                             cost_usd=ledger_cost if complete_cost else None)
+                             cost_usd=ledger_cost if complete_cost else None,
+                             by_model={model: value.components() for model, value in ledger.items()})
+    by_model = None
+    if identified and not snapshots and all(message_models.values()):
+        grouped: dict[str, list[UsageSnapshot]] = {}
+        for identity, value in identified.items():
+            grouped.setdefault(re.sub(r"-\d{8}$", "", message_models[identity]), []).append(value)
+        by_model = {model: aggregate_snapshots(values, path, "Claude messages").components()
+                    for model, values in grouped.items()}
     snapshots.extend(identified.values())
     if terminal_ledger is not None and not terminal_ledger["modelUsage"]:
         if all(item.total_tokens == 0 and not item.cache_read_tokens for item in snapshots):
@@ -598,7 +609,7 @@ def claude_jsonl_snapshot(
             cache_read_tokens=0,
             reasoning_output_tokens=0,
         )
-    return aggregate_snapshots(snapshots, path, "Claude Code message.usage")
+    return replace(aggregate_snapshots(snapshots, path, "Claude Code message.usage"), by_model=by_model)
 
 
 def claude_jsonl_total(path: Path) -> int:
@@ -1221,6 +1232,31 @@ def current_provenance(
     return source, usage_source, args.confidence or stored_confidence
 
 
+SERVED_MODEL_FIELDS = ("input_tokens", "output_tokens", "cache_creation_tokens", "cache_read_tokens")
+
+
+def served_model_usage(
+    state: dict[str, Any], snapshot: UsageSnapshot, run_components: dict[str, int]
+) -> list[dict[str, Any]] | None:
+    """Per-model run usage, only when it exactly partitions the run's own counters."""
+    baseline_usage = state.get("baseline_usage")
+    if (not snapshot.by_model or state.get("baseline_total_tokens") != 0
+            or not isinstance(baseline_usage, dict)
+            or any(baseline_usage.get(key) != 0 for key in SERVED_MODEL_FIELDS)
+            or state.get("baseline_cost_usd") not in (None, 0)):
+        return None
+    entries = [{"model": model, **{key: values.get(key) for key in SERVED_MODEL_FIELDS}}
+               for model, values in sorted(snapshot.by_model.items())]
+    if any(not isinstance(entry[key], int) for entry in entries for key in SERVED_MODEL_FIELDS):
+        return None
+    # Zero-use entries, such as Claude Code's <synthetic> notices, are not usage.
+    entries = [entry for entry in entries if any(entry[key] for key in SERVED_MODEL_FIELDS)]
+    if not entries or any(sum(entry[key] for entry in entries) != run_components.get(key)
+                          for key in SERVED_MODEL_FIELDS):
+        return None
+    return entries
+
+
 def cmd_status(args: argparse.Namespace) -> int:
     state, snapshot, run_total, run_components, run_cost = current_run_usage(args)
     tokens_source, usage_source, confidence = current_provenance(args, state)
@@ -1242,6 +1278,9 @@ def cmd_status(args: argparse.Namespace) -> int:
         "confidence": confidence,
         "accounting_complete": not snapshot.accounting_incomplete,
     }
+    served = served_model_usage(state, snapshot, run_components) if args.claude_jsonl else None
+    if served:
+        payload["served_model_usage"] = served
     if run_cost is not None:
         payload["run_cost_usd"] = run_cost
         if args.grok_jsonl:
