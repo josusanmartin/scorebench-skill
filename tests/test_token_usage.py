@@ -348,6 +348,49 @@ class TokenUsageTests(unittest.TestCase):
         self.assertIn("--usage-source claude_code", result.stdout)
         self.assertIn("--usage-confidence exact", result.stdout)
 
+    def test_claude_status_reports_usage_per_served_model(self):
+        log = self.root / "claude-models.jsonl"
+        log.write_text(json.dumps({"type": "user", "sessionId": "s"}) + "\n", encoding="utf-8")
+        self.run_helper("start", "--claude-jsonl", str(log), "--allow-empty")
+
+        def message(identity, model, input_tokens, output_tokens):
+            return json.dumps({"type": "assistant", "message": {"id": identity, "model": model, "usage": {
+                "input_tokens": input_tokens, "output_tokens": output_tokens,
+                "cache_creation_input_tokens": 10, "cache_read_input_tokens": 100}}}) + "\n"
+
+        with log.open("a", encoding="utf-8") as handle:
+            handle.write(message("msg_1", "claude-opus-5", 5, 50))
+            handle.write(message("msg_2", "claude-opus-4-8-20251001", 7, 70))
+            handle.write(message("msg_3", "claude-opus-4-8", 1, 10))
+        status = json.loads(self.run_helper("status", "--claude-jsonl", str(log)).stdout)
+        self.assertEqual(status["served_model_usage"], [
+            {"model": "claude-opus-4-8", "input_tokens": 8, "output_tokens": 80,
+             "cache_creation_tokens": 20, "cache_read_tokens": 200},
+            {"model": "claude-opus-5", "input_tokens": 5, "output_tokens": 50,
+             "cache_creation_tokens": 10, "cache_read_tokens": 100},
+        ])
+        for field in ("input_tokens", "output_tokens", "cache_creation_tokens", "cache_read_tokens"):
+            self.assertEqual(sum(entry[field] for entry in status["served_model_usage"]), status["run_usage"][field])
+
+        # A response without a model cannot be attributed, so no breakdown is offered.
+        with log.open("a", encoding="utf-8") as handle:
+            handle.write(message("msg_4", "", 1, 1))
+        status = json.loads(self.run_helper("status", "--claude-jsonl", str(log)).stdout)
+        self.assertNotIn("served_model_usage", status)
+
+    def test_claude_status_omits_served_models_against_a_nonzero_baseline(self):
+        log = self.root / "claude-baseline.jsonl"
+        record = {"type": "assistant", "message": {"id": "msg_1", "model": "claude-opus-5", "usage": {
+            "input_tokens": 5, "output_tokens": 50, "cache_creation_input_tokens": 0, "cache_read_input_tokens": 0}}}
+        log.write_text(json.dumps(record) + "\n", encoding="utf-8")
+        self.run_helper("start", "--claude-jsonl", str(log))
+        record["message"]["id"] = "msg_2"
+        with log.open("a", encoding="utf-8") as handle:
+            handle.write(json.dumps(record) + "\n")
+        status = json.loads(self.run_helper("status", "--claude-jsonl", str(log)).stdout)
+        self.assertEqual(status["run_usage"]["output_tokens"], 50)
+        self.assertNotIn("served_model_usage", status)
+
     def test_codex_native_session_uses_latest_cumulative_usage(self):
         log = self.root / "codex-native.jsonl"
 
