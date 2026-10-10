@@ -12,7 +12,7 @@ limits. Never loosen limits or move worker compute onto the coordinator to make
 an overcommitted batch launch.
 
 Some deployments offer experimental cloud runners: Cloudflare sandboxes,
-AWS EC2 VMs and, where the server lists it, OVHcloud VMs. Use the generated
+AWS EC2 VMs, boat.dev VMs and, where the server lists it, OVHcloud VMs. Use the generated
 launch block exactly as written. Backend, size, region or location, worker count
 and lifetime are fixed by the saved experiment; never edit them, retry a
 consumed launch token, replay a pairing, or re-run the launcher to recover. Each
@@ -29,8 +29,19 @@ A login on another device does not count:
 - AWS: `aws sts get-caller-identity` succeeds for the intended profile. Cloud
   credentials stay on the coordinator; never copy them into a VM, Terraform
   variables or chat.
-- Both: Claude Code is signed in with the subscription, and that login stays
-  alive. Only access tokens are forwarded, never refresh tokens.
+- boat.dev: `BOAT_API_KEY` is exported in the coordinator's shell (never print
+  it). Create it from the boat.dev CLI login: install the CLI
+  (`curl -fsSL https://boat.dev/install | sh`, then
+  `export PATH="$HOME/.ascii/bin:$PATH"` if `boat` is not found), run
+  `boat login`, then
+  `boat api-key create scorebench --ttl 30d --actions sandbox.create,sandbox.read,sandbox.update,sandbox.delete,exec,ssh`.
+  A paid boat.dev plan is required: trial accounts allow only 2 sandboxes with
+  a 2-hour lifetime and fail with `trial_auto_stop_required`. boat.dev is EU
+  only, and the launcher paces creates to the plan's start limit (12 per
+  minute on the $20 plan).
+- All: each selected harness is signed in on the coordinator (Claude Code with
+  the subscription, Codex with ChatGPT where the runner supports it), and those
+  logins stay alive. Only access tokens are forwarded, never refresh tokens.
 
 New Cloudflare experiments are automatically restricted to **EU only**. There is
 no selector, and reproduced recipes keep their saved policy. The launcher checks
@@ -39,8 +50,9 @@ sandbox missing that report, or placed outside the policy, stops the launch
 without a replacement. The restriction covers the sandbox VM only, not the bridge
 or the path credentials take, so it is not a data-residency guarantee.
 
-Cloud runners currently support Claude Code subscription workers, parallel
-launch, and Channel or Live workspace swarms. On current servers the live
+Cloud runners support parallel launch and Channel or Live workspace swarms.
+Cloudflare runs Claude Code subscription workers only; AWS, OVH and boat.dev
+VMs run Claude Code and Codex. On current servers the live
 workspace is synced by the coordinator, so it works on cloud runners too (see
 [Communication Levels](#communication-levels)). Older servers may keep the live
 workspace on local Docker only. The server's availability for the run is always
@@ -50,7 +62,8 @@ Do not bypass guards, substitute API billing, or replace a lost sandbox or VM.
 A failure before release stops that batch without replacement. Preserve the
 downloaded evidence; checkpoints are not resumable VM snapshots. For setup or
 failures, read only the relevant section on the run's ScoreBench server:
-`/ui/docs/experiment-launching/#cloudflare-sandboxes` or
+`/ui/docs/experiment-launching/#cloudflare-sandboxes`,
+`/ui/docs/experiment-launching/#boatdev-workers` or
 `/ui/docs/experiment-launching/#worker-compute`. Older deployments may not offer
 cloud launches.
 
