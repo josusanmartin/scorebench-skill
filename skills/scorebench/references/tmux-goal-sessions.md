@@ -44,12 +44,16 @@ Goal set
 ## Create Prompt-Bound Run Keys
 
 Read [Coordinator runs](coordinator-runs.md) first. Render goals before
-creating tokens. A batch manifest is secret material:
+creating tokens. A batch manifest is secret material. Keep it, generated
+prompts and token env files outside any git checkout, so `git add -A` cannot
+commit live run tokens:
 
 ```bash
 umask 077
-MANIFEST="$PWD/.harness/agent-runs/condition-timestamp-manifest.json"
-WORKROOT="$PWD/.harness/agent-runs/condition-timestamp"
+RUN_STATE="${XDG_STATE_HOME:-$HOME/.local/state}/scorebench/agent-runs"
+install -d -m 0700 "$RUN_STATE"
+MANIFEST="$RUN_STATE/condition-timestamp-manifest.json"
+WORKROOT="$RUN_STATE/condition-timestamp"
 
 scorebench admin launch \
   --connector <connector> \
@@ -97,7 +101,7 @@ CLAUDE_BIN="$(command -v claude)"
 SCOREBENCH_URL="$(jq -r '.harness_url' "$MANIFEST")"
 MODEL="<actual-model>"
 EFFORT="<actual-effort>"
-SECRET_DIR="$PWD/.harness/agent-runs/condition-timestamp-secrets"
+SECRET_DIR="$RUN_STATE/condition-timestamp-secrets"
 install -d -m 0700 "$SECRET_DIR"
 
 jq -r '.jobs[] | @base64' "$MANIFEST" | while read -r job; do
@@ -124,7 +128,7 @@ CODEX_BIN="$(command -v codex)"
 SCOREBENCH_URL="$(jq -r '.harness_url' "$MANIFEST")"
 MODEL="<actual-model>"
 EFFORT="<actual-effort>"
-SECRET_DIR="$PWD/.harness/agent-runs/condition-timestamp-secrets"
+SECRET_DIR="$RUN_STATE/condition-timestamp-secrets"
 install -d -m 0700 "$SECRET_DIR"
 
 jq -r '.jobs[] | @base64' "$MANIFEST" | while read -r job; do
