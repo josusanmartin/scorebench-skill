@@ -23,6 +23,9 @@ class FakeOpenRouter(BaseHTTPRequestHandler):
         length = int(self.headers.get("Content-Length") or 0)
         if length:
             self.rfile.read(length)
+        if self.headers.get("Authorization") != "Bearer test-key":
+            self.send_error(401)
+            return
         body = (
             '{"id":"fake-generation","model":"test/model","choices":[],'
             '"usage":{"prompt_tokens":12,"completion_tokens":3,"total_tokens":15,'
@@ -284,6 +287,24 @@ class OpenRouterRunTests(unittest.TestCase):
         self.assertEqual(completed.stdout.strip(), "child-ok")
         self.assertIn("accounting inactive", completed.stderr)
 
+    def test_non_openrouter_upstream_fails_before_launch(self):
+        with tempfile.TemporaryDirectory() as root:
+            env = {**os.environ, "OPENROUTER_API_KEY": "secret", "OPENROUTER_BASE": "https://attacker.example",
+                   "OPENAI_BASE_URL": "https://openrouter.ai/api/v1"}
+            completed = subprocess.run(
+                [sys.executable, str(SCRIPTS / "openrouter_run.py"), "--harness", "Custom", "--workspace", root,
+                 "--", sys.executable, "-c", "print('must-not-run')"],
+                text=True, capture_output=True, check=False, env=env,
+            )
+        self.assertEqual(completed.returncode, 2)
+        self.assertNotIn("must-not-run", completed.stdout)
+        self.assertIn("OPENROUTER_BASE must be https://openrouter.ai", completed.stderr)
+
+    def test_anthropic_child_gets_proxy_sentinel_not_key(self):
+        env = {"OPENROUTER_API_KEY": "secret"}
+        runner._route_child("Claude Code", ["claude"], env, "anthropic", "http://127.0.0.1:1")
+        self.assertEqual(env["ANTHROPIC_AUTH_TOKEN"], runner.PROXY_KEY_SENTINEL)
+
     def test_detected_route_without_key_fails_closed(self):
         with tempfile.TemporaryDirectory() as root:
             env = {key: value for key, value in os.environ.items() if key != "OPENROUTER_API_KEY"}
@@ -331,6 +352,8 @@ request = urllib.request.Request(
 with urllib.request.urlopen(request) as response:
     response.read()
 subprocess.run([sys.executable, helper, 'flags', '--state', state], check=True)
+assert 'test-key' not in os.environ.values(), 'real OpenRouter key leaked to the child'
+print('child-key=' + os.environ['OPENROUTER_API_KEY'])
 """
                 env = {
                     **os.environ,
@@ -370,6 +393,7 @@ subprocess.run([sys.executable, helper, 'flags', '--state', state], check=True)
         self.assertIn("--cache-read-tokens 2", completed.stdout)
         self.assertIn("--cache-creation-tokens 1", completed.stdout)
         self.assertIn("--cost-usd 4.2e-06", completed.stdout)
+        self.assertIn(f"child-key={runner.PROXY_KEY_SENTINEL}", completed.stdout)
         self.assertIn("--usage-source openrouter", completed.stdout)
 
 

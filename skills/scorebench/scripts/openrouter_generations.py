@@ -9,7 +9,7 @@ import time
 import urllib.error
 import urllib.parse
 import urllib.request
-from openrouter_transport import openrouter_opener
+from openrouter_transport import checked_upstream, openrouter_opener
 
 STREAM_ERRORS = {"generation stream omitted final usage", "generation stream interrupted before final usage"}
 
@@ -83,7 +83,10 @@ def lookup_model_alias(model: str, canonical: str, *, opener, base, timeout: int
 
 def lookup_generation(generation_id: str, model: str, *, upstream: str, api_key: str,
                       require_final: bool = False) -> dict:
-    base = urllib.parse.urlsplit(upstream)
+    try:
+        base = urllib.parse.urlsplit(checked_upstream(upstream))
+    except ValueError:
+        raise ValueError("invalid OpenRouter generation lookup configuration") from None
     if (base.username or base.password or base.query or base.fragment
             or not (base.scheme == "https" or (base.scheme == "http" and base.hostname in ("127.0.0.1", "localhost", "::1")))
             or base.path.rstrip("/") not in ("", "/api/v1") or not api_key):

@@ -24,6 +24,18 @@ import openrouter_run as runner
 
 
 class TransportTests(unittest.TestCase):
+    def test_upstream_allowlist_only_admits_openrouter_or_loopback(self):
+        for url in ("https://openrouter.ai", "https://OpenRouter.ai/api", "http://127.0.0.1:8080",
+                    "http://localhost:1/api/v1", "http://[::1]:9"):
+            self.assertEqual(transport.checked_upstream(url), url)
+        for url in ("https://attacker.example", "http://openrouter.ai", "https://openrouter.ai.attacker.example",
+                    "https://user@openrouter.ai", "https://openrouter.ai/?x=1", "ftp://127.0.0.1",
+                    "https://openrouter.ai:bad", ""):
+            with self.assertRaises(ValueError, msg=url):
+                transport.checked_upstream(url)
+        with self.assertRaisesRegex(ValueError, "invalid OpenRouter generation lookup configuration"):
+            generations.lookup_generation("gen-x", "m", upstream="https://attacker.example", api_key="secret")
+
     def test_ipv4_is_default_and_auto_requires_an_explicit_override(self):
         self.assertEqual(transport.configured_ip_family({}), "4")
         for value in ("auto", "4", "6"):
