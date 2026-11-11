@@ -8,6 +8,7 @@ from pathlib import Path
 import sys
 
 from openrouter_generations import lookup_generation
+from openrouter_transport import checked_upstream
 from openrouter_journal import reconcile_requests
 
 
@@ -19,6 +20,10 @@ def main(argv=None):
     log = Path(args.workspace).resolve() / ".scorebench/openrouter/usage.jsonl"
     if not log.is_file():
         parser.error("no retained OpenRouter usage ledger in this workspace")
+    try:
+        upstream = checked_upstream(os.environ.get("OPENROUTER_BASE", "https://openrouter.ai"))
+    except ValueError as exc:
+        parser.error(str(exc))
     key = os.environ.get("OPENROUTER_API_KEY", "").strip()
     if not key:
         parser.error("OPENROUTER_API_KEY is required; do not pass it on the command line")
@@ -27,7 +32,7 @@ def main(argv=None):
         with open(str(log) + ".lock", "r+") as lock:
             fcntl.flock(lock, fcntl.LOCK_EX | fcntl.LOCK_NB)
             report = reconcile_requests(log, lambda generation_id, model: lookup_generation(
-                generation_id, model, upstream=os.environ.get("OPENROUTER_BASE", "https://openrouter.ai"),
+                generation_id, model, upstream=upstream,
                 api_key=key, require_final=True), check=args.check, abandoned=True)
         print(json.dumps({**report, "inference_started": False, "lifecycle_changed": False}))
         return 0 if report["accounting_complete"] else 1

@@ -23,7 +23,7 @@ from http.server import ThreadingHTTPServer
 from typing import Mapping, Sequence
 
 from openrouter_proxy import DEFAULT_UPSTREAM, Handler, UsageLog
-from openrouter_transport import IP_FAMILY_ENV, configured_ip_family
+from openrouter_transport import IP_FAMILY_ENV, PROXY_KEY_SENTINEL, checked_upstream, configured_ip_family
 from openrouter_agents import agent_kind, check_installation, model_metadata, route_agent, validate_route
 from openrouter_accounting import Publisher
 from openrouter_reentry import CONTINUABLE_FINISHES, SessionOutput, admit_reentry, cost_admission, resume_command, write_json
@@ -204,7 +204,7 @@ def _route_child(
 ) -> list[str]:
     if protocol == "anthropic":
         env["ANTHROPIC_BASE_URL"] = origin
-        env["ANTHROPIC_AUTH_TOKEN"] = env["OPENROUTER_API_KEY"]
+        env["ANTHROPIC_AUTH_TOKEN"] = PROXY_KEY_SENTINEL
         env["ANTHROPIC_API_KEY"] = ""
         return command
 
@@ -244,7 +244,7 @@ def _route_child(
 
 
 def _upstream_for(protocol: str, env: Mapping[str, str]) -> str:
-    upstream = env.get("OPENROUTER_BASE", DEFAULT_UPSTREAM).rstrip("/")
+    upstream = checked_upstream(env.get("OPENROUTER_BASE", DEFAULT_UPSTREAM)).rstrip("/")
     if protocol == "anthropic" and not upstream.endswith("/api"):
         upstream += "/api"
     return upstream
@@ -464,6 +464,12 @@ def main(argv: Sequence[str] | None = None) -> int:
             "OpenRouter routing was detected but OPENROUTER_API_KEY is not set; "
             "refusing to launch without authoritative cost accounting"
         )
+    try:
+        _upstream_for(protocol, env)
+    except ValueError as exc:
+        parser.error(str(exc))
+    # The proxy alone holds the key; the harness authenticates to it with a sentinel.
+    env["OPENROUTER_API_KEY"] = PROXY_KEY_SENTINEL
 
     metadata = None
     if agent_kind(args.harness):

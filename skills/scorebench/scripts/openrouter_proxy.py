@@ -44,7 +44,7 @@ from openrouter_journal import RequestJournal, append_record, invalid_usage, rea
 from openrouter_gaps import ACK_FILE, load_ack
 from openrouter_failures import POLICY, INFRASTRUCTURE_CODES, classify_error, model_output, exclusion_records, response_evidence, retry_delay
 from openrouter_transport import (
-    UnsentRequestError, _HTTPConnection, _HTTPSConnection,
+    UnsentRequestError, _HTTPConnection, _HTTPSConnection, checked_upstream,
     configured_ip_family, openrouter_opener,
 )
 
@@ -578,6 +578,7 @@ def main() -> int:
     args = parser.parse_args()
     try:
         ip_family = configured_ip_family()
+        checked_upstream(args.upstream)
     except ValueError as exc:
         parser.error(str(exc))
 

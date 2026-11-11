@@ -208,6 +208,13 @@ or `SCOREBENCH_OPENROUTER=0` to disable wrapping explicitly. A detected route
 without a key fails closed. Explicit Pi/OpenCode OpenRouter selection cannot
 disable accounting with `SCOREBENCH_OPENROUTER=0`.
 
+Only the launcher's loopback proxy holds the key. The harness process sees
+`OPENROUTER_API_KEY` (and Claude Code's `ANTHROPIC_AUTH_TOKEN`) set to a
+placeholder that the proxy replaces, so tool output and transcripts cannot echo
+the real key. This is not a sandbox: a same-user process can still read the
+launcher's environment. `OPENROUTER_BASE` must be `https://openrouter.ai` or a
+loopback test server; any other host fails before launch.
+
 The launcher selects OpenRouter's native Anthropic skin for Claude Code and its
 OpenAI-compatible API for Codex and other harnesses. It replaces an
 existing Codex provider `base_url` override in place so a later command-line

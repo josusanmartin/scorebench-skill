@@ -3,6 +3,7 @@ from functools import partial
 from http.client import HTTPConnection, HTTPSConnection, HTTPException
 import os
 import socket
+import urllib.parse
 import urllib.request
 
 IP_FAMILY_ENV = "SCOREBENCH_OPENROUTER_IP_FAMILY"
@@ -92,6 +93,27 @@ class _NoRedirect(urllib.request.HTTPRedirectHandler):
     def redirect_request(self, *args, **kwargs):
         # A redirected connection failure cannot prove the first POST was unsent.
         return None
+
+
+OPENROUTER_HOSTS = {"openrouter.ai"}
+LOOPBACK_HOSTS = {"127.0.0.1", "localhost", "::1"}
+# Children see this instead of the OpenRouter key; the proxy replaces it.
+PROXY_KEY_SENTINEL = "scorebench-openrouter-proxy"
+
+
+def checked_upstream(url: str) -> str:
+    """Return url only if it is OpenRouter or a loopback test double: the API key is sent there."""
+    try:
+        parts = urllib.parse.urlsplit(url)
+        host = parts.hostname
+        parts.port
+    except ValueError:
+        host = None
+    if (not host or parts.username or parts.password or parts.query or parts.fragment
+            or not ((parts.scheme == "https" and host in OPENROUTER_HOSTS)
+                    or (parts.scheme in ("http", "https") and host in LOOPBACK_HOSTS))):
+        raise ValueError("OPENROUTER_BASE must be https://openrouter.ai (or a loopback test server)")
+    return url
 
 
 def openrouter_opener():
