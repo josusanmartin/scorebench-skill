@@ -87,8 +87,13 @@ accepted but open spans are not extended indefinitely. Unsupported background
 jobs and unclear gaps remain unknown rather than being guessed active or idle.
 
 The local state and retry queue are owner-only. Evidence is split into at most
-60-second leases and uploaded at most once per minute. Failed uploads retain the
-same idempotent spans for retry; the observer never creates replacement IDs.
+60-second leases and uploaded at most once per minute. Each batch is frozen in the
+local state before its first send and resent byte for byte until the server
+answers, so an upload whose response was lost replays idempotently; the observer
+never creates replacement IDs. If the server already holds different evidence for
+a batch's intervals, the batch is settled rather than retried. Failed uploads back
+off exponentially up to ten minutes and honor Retry-After, and a revoked token
+(401/403) stops the registration's uploads.
 
 ## Privacy Boundary
 
