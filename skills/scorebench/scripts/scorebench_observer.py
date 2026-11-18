@@ -37,10 +37,15 @@ MAX_READ_BYTES_PER_CYCLE = 8 * 1024 * 1024
 MAX_PENDING_INTERVALS = 10_000
 MAX_UPLOAD_SPANS = 200
 MAX_RESPONSE_BYTES = 1024 * 1024
+# Consecutive failed uploads back off exponentially up to this delay.
+MAX_UPLOAD_BACKOFF_SECONDS = 600.0
 
 
 class ObserverError(RuntimeError):
-    pass
+    def __init__(self, message: str, *, status: int | None = None, retry_after: float | None = None):
+        super().__init__(message)
+        self.status = status
+        self.retry_after = retry_after
 
 
 def utcnow() -> datetime:
@@ -694,7 +699,13 @@ def post_json(url: str, token: str, payload: dict[str, Any]) -> dict[str, Any]:
             raw = response.read(MAX_RESPONSE_BYTES + 1)
     except HTTPError as exc:
         detail = exc.read(4096).decode("utf-8", errors="replace")
-        raise ObserverError(f"ScoreBench returned HTTP {exc.code}: {detail}") from exc
+        try:
+            retry_after = float(exc.headers.get("Retry-After")) if exc.headers else None
+        except (TypeError, ValueError):
+            retry_after = None
+        raise ObserverError(
+            f"ScoreBench returned HTTP {exc.code}: {detail}", status=exc.code, retry_after=retry_after,
+        ) from exc
     except (URLError, TimeoutError, OSError) as exc:
         raise ObserverError(f"ScoreBench timing upload failed: {exc}") from exc
     if len(raw) > MAX_RESPONSE_BYTES:
@@ -709,33 +720,65 @@ def post_json(url: str, token: str, payload: dict[str, Any]) -> dict[str, Any]:
 
 
 def upload_pending(state: dict[str, Any], now: float, *, force: bool = False) -> bool:
-    evidence, cutoff = interval_payload(state)
-    if not evidence or cutoff is None:
-        return False
+    """Upload pending evidence through a persisted outbox.
+
+    A batch is frozen in the state before its first send and resent byte for byte
+    until the server answers, so an upload that committed but lost its response is
+    replayed idempotently. Rebuilding it instead changed metadata under the same
+    span ids, and the server rejected every later retry as a conflict (about 20,000
+    rejections during the 2026-11-17 swarm run).
+    """
+    outbox = state.get("outbox")
+    if not isinstance(outbox, dict) or not outbox.get("evidence"):
+        evidence, cutoff = interval_payload(state)
+        if not evidence or cutoff is None:
+            return False
+        outbox = {"evidence": evidence, "cutoff": cutoff}
+        state["outbox"] = outbox
     last_attempt = float(state.get("last_upload_attempt_seconds") or 0)
-    if not force and now - last_attempt < LEASE_SECONDS:
+    if not force and now - last_attempt < float(state.get("upload_retry_seconds") or LEASE_SECONDS):
         return False
     state["last_upload_attempt_seconds"] = now
     payload = {
         "observer_id": state["observer_id"],
         "observer_boot_id": state["observer_boot_id"],
-        "evidence": evidence,
+        "evidence": outbox["evidence"],
     }
     try:
         response = post_json(str(state["scorebench_url"]), str(state["token"]), payload)
     except ObserverError as exc:
         state["last_error"] = str(exc)[:500]
         state["last_error_at"] = timestamp_iso(now)
+        if exc.status == 400 and "already exists with different content" in str(exc):
+            # The server already holds evidence for these exact intervals (span ids
+            # are derived from the interval), written by an earlier attempt. Retrying
+            # can never succeed, so treat the batch as settled and move on.
+            settle_outbox(state, outbox)
+            state["conflicting_batches"] = int(state.get("conflicting_batches") or 0) + 1
+            return False
+        if exc.status in {401, 403}:
+            # The run's observer token was revoked or the run ended: stop uploading.
+            state["enabled"] = False
+            return False
+        failures = int(state.get("upload_failures") or 0) + 1
+        state["upload_failures"] = failures
+        delay = min(MAX_UPLOAD_BACKOFF_SECONDS, LEASE_SECONDS * 2 ** min(failures, 10))
+        state["upload_retry_seconds"] = max(delay, exc.retry_after or 0)
         return False
-    consume_pending_through(state, cutoff)
-    state["next_sequence"] = int(state.get("next_sequence") or 1) + len(evidence)
+    settle_outbox(state, outbox)
     state["last_upload_at"] = timestamp_iso(now)
     state["last_error"] = ""
     state["last_projection"] = response.get("timing_v2")
-    state["uploaded_span_count"] = int(state.get("uploaded_span_count") or 0) + len(
-        evidence
-    )
+    state["uploaded_span_count"] = int(state.get("uploaded_span_count") or 0) + len(outbox["evidence"])
     return True
+
+
+def settle_outbox(state: dict[str, Any], outbox: dict[str, Any]) -> None:
+    consume_pending_through(state, float(outbox["cutoff"]))
+    state["next_sequence"] = int(state.get("next_sequence") or 1) + len(outbox["evidence"])
+    state.pop("outbox", None)
+    state.pop("upload_failures", None)
+    state.pop("upload_retry_seconds", None)
 
 
 def registration_paths() -> list[Path]:
