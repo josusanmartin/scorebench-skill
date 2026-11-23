@@ -101,6 +101,48 @@ class ClaudeCostStateTests(unittest.TestCase):
         result = self.resumed_ledger((30, 3, 4.5e-05), dict(input_tokens=30, output_tokens=3))
         self.assertEqual(result["inputTokens"], 40)
 
+    def compacted_ledger(self, version, second=(32, 322, 50, 1950000, 0.396818), third=(42, 323, 50, 1950000, 0.396878)):
+        # Captured from Claude Code 2.1.328: the resumed second invocation compacts its
+        # context. That call (7/300/50/960000) is in modelUsage but not in usage.
+        def counters(*values):
+            return {"opus": dict(zip(usage.CLAUDE_LEDGER_KEYS, values))}
+        def turn(*values):
+            return dict(zip(usage.CLAUDE_RESULT_USAGE_KEYS.values(), values))
+        records = []
+        for name, total, own in (("first", (10, 1, 0, 0, 6e-05), (10, 1, 0, 0)),
+                                 ("second", second, (15, 21, 0, 990000)),
+                                 ("third", third, (10, 1, 0, 0))):
+            records += [{"type": "scorebench_invocation", "id": name},
+                        {"type": "system", "subtype": "init", "claude_code_version": version},
+                        {"type": "result", "uuid": name, "session_id": "session-1",
+                         "modelUsage": counters(*total), "usage": turn(*own)}]
+        with tempfile.TemporaryDirectory() as directory:
+            path = Path(directory) / "results.jsonl"
+            path.write_text("".join(json.dumps(record) + "\n" for record in records))
+            return usage.claude_result_ledger(path)["modelUsage"]["opus"]
+
+    def test_compaction_in_a_resumed_session_is_not_counted_twice(self):
+        for version in ("2.1.281", "2.1.328", "3.0.0"):
+            result = self.compacted_ledger(version)
+            self.assertEqual([result[key] for key in usage.CLAUDE_LEDGER_KEYS[:4]], [42, 323, 50, 1950000])
+            self.assertAlmostEqual(result["costUSD"], 0.396878)
+
+    def test_interrupted_response_missing_from_usage_is_not_counted_twice(self):
+        previous = {"opus": dict(zip(usage.CLAUDE_LEDGER_KEYS, (100, 50, 20, 1000, 1.0)))}
+        current = {"opus": dict(zip(usage.CLAUDE_LEDGER_KEYS, (130, 90, 20, 4000, 2.0)))}
+        own = dict(zip(usage.CLAUDE_RESULT_USAGE_KEYS.values(), (30, 10, 0, 1000)))
+        self.assertTrue(usage.claude_resume_is_cumulative(previous, current, own, "2.1.328"))
+        for version in ("2.1.280", "2.1.259", "", None, "2.1.328-beta", 2):
+            self.assertFalse(usage.claude_resume_is_cumulative(previous, current, own, version))
+
+    def test_unexplained_growth_without_a_known_release_is_still_added(self):
+        self.assertEqual(self.compacted_ledger("2.1.259")["inputTokens"], 52)
+        # Even a known release is added when its growth cannot contain the turn's own usage.
+        previous = {"opus": dict(zip(usage.CLAUDE_LEDGER_KEYS, (10, 1, 0, 0, 0.1)))}
+        current = {"opus": dict(zip(usage.CLAUDE_LEDGER_KEYS, (30, 3, 0, 0, 0.3)))}
+        own = dict(zip(usage.CLAUDE_RESULT_USAGE_KEYS.values(), (30, 3, 0, 0)))
+        self.assertFalse(usage.claude_resume_is_cumulative(previous, current, own, "2.1.328"))
+
     def test_empty_native_report_certifies_only_zero_usage(self):
         with tempfile.TemporaryDirectory() as directory:
             transcript = Path(directory) / "session.jsonl"
