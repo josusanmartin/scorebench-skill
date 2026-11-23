@@ -363,6 +363,7 @@ def claude_usage_total(usage: dict[str, Any]) -> int | None:
 def claude_result_ledger(path: Path) -> dict[str, Any] | None:
     results: dict[str, dict] = {}
     invocation = None
+    versions: dict[str | None, Any] = {}
     seen_results: dict[str, dict] = {}
     for line in path.read_text(encoding="utf-8").splitlines():
         try:
@@ -375,6 +376,9 @@ def claude_result_ledger(path: Path) -> dict[str, Any] | None:
             invocation = event.get("id")
             if not isinstance(invocation, str) or not invocation or invocation in results:
                 raise SystemExit("invalid Claude invocation boundary")
+            continue
+        if event.get("type") == "system" and event.get("subtype") == "init":
+            versions[invocation] = event.get("claude_code_version")
             continue
         if event.get("type") != "result" or event.get("parent_tool_use_id"):
             continue
@@ -394,7 +398,7 @@ def claude_result_ledger(path: Path) -> dict[str, Any] | None:
         raise SystemExit("mixed Claude terminal sessions")
     models: dict[str, dict] = {}
     previous: dict[str, dict] | None = None
-    for result in results.values():
+    for invocation, result in results.items():
         current: dict[str, dict] = {}
         for model, counters in result["modelUsage"].items():
             if not isinstance(counters, dict):
@@ -409,7 +413,8 @@ def claude_result_ledger(path: Path) -> dict[str, Any] | None:
                 checked[key] = value
         # Newer Claude Code reports session-cumulative modelUsage after --resume;
         # older releases report each invocation alone. Add only the new part.
-        cumulative = previous is not None and claude_resume_is_cumulative(previous, current, result.get("usage"))
+        cumulative = previous is not None and claude_resume_is_cumulative(
+            previous, current, result.get("usage"), versions.get(invocation))
         for model, counters in current.items():
             combined = models.setdefault(model, {})
             for key, value in counters.items():
@@ -425,24 +430,39 @@ CLAUDE_RESULT_USAGE_KEYS = {"inputTokens": "input_tokens", "outputTokens": "outp
                             "cacheReadInputTokens": "cache_read_input_tokens"}
 
 
-def claude_resume_is_cumulative(previous: dict[str, dict], current: dict[str, dict], usage: Any) -> bool:
-    """True only when a resumed result is exactly the previous totals plus its own usage.
+# First release checked to report session totals after --resume (2.1.259 did not).
+CLAUDE_CUMULATIVE_RESUME_VERSION = (2, 1, 281)
 
-    The terminal `usage` always covers just this invocation. A cumulative report
-    therefore grows by exactly that much for the main model; a per-invocation
-    report equals it instead, which cannot also match once the earlier
-    invocation used tokens. Anything ambiguous keeps the adding behavior, which
-    may overcount but never undercounts.
+
+def claude_reports_session_totals(version: Any) -> bool:
+    match = re.fullmatch(r"(\d+)\.(\d+)\.(\d+)", version) if isinstance(version, str) else None
+    return match is not None and tuple(map(int, match.groups())) >= CLAUDE_CUMULATIVE_RESUME_VERSION
+
+
+def claude_resume_is_cumulative(previous: dict[str, dict], current: dict[str, dict], usage: Any,
+                                version: Any = None) -> bool:
+    """True only when a resumed result covers the previous totals plus its own usage.
+
+    The terminal `usage` covers just this invocation, and not all of it: a
+    context compaction or an interrupted response is billed in `modelUsage`
+    alone. A cumulative report therefore grows by at least `usage` for the main
+    model. A release known to report session totals may grow by more; any other
+    release must match exactly, because a per-invocation report could also be
+    larger than the previous one. Anything ambiguous keeps the adding behavior,
+    which may overcount but never undercounts.
     """
     if not isinstance(usage, dict) or not previous or not set(previous).issubset(current):
         return False
     if any(current[model][key] < previous[model][key] for model in previous for key in CLAUDE_LEDGER_KEYS):
         return False
+    session_totals = claude_reports_session_totals(version)
     for model, earlier in previous.items():
         if not any(earlier[key] for key in CLAUDE_RESULT_USAGE_KEYS):
             continue
-        if all(type(usage.get(field)) is int and current[model][key] - earlier[key] == usage[field]
-               for key, field in CLAUDE_RESULT_USAGE_KEYS.items()):
+        if not all(type(usage.get(field)) is int for field in CLAUDE_RESULT_USAGE_KEYS.values()):
+            continue
+        extra = [current[model][key] - earlier[key] - usage[field] for key, field in CLAUDE_RESULT_USAGE_KEYS.items()]
+        if not any(extra) or (session_totals and min(extra) >= 0):
             return True
     return False
 
