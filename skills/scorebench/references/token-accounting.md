@@ -127,8 +127,11 @@ Haiku, and reports their native USD costs including cache reads. Single-prompt
 invocation results are deduplicated by UUID and accumulated across supervised
 same-session reentries. Newer Claude Code releases report session-cumulative
 `modelUsage` after `--resume`; the helper recognizes that report (previous
-totals plus the result's own `usage`) and adds only the new part, so a resumed
-session is never counted twice. Mixed sessions and regressing counters fail closed.
+totals plus the result's own `usage`) and adds only the new part. A compaction
+or an interrupted response is billed in `modelUsage` but missing from `usage`,
+so a release known to report session totals (2.1.281 or newer, read from the
+stream's `init` record) may grow by more than `usage`; other releases must match
+exactly or are added. Mixed sessions and regressing counters fail closed.
 Live transcript snapshots can precede the auxiliary-model final report; use
 supervisor-reconciled final totals for completed-run comparisons. Missing final
 model usage is an accounting warning/failure, not evidence of zero helper spend.
